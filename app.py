@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import secrets
 import sqlite3
@@ -235,6 +236,10 @@ SHIFT_NOTES_SEED = [
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.getenv("BAROS_SECRET_KEY", DEFAULT_SECRET)
+app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = os.getenv("BAROS_COOKIE_SECURE", "false").lower() == "true"
 
 
 def utc_now_iso() -> str:
@@ -269,6 +274,16 @@ def close_db(error=None) -> None:
         db.close()
 
 
+@app.after_request
+def apply_response_headers(response):
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "SAMEORIGIN"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    if request.path.startswith("/api/") or request.path == "/painel":
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 def init_db() -> None:
     db = sqlite3.connect(DATABASE_PATH)
     db.row_factory = sqlite3.Row
@@ -288,6 +303,14 @@ def init_db() -> None:
             horario_pedido TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'pending',
             valor_total REAL NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS turnos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            aberto_em TEXT NOT NULL,
+            fechado_em TEXT,
+            status TEXT NOT NULL DEFAULT 'open',
+            resumo_fechamento TEXT
         );
 
         CREATE TABLE IF NOT EXISTS itens_pedido (
@@ -322,6 +345,10 @@ def init_db() -> None:
         """
     )
 
+    pedido_columns = [row["name"] for row in db.execute("PRAGMA table_info(pedidos)").fetchall()]
+    if "turno_id" not in pedido_columns:
+        db.execute("ALTER TABLE pedidos ADD COLUMN turno_id INTEGER")
+
     for beverage in BEVERAGE_SEED:
         exists = db.execute("SELECT 1 FROM bebidas WHERE nome = ?", (beverage["nome"],)).fetchone()
         if not exists:
@@ -355,6 +382,24 @@ def init_db() -> None:
                 {**note, "created_at": utc_now_iso()},
             )
 
+    open_shift = db.execute("SELECT id FROM turnos WHERE status = 'open' ORDER BY id DESC LIMIT 1").fetchone()
+    if not open_shift:
+        cursor = db.execute(
+            """
+            INSERT INTO turnos (aberto_em, status)
+            VALUES (?, 'open')
+            """,
+            (utc_now_iso(),),
+        )
+        open_shift_id = cursor.lastrowid
+    else:
+        open_shift_id = open_shift["id"]
+
+    db.execute(
+        "UPDATE pedidos SET turno_id = ? WHERE turno_id IS NULL",
+        (open_shift_id,),
+    )
+
     db.commit()
     db.close()
 
@@ -380,6 +425,39 @@ def generate_order_code() -> str:
         ).fetchone()
         if not exists:
             return code
+
+
+def get_current_shift_id() -> int:
+    db = get_db()
+    row = db.execute(
+        "SELECT id FROM turnos WHERE status = 'open' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    if row:
+        return row["id"]
+
+    cursor = db.execute(
+        """
+        INSERT INTO turnos (aberto_em, status)
+        VALUES (?, 'open')
+        """,
+        (utc_now_iso(),),
+    )
+    db.commit()
+    return cursor.lastrowid
+
+
+def open_new_shift() -> int:
+    db = get_db()
+    cursor = db.execute(
+        """
+        INSERT INTO turnos (aberto_em, status)
+        VALUES (?, 'open')
+        """,
+        (utc_now_iso(),),
+    )
+    db.execute("UPDATE shift_notes SET status = 'open'")
+    db.commit()
+    return cursor.lastrowid
 
 
 def calculate_inventory_status(stock_level: float, par_level: float) -> str:
@@ -558,18 +636,52 @@ def serialize_order(row: sqlite3.Row) -> dict:
     }
 
 
-def fetch_orders(status: str | None = None, limit: int | None = None) -> list[dict]:
+def fetch_orders(status: str | None = None, limit: int | None = None, shift_id: int | None = None) -> list[dict]:
+    current_shift_id = shift_id or get_current_shift_id()
     query = "SELECT id, codigo_retirada, horario_pedido, status, valor_total, NULL AS completed_at FROM pedidos"
     params: list = []
+    conditions = ["turno_id = ?"]
+    params.append(current_shift_id)
     if status:
-        query += " WHERE status = ?"
+        conditions.append("status = ?")
         params.append(status)
+    query += " WHERE " + " AND ".join(conditions)
     query += " ORDER BY horario_pedido DESC"
     if limit:
         query += " LIMIT ?"
         params.append(limit)
     rows = get_db().execute(query, params).fetchall()
     return [serialize_order(row) for row in rows]
+
+
+def validate_order_payload(selected_items: list[dict]) -> tuple[list[dict], str | None]:
+    if not isinstance(selected_items, list):
+        return [], "Formato de itens invalido."
+    if not selected_items:
+        return [], "Nenhum item enviado."
+
+    normalized_items = []
+    total_quantity = 0
+    for entry in selected_items:
+        if not isinstance(entry, dict):
+            return [], "Formato de item invalido."
+        try:
+            bebida_id = int(entry.get("id", 0))
+            quantidade = int(entry.get("quantity", 0))
+        except (TypeError, ValueError):
+            return [], "Item com quantidade invalida."
+        if bebida_id <= 0 or quantidade <= 0:
+            continue
+        if quantidade > 24:
+            return [], "Quantidade por bebida acima do limite permitido."
+        total_quantity += quantidade
+        normalized_items.append({"id": bebida_id, "quantity": quantidade})
+
+    if total_quantity > 40:
+        return [], "Pedido acima do limite permitido."
+    if not normalized_items:
+        return [], "Itens invalidos."
+    return normalized_items, None
 
 
 def fetch_logistics_snapshot() -> dict:
@@ -634,36 +746,41 @@ def fetch_logistics_snapshot() -> dict:
     }
 
 
-def build_sales_report() -> dict:
+def build_sales_report(shift_id: int | None = None) -> dict:
     db = get_db()
+    current_shift_id = shift_id or get_current_shift_id()
     totals = db.execute(
         """
         SELECT
             COUNT(*) AS total_pedidos,
             COALESCE(SUM(valor_total), 0) AS total_vendido
         FROM pedidos
+        WHERE turno_id = ?
         """
-    ).fetchone()
+    , (current_shift_id,)).fetchone()
 
     by_beverage = db.execute(
         """
         SELECT b.nome, SUM(ip.quantidade) AS quantidade
         FROM itens_pedido ip
         JOIN bebidas b ON b.id = ip.bebida_id
+        JOIN pedidos p ON p.id = ip.pedido_id
+        WHERE p.turno_id = ?
         GROUP BY b.id, b.nome
         ORDER BY quantidade DESC, b.nome ASC
         """
-    ).fetchall()
+    , (current_shift_id,)).fetchall()
 
     peak = db.execute(
         """
         SELECT strftime('%H', horario_pedido) AS hora, COUNT(*) AS total
         FROM pedidos
+        WHERE turno_id = ?
         GROUP BY hora
         ORDER BY total DESC, hora ASC
         LIMIT 1
         """
-    ).fetchone()
+    , (current_shift_id,)).fetchone()
 
     top_item = by_beverage[0] if by_beverage else None
 
@@ -689,13 +806,16 @@ def build_sales_report() -> dict:
     }
 
 
-def build_order_summary() -> dict:
-    report = build_sales_report()
+def build_order_summary(shift_id: int | None = None) -> dict:
+    current_shift_id = shift_id or get_current_shift_id()
+    report = build_sales_report(current_shift_id)
     pending = get_db().execute(
-        "SELECT COUNT(*) AS total FROM pedidos WHERE status = 'pending'"
+        "SELECT COUNT(*) AS total FROM pedidos WHERE status = 'pending' AND turno_id = ?",
+        (current_shift_id,),
     ).fetchone()["total"]
     completed = get_db().execute(
-        "SELECT COUNT(*) AS total FROM pedidos WHERE status = 'completed'"
+        "SELECT COUNT(*) AS total FROM pedidos WHERE status = 'completed' AND turno_id = ?",
+        (current_shift_id,),
     ).fetchone()["total"]
     average_ticket = 0.0
     if report["total_pedidos"]:
@@ -711,9 +831,10 @@ def build_order_summary() -> dict:
     }
 
 
-def build_closeout_report() -> dict:
+def build_closeout_report(shift_id: int | None = None) -> dict:
     db = get_db()
-    sales = build_sales_report()
+    current_shift_id = shift_id or get_current_shift_id()
+    sales = build_sales_report(current_shift_id)
     totals = db.execute(
         """
         SELECT
@@ -721,8 +842,10 @@ def build_closeout_report() -> dict:
             COALESCE(SUM(b.custo_estimado * ip.quantidade), 0) AS custo_total
         FROM itens_pedido ip
         JOIN bebidas b ON b.id = ip.bebida_id
+        JOIN pedidos p ON p.id = ip.pedido_id
+        WHERE p.turno_id = ?
         """
-    ).fetchone()
+    , (current_shift_id,)).fetchone()
 
     return {
         "total_vendido": sales["total_vendido"],
@@ -733,6 +856,32 @@ def build_closeout_report() -> dict:
         "custo_total": round(totals["custo_total"] or 0, 2),
         "lucro_estimado": round(sales["total_vendido"] - (totals["custo_total"] or 0), 2),
         "quantidade_por_bebida": sales["quantidade_por_bebida"],
+    }
+
+
+def archive_current_shift_and_open_next() -> dict:
+    db = get_db()
+    current_shift_id = get_current_shift_id()
+    report = build_closeout_report(current_shift_id)
+
+    db.execute(
+        """
+        UPDATE turnos
+        SET status = 'closed', fechado_em = ?, resumo_fechamento = ?
+        WHERE id = ?
+        """,
+        (utc_now_iso(), json.dumps(report), current_shift_id),
+    )
+    new_shift_id = open_new_shift()
+    return {
+        "closed_shift_id": current_shift_id,
+        "new_shift_id": new_shift_id,
+        "report": report,
+        "summary": build_order_summary(new_shift_id),
+        "pending": fetch_orders(status="pending", shift_id=new_shift_id),
+        "completed": fetch_orders(status="completed", limit=20, shift_id=new_shift_id),
+        "logistics": fetch_logistics_snapshot(),
+        "generated_at": display_datetime(utc_now_iso()),
     }
 
 
@@ -784,12 +933,38 @@ def get_orders():
     )
 
 
+@app.get("/api/reports/shifts")
+@login_required
+def list_closed_shifts():
+    rows = get_db().execute(
+        """
+        SELECT id, aberto_em, fechado_em, resumo_fechamento
+        FROM turnos
+        WHERE status = 'closed'
+        ORDER BY id DESC
+        LIMIT 10
+        """
+    ).fetchall()
+    shifts = []
+    for row in rows:
+        summary = json.loads(row["resumo_fechamento"] or "{}")
+        shifts.append(
+            {
+                "id": row["id"],
+                "opened_at": display_datetime(row["aberto_em"]),
+                "closed_at": display_datetime(row["fechado_em"]),
+                "summary": summary,
+            }
+        )
+    return jsonify({"shifts": shifts})
+
+
 @app.post("/api/orders")
 def create_order():
     payload = request.get_json(silent=True) or {}
-    selected_items = payload.get("items") or []
-    if not selected_items:
-        return jsonify({"error": "Nenhum item enviado."}), 400
+    selected_items, validation_error = validate_order_payload(payload.get("items") or [])
+    if validation_error:
+        return jsonify({"error": validation_error}), 400
 
     db = get_db()
     bebidas_por_id = {
@@ -800,8 +975,8 @@ def create_order():
     itens = []
     valor_total = 0.0
     for entry in selected_items:
-        bebida_id = int(entry.get("id", 0))
-        quantidade = int(entry.get("quantity", 0))
+        bebida_id = entry["id"]
+        quantidade = entry["quantity"]
         bebida = bebidas_por_id.get(bebida_id)
         if not bebida or quantidade <= 0:
             continue
@@ -835,12 +1010,13 @@ def create_order():
 
     codigo = generate_order_code()
     horario = utc_now_iso()
+    turno_id = get_current_shift_id()
     cursor = db.execute(
         """
-        INSERT INTO pedidos (codigo_retirada, horario_pedido, status, valor_total)
-        VALUES (?, ?, 'pending', ?)
+        INSERT INTO pedidos (codigo_retirada, horario_pedido, status, valor_total, turno_id)
+        VALUES (?, ?, 'pending', ?, ?)
         """,
-        (codigo, horario, round(valor_total, 2)),
+        (codigo, horario, round(valor_total, 2), turno_id),
     )
     pedido_id = cursor.lastrowid
 
@@ -868,40 +1044,45 @@ def create_order():
 @login_required
 def complete_order(code: str):
     db = get_db()
+    current_shift_id = get_current_shift_id()
     row = db.execute(
-        "SELECT id FROM pedidos WHERE codigo_retirada = ?",
-        (code,),
+        "SELECT id, status FROM pedidos WHERE codigo_retirada = ? AND turno_id = ?",
+        (code, current_shift_id),
     ).fetchone()
     if not row:
         return jsonify({"error": "Pedido nao encontrado."}), 404
+    if row["status"] == "completed":
+        updated = db.execute(
+            "SELECT id, codigo_retirada, horario_pedido, status, valor_total, NULL AS completed_at FROM pedidos WHERE codigo_retirada = ? AND turno_id = ?",
+            (code, current_shift_id),
+        ).fetchone()
+        return jsonify({"order": serialize_order(updated), "summary": build_order_summary()})
 
     db.execute(
-        "UPDATE pedidos SET status = 'completed' WHERE codigo_retirada = ?",
-        (code,),
+        "UPDATE pedidos SET status = 'completed' WHERE codigo_retirada = ? AND turno_id = ?",
+        (code, current_shift_id),
     )
     db.commit()
 
     updated = db.execute(
-        "SELECT id, codigo_retirada, horario_pedido, status, valor_total, NULL AS completed_at FROM pedidos WHERE codigo_retirada = ?",
-        (code,),
+        "SELECT id, codigo_retirada, horario_pedido, status, valor_total, NULL AS completed_at FROM pedidos WHERE codigo_retirada = ? AND turno_id = ?",
+        (code, current_shift_id),
     ).fetchone()
     return jsonify({"order": serialize_order(updated), "summary": build_order_summary()})
 
 
-@app.get("/api/reports/closeout")
+@app.post("/api/reports/closeout")
 @login_required
 def closeout_report():
-    return jsonify(build_closeout_report())
+    return jsonify(archive_current_shift_and_open_next())
 
 
 @app.post("/api/reports/reset")
 @login_required
 def reset_data():
-    db = get_db()
-    db.execute("DELETE FROM itens_pedido")
-    db.execute("DELETE FROM pedidos")
-    db.commit()
-    return jsonify({"ok": True, "summary": build_order_summary()})
+    archived = archive_current_shift_and_open_next()
+    archived["ok"] = True
+    return jsonify(archived)
 
 
 @app.post("/api/logistics/inventory/<int:item_id>")

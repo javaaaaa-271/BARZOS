@@ -62,6 +62,7 @@ Copie `.env.example` e ajuste:
 - `BAROS_HOST`: host de execucao
 - `BAROS_PORT`: porta de execucao
 - `BAROS_DEBUG`: `true` ou `false`
+- `BAROS_COOKIE_SECURE`: usar `true` quando estiver servindo por HTTPS
 
 ## Publicando na internet
 
@@ -105,6 +106,7 @@ Para manter os dados, use o disco persistente do provedor ou depois migre para P
 
 - `inventory_items`: estoque basico e nivel minimo
 - `shift_notes`: checklist e recados do turno
+- `turnos`: fechamento por turno sem perder historico
 
 Essa base permite evoluir para:
 
