@@ -1,0 +1,314 @@
+{% extends "base.html" %}
+
+{% block title %}BarOS | Turno {{ shift.id }}{% endblock %}
+{% block body_class %}dashboard-body{% endblock %}
+
+{% block content %}
+<main class="dashboard-shell history-shell">
+  <header class="dashboard-header">
+    <div>
+      <p class="eyebrow">Detalhes do turno</p>
+      <h1>Turno {{ shift.id }}</h1>
+      <p class="dashboard-user-meta">{{ shift.opened_at }} ate {{ shift.closed_at }} · {{ shift.duration }}</p>
+    </div>
+    <div class="dashboard-actions">
+      <a class="secondary-button" href="{{ url_for('shift_history_page') }}">Voltar ao historico</a>
+      <a class="secondary-button" href="{{ url_for('dashboard') }}">Painel</a>
+      {% if current_user.can_manage_bar %}
+      <a class="secondary-button" href="{{ url_for('export_shift_pdf', shift_id=shift.id) }}">Exportar PDF</a>
+      {% endif %}
+    </div>
+  </header>
+
+  <section class="stats-grid detail-stats-grid">
+    <article class="stat-card">
+      <span>Total vendido</span>
+      <strong>R$ {{ "%.2f"|format(shift.summary.total_vendido or 0) }}</strong>
+    </article>
+    <article class="stat-card">
+      <span>Pedidos</span>
+      <strong>{{ shift.summary.total_pedidos or 0 }}</strong>
+    </article>
+    <article class="stat-card">
+      <span>Ticket medio</span>
+      <strong>R$ {{ "%.2f"|format(shift.summary.ticket_medio or 0) }}</strong>
+    </article>
+    <article class="stat-card">
+      <span>Custo estimado</span>
+      <strong>R$ {{ "%.2f"|format(shift.summary.custo_estimado or 0) }}</strong>
+    </article>
+    <article class="stat-card">
+      <span>Lucro estimado</span>
+      <strong>R$ {{ "%.2f"|format(shift.summary.lucro_estimado or 0) }}</strong>
+    </article>
+  </section>
+
+  <section class="panel-card comparison-shell">
+    <div class="panel-head">
+      <div>
+        <p class="mini-label">Comparacao</p>
+        <h2>Comparar com outro turno encerrado</h2>
+      </div>
+    </div>
+
+    <form method="get" class="comparison-toolbar">
+      <label class="comparison-select-group">
+        <span>Comparar com</span>
+        <select name="compare_to">
+          <option value="">Turno anterior automatico</option>
+          {% for option in shift["comparison_choices"] %}
+          <option value="{{ option.id }}" {% if shift["selected_comparison_id"] == option.id %}selected{% endif %}>
+            {{ option.label }}
+          </option>
+          {% endfor %}
+        </select>
+      </label>
+      <button class="primary-button small-button" type="submit">Comparar</button>
+    </form>
+
+    {% if shift["comparison"] %}
+    <div class="comparison-summary">
+      <div class="summary-item comparison-summary-card">
+        <div>
+          <strong>Resumo</strong>
+          <p class="item-meta-line">{{ shift["comparison"]["summary_text"] }}</p>
+        </div>
+        <span class="pill">Turno {{ shift["comparison"]["compared_shift"]["id"] }}</span>
+      </div>
+    </div>
+
+    <div class="comparison-grid">
+      {% for metric in shift["comparison"]["metrics"] %}
+      <article class="comparison-card tone-{{ metric.tone }}">
+        <p class="mini-label">{{ metric.label }}</p>
+        <div class="comparison-values">
+          <div>
+            <span>Atual</span>
+            <strong>
+              {% if metric.value_type == 'currency' %}
+              R$ {{ "%.2f"|format(metric.current or 0) }}
+              {% else %}
+              {{ metric.current }}
+              {% endif %}
+            </strong>
+          </div>
+          <div>
+            <span>Comparado</span>
+            <strong>
+              {% if metric.value_type == 'currency' %}
+              R$ {{ "%.2f"|format(metric.compared or 0) }}
+              {% else %}
+              {{ metric.compared }}
+              {% endif %}
+            </strong>
+          </div>
+        </div>
+        <div class="comparison-delta">
+          <span class="status-pill {{ metric.tone }}">{{ metric.indicator }}</span>
+          <strong>
+            {% if metric.value_type == 'currency' %}
+            R$ {{ "%.2f"|format(metric.delta_absolute or 0) }}
+            {% else %}
+            {{ metric.delta_absolute }}
+            {% endif %}
+          </strong>
+          <span>
+            {% if metric.delta_percentage is not none %}
+            {{ "%.1f"|format(metric.delta_percentage) }}%
+            {% else %}
+            --
+            {% endif %}
+          </span>
+        </div>
+      </article>
+      {% endfor %}
+    </div>
+
+    <div class="detail-summary-grid comparison-detail-grid">
+      <article class="panel-card comparison-panel">
+        <div class="panel-head">
+          <div>
+            <p class="mini-label">Bebida lider</p>
+            <h2>Comparacao da bebida mais vendida</h2>
+          </div>
+        </div>
+        <div class="comparison-values">
+          <div>
+            <span>Atual</span>
+            <strong>{{ shift["comparison"]["beverage_leader"]["current"] }}</strong>
+            <p class="item-meta-line">{{ shift["comparison"]["beverage_leader"]["current_quantity"] }}x</p>
+          </div>
+          <div>
+            <span>Comparado</span>
+            <strong>{{ shift["comparison"]["beverage_leader"]["compared"] }}</strong>
+            <p class="item-meta-line">{{ shift["comparison"]["beverage_leader"]["compared_quantity"] }}x</p>
+          </div>
+        </div>
+      </article>
+
+      <article class="panel-card comparison-panel">
+        <div class="panel-head">
+          <div>
+            <p class="mini-label">Pico</p>
+            <h2>Comparacao do horario de pico</h2>
+          </div>
+        </div>
+        <div class="comparison-values">
+          <div>
+            <span>Atual</span>
+            <strong>{{ shift["comparison"]["peak_window"]["current"] }}</strong>
+            <p class="item-meta-line">
+              {{ shift["comparison"]["peak_window"]["current_orders"] }} pedidos ·
+              R$ {{ "%.2f"|format(shift["comparison"]["peak_window"]["current_revenue"] or 0) }}
+            </p>
+          </div>
+          <div>
+            <span>Comparado</span>
+            <strong>{{ shift["comparison"]["peak_window"]["compared"] }}</strong>
+            <p class="item-meta-line">
+              {{ shift["comparison"]["peak_window"]["compared_orders"] }} pedidos ·
+              R$ {{ "%.2f"|format(shift["comparison"]["peak_window"]["compared_revenue"] or 0) }}
+            </p>
+          </div>
+        </div>
+      </article>
+    </div>
+    {% else %}
+    <p class="empty-inline">Nao existe outro turno encerrado disponivel para comparacao ainda.</p>
+    {% endif %}
+  </section>
+
+  <section class="detail-summary-grid">
+    <article class="panel-card">
+      <div class="panel-head">
+        <div>
+          <p class="mini-label">Pico</p>
+          <h2>Horario de maior movimento</h2>
+        </div>
+      </div>
+      <div class="report-grid">
+        <div class="summary-item">
+          <div><strong>Faixa</strong></div>
+          <strong>{{ shift.summary.horario_pico.label if shift.summary.horario_pico else 'Sem dados' }}</strong>
+        </div>
+        <div class="summary-item">
+          <div><strong>Pedidos no pico</strong></div>
+          <strong>{{ shift.summary.quantidade_pedidos_pico or 0 }}</strong>
+        </div>
+        <div class="summary-item">
+          <div><strong>Valor vendido no pico</strong></div>
+          <strong>R$ {{ "%.2f"|format(shift.summary.valor_vendido_pico or 0) }}</strong>
+        </div>
+        <div class="summary-item">
+          <div><strong>Bebida mais vendida</strong></div>
+          <strong>{{ shift.summary.bebida_mais_vendida.name if shift.summary.bebida_mais_vendida else 'Sem dados' }}</strong>
+        </div>
+      </div>
+    </article>
+
+    <article class="panel-card">
+      <div class="panel-head">
+        <div>
+          <p class="mini-label">Observacoes</p>
+          <h2>Registro do turno</h2>
+        </div>
+      </div>
+      {% if shift["observations"] %}
+        <div class="notes-list compact-list">
+          {% for observation in shift["observations"] %}
+          <div class="summary-item">
+            <div><strong>Turno</strong></div>
+            <span>{{ observation }}</span>
+          </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="empty-inline">Sem observacoes registradas para este turno.</p>
+      {% endif %}
+    </article>
+  </section>
+
+  <section class="detail-content-grid">
+    <article class="panel-card">
+      <div class="panel-head">
+        <div>
+          <p class="mini-label">Ranking</p>
+          <h2>Top 5 bebidas mais vendidas</h2>
+        </div>
+      </div>
+      <div class="insights-list">
+        {% if shift.summary.top_5_bebidas %}
+          {% for item in shift.summary.top_5_bebidas %}
+          <div class="insight-row">
+            <span>{{ item.name }}</span>
+            <strong>{{ item.quantity }}x</strong>
+          </div>
+          {% endfor %}
+        {% else %}
+          <p class="empty-inline">Sem bebidas vendidas nesse turno.</p>
+        {% endif %}
+      </div>
+    </article>
+
+    <article class="panel-card">
+      <div class="panel-head">
+        <div>
+          <p class="mini-label">Itens vendidos</p>
+          <h2>Resumo por bebida</h2>
+        </div>
+      </div>
+      <div class="notes-list">
+        {% if shift["items"] %}
+          {% for item in shift["items"] %}
+          <div class="summary-item">
+            <div>
+              <strong>{{ item.name }}</strong>
+              <p class="item-meta-line">{{ item.quantity }}x · custo R$ {{ "%.2f"|format(item.cost or 0) }}</p>
+            </div>
+            <strong>R$ {{ "%.2f"|format(item.revenue or 0) }}</strong>
+          </div>
+          {% endfor %}
+        {% else %}
+          <p class="empty-inline">Sem itens vendidos nesse turno.</p>
+        {% endif %}
+      </div>
+    </article>
+  </section>
+
+  <section class="detail-content-grid single-column-grid">
+    <article class="panel-card">
+      <div class="panel-head">
+        <div>
+          <p class="mini-label">Pedidos</p>
+          <h2>Lista de pedidos do turno</h2>
+        </div>
+      </div>
+      <div class="order-list">
+        {% if shift["orders"] %}
+          {% for order in shift["orders"] %}
+          <article class="order-card">
+            <div class="order-meta">
+              <strong>{{ order.code }}</strong>
+              <span class="pill">{{ order.created_at }}</span>
+            </div>
+            <h3>{{ order.customer_name }}</h3>
+            <p>{{ order.table_label }} · {{ order.status }}</p>
+            <ul>
+              {% for item in order["items"] %}
+              <li>{{ item.quantity }}x {{ item.name }} <strong>R$ {{ "%.2f"|format(item.subtotal) }}</strong></li>
+              {% endfor %}
+            </ul>
+            <div class="order-actions">
+              <span class="muted-note">Total do pedido</span>
+              <strong>R$ {{ "%.2f"|format(order.total) }}</strong>
+            </div>
+          </article>
+          {% endfor %}
+        {% else %}
+          <p class="empty-inline">Nenhum pedido registrado nesse turno.</p>
+        {% endif %}
+      </div>
+    </article>
+  </section>
+</main>
+{% endblock %}

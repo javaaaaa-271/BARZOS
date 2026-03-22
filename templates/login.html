@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+
+{% block title %}BarOS | Login do Painel{% endblock %}
+{% block body_class %}auth-body{% endblock %}
+
+{% block content %}
+<main class="auth-shell">
+  <section class="auth-side">
+    <p class="eyebrow">Equipe do bar</p>
+    <h1>Painel operacional com acesso protegido.</h1>
+    <p>
+      Entre com as credenciais da equipe para acompanhar a fila de pedidos e marcar entregas sem expor o painel ao cliente.
+    </p>
+    <p class="muted-note">Entrada interna: /{{ internal_access_path }}</p>
+    <a class="text-link" href="{{ url_for('index') }}">Voltar ao menu digital</a>
+  </section>
+
+  <section class="auth-card">
+    <p class="mini-label">Login</p>
+    <h2>Acessar painel</h2>
+    {% if error %}
+    <div class="alert">{{ error }}</div>
+    {% endif %}
+    <form method="post" class="auth-form">
+      <label>
+        <span>Usuario</span>
+        <input type="text" name="username" placeholder="admin" required>
+      </label>
+      <label>
+        <span>Senha</span>
+        <input type="password" name="password" placeholder="••••••••" required>
+      </label>
+      <button class="primary-button" type="submit">Entrar</button>
+    </form>
+  </section>
+</main>
+{% endblock %}

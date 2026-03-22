@@ -1,0 +1,278 @@
+{% extends "base.html" %}
+
+{% block title %}BarOS | Painel do Bar{% endblock %}
+{% block body_class %}dashboard-body{% endblock %}
+
+{% block content %}
+<main class="dashboard-shell">
+  <header class="dashboard-header">
+    <div>
+      <p class="eyebrow">Painel do bar</p>
+      <h1>Operacao em tempo real</h1>
+      <p class="dashboard-user-meta">{{ current_user.display_name }} · {{ current_user.role_label }}</p>
+    </div>
+    <div class="dashboard-actions">
+      <a class="secondary-button" href="{{ url_for('index') }}">Ver menu</a>
+      <a class="secondary-button" href="{{ url_for('shift_history_page') }}">Historico de turnos</a>
+      {% if current_user.can_manage_bar %}
+      <button class="primary-button" type="button" id="close-bar-button">Fechar bar</button>
+      <button class="ghost-button" type="button" id="reset-data-button">Resetar dados</button>
+      {% endif %}
+      <form method="post" action="{{ url_for('logout') }}">
+        <button class="ghost-button" type="submit">Sair</button>
+      </form>
+    </div>
+  </header>
+
+  <section class="stats-grid">
+    <article class="stat-card">
+      <span>Pedidos pendentes</span>
+      <strong id="pending-count">{{ summary.pending_count }}</strong>
+    </article>
+    <article class="stat-card">
+      <span>Pedidos finalizados</span>
+      <strong id="completed-count">{{ summary.completed_count }}</strong>
+    </article>
+    <article class="stat-card">
+      <span>Total de pedidos</span>
+      <strong id="total-count">{{ summary.total_count }}</strong>
+    </article>
+    <article class="stat-card">
+      <span>Faturamento</span>
+      <strong id="revenue-total">R$ {{ "%.2f"|format(summary.revenue) }}</strong>
+    </article>
+    <article class="stat-card">
+      <span>Ticket medio</span>
+      <strong id="average-ticket">R$ {{ "%.2f"|format(summary.average_ticket) }}</strong>
+    </article>
+  </section>
+
+  <section class="dashboard-grid">
+    <article class="panel-card">
+      <div class="panel-head">
+        <div>
+          <p class="mini-label">Fila</p>
+          <h2>Aguardando preparo</h2>
+        </div>
+        <span class="pill" id="refresh-status">Atualizando...</span>
+      </div>
+      <div id="pending-orders" class="order-list"></div>
+    </article>
+
+    <article class="panel-card">
+      <div class="panel-head">
+        <div>
+          <p class="mini-label">Destaques</p>
+          <h2>Mais pedidos da noite</h2>
+        </div>
+      </div>
+      <div id="top-items" class="insights-list">
+        {% if summary.top_items %}
+          {% for item in summary.top_items %}
+          <div class="insight-row">
+            <span>{{ item.name }}</span>
+            <strong>{{ item.quantity }}x</strong>
+          </div>
+          {% endfor %}
+        {% else %}
+          <p class="empty-inline">Os destaques aparecem quando houver pedidos.</p>
+        {% endif %}
+      </div>
+      <div class="subpanel">
+        <p class="mini-label">Mesas com mais movimento</p>
+        <div id="top-tables" class="insights-list">
+          {% if summary.top_tables %}
+            {% for table in summary.top_tables %}
+            <div class="insight-row">
+              <span>{{ table.table_label }}</span>
+              <strong>{{ table.total }}</strong>
+            </div>
+            {% endfor %}
+          {% else %}
+            <p class="empty-inline">As mesas aparecem quando houver pedidos.</p>
+          {% endif %}
+        </div>
+      </div>
+    </article>
+
+    <article class="panel-card">
+      <div class="panel-head">
+        <div>
+          <p class="mini-label">Logistica</p>
+          <h2>Estoque e operacao</h2>
+        </div>
+      </div>
+      <div class="logistics-summary">
+        <div class="summary-chip critical">
+          Criticos
+          <strong id="critical-count">{{ logistics.inventory_summary.critical_count }}</strong>
+        </div>
+        <div class="summary-chip attention">
+          Atencao
+          <strong id="attention-count">{{ logistics.inventory_summary.attention_count }}</strong>
+        </div>
+        <div class="summary-chip">
+          Itens
+          <strong id="tracked-count">{{ logistics.inventory_summary.tracked_count }}</strong>
+        </div>
+      </div>
+      <div id="inventory-items" class="inventory-list">
+        {% for item in logistics.inventory %}
+        <article class="inventory-row" data-item-id="{{ item.id }}">
+          <div class="inventory-copy">
+            <strong>{{ item.name }}</strong>
+            <p>{{ item.category }} · {{ item.stock_level }} {{ item.unit }} / minimo {{ item.par_level }}</p>
+            <span class="muted-note">Atualizado {{ item.updated_at }}</span>
+          </div>
+          <div class="inventory-actions">
+            <span class="status-pill {{ item.status }}">{{ item.status }}</span>
+            {% if current_user.can_manage_bar %}
+            <label class="inventory-input-group">
+              <span>Qtd.</span>
+              <input class="inventory-amount-input" type="number" min="0" step="0.1" value="1">
+            </label>
+            <button class="ghost-button small-button" type="button" data-stock-action="add">Repor</button>
+            <button class="ghost-button small-button" type="button" data-stock-action="set">Ajustar</button>
+            <label class="inventory-input-group">
+              <span>Min.</span>
+              <input class="inventory-par-input" type="number" min="0.1" step="0.1" value="{{ item.par_level }}">
+            </label>
+            <button class="ghost-button small-button" type="button" data-save-par="true">Salvar minimo</button>
+            <button class="ghost-button small-button" type="button" data-status="ok">OK</button>
+            <button class="ghost-button small-button" type="button" data-status="attention">Atencao</button>
+            <button class="ghost-button small-button" type="button" data-status="critical">Critico</button>
+            {% endif %}
+          </div>
+        </article>
+        {% endfor %}
+      </div>
+      {% if not current_user.can_manage_bar %}
+      <p class="muted-note">Seu perfil pode acompanhar o estoque, mas os ajustes ficam restritos ao administrador.</p>
+      {% endif %}
+    </article>
+
+    <article class="panel-card wide-card">
+      <div class="panel-head">
+        <div>
+          <p class="mini-label">Historico</p>
+          <h2>Pedidos concluidos</h2>
+        </div>
+      </div>
+      <div id="completed-orders" class="order-list compact"></div>
+    </article>
+
+    <article class="panel-card wide-card">
+      <div class="panel-head">
+        <div>
+          <p class="mini-label">Turnos</p>
+          <h2>Ultimos turnos encerrados</h2>
+        </div>
+        <a class="secondary-button small-button" href="{{ url_for('shift_history_page') }}">Abrir historico</a>
+      </div>
+      <div id="shift-history" class="shift-history-list">
+        {% if shifts %}
+          {% for shift in shifts %}
+          <article class="shift-card" data-shift-id="{{ shift.id }}">
+            <div class="shift-card-top">
+              <div>
+                <strong>Turno {{ shift.id }}</strong>
+                <p>{{ shift.opened_at }} ate {{ shift.closed_at }}</p>
+              </div>
+              <span class="pill">{{ shift.duration }}</span>
+            </div>
+            <div class="shift-stats">
+              <div class="summary-item">
+                <div><strong>Faturamento</strong></div>
+                <strong>R$ {{ "%.2f"|format(shift.summary.total_vendido or 0) }}</strong>
+              </div>
+              <div class="summary-item">
+                <div><strong>Pedidos</strong></div>
+                <strong>{{ shift.summary.total_pedidos or 0 }}</strong>
+              </div>
+              <div class="summary-item">
+                <div><strong>Ticket medio</strong></div>
+                <strong>R$ {{ "%.2f"|format(shift.summary.ticket_medio or 0) }}</strong>
+              </div>
+              <div class="summary-item">
+                <div><strong>Bebida lider</strong></div>
+                <strong>{{ shift.summary.bebida_mais_vendida.name if shift.summary.bebida_mais_vendida else 'Sem dados' }}</strong>
+              </div>
+              <div class="summary-item">
+                <div><strong>Horario de pico</strong></div>
+                <strong>{{ shift.summary.horario_pico.label if shift.summary.horario_pico else 'Sem dados' }}</strong>
+              </div>
+              <div class="summary-item">
+                <div><strong>Lucro estimado</strong></div>
+                <strong>R$ {{ "%.2f"|format(shift.summary.lucro_estimado or 0) }}</strong>
+              </div>
+            </div>
+            <div class="shift-observations-inline">
+              <strong>Observacoes</strong>
+              <p>{{ shift.observations|join(' · ') if shift.observations else 'Sem observacoes registradas.' }}</p>
+            </div>
+            <div class="shift-actions">
+              <a class="primary-button small-button" href="{{ url_for('shift_detail_page', shift_id=shift.id) }}">Ver detalhes</a>
+              {% if current_user.can_manage_bar %}
+              <a class="secondary-button small-button" href="{{ url_for('export_shift_report', shift_id=shift.id) }}">Exportar CSV</a>
+              <a class="secondary-button small-button" href="{{ url_for('export_shift_pdf', shift_id=shift.id) }}">Exportar PDF</a>
+              {% endif %}
+            </div>
+          </article>
+          {% endfor %}
+        {% else %}
+          <p class="empty-inline">Os turnos fechados vao aparecer aqui com resumo e exportacao.</p>
+        {% endif %}
+      </div>
+    </article>
+
+    <article class="panel-card wide-card">
+      <div class="panel-head">
+        <div>
+          <p class="mini-label">Checklist do turno</p>
+          <h2>Notas operacionais</h2>
+        </div>
+      </div>
+      <div id="shift-notes" class="notes-list">
+        {% for note in logistics.notes %}
+        <article class="note-row" data-note-id="{{ note.id }}">
+          <div>
+            <strong>{{ note.title }}</strong>
+            <p>{{ note.body }}</p>
+          </div>
+          <div class="note-actions">
+            <span class="priority-pill {{ note.priority }}">{{ note.priority }}</span>
+            {% if note.status != 'done' %}
+            <button class="primary-button small-button" type="button" data-close-note="{{ note.id }}">Concluir</button>
+            {% else %}
+            <span class="status-badge">Concluido</span>
+            {% endif %}
+          </div>
+        </article>
+        {% endfor %}
+      </div>
+    </article>
+  </section>
+</main>
+
+<section id="closeout-modal" class="modal hidden" aria-hidden="true">
+  <div class="modal-card report-modal">
+    <p class="eyebrow">Fechamento</p>
+    <h2>Resumo do bar</h2>
+    <div id="closeout-content" class="report-grid"></div>
+    <div id="closeout-drinks" class="summary-list"></div>
+    {% if current_user.can_manage_bar %}
+    <a id="closeout-export-link" class="secondary-button full-width hidden-link" href="#">Exportar fechamento em CSV</a>
+    {% endif %}
+    <button class="secondary-button full-width" type="button" id="close-closeout-modal">Fechar</button>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  window.BAROS_DASHBOARD = {
+    canManageBar: {{ 'true' if current_user.can_manage_bar else 'false' }}
+  };
+</script>
+<script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+{% endblock %}
