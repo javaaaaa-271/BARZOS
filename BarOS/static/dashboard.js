@@ -257,17 +257,29 @@ function renderCloseoutReport(report) {
   closeoutModal.setAttribute("aria-hidden", "false");
 }
 
+function applyDashboardSnapshot(data) {
+  refreshStatus.textContent = `Atualizado ${data.generated_at}`;
+  updateSummary(data.summary);
+  renderPending(data.pending);
+  renderCompleted(data.completed);
+  renderTopItems(data.summary.top_items);
+  renderTopTables(data.summary.top_tables);
+  updateLogistics(data.logistics);
+}
+
 async function closeBar() {
-  const response = await fetch("/api/reports/closeout");
+  const response = await fetch("/api/reports/closeout", { method: "POST" });
   if (!response.ok) {
     refreshStatus.textContent = "Falha ao fechar bar";
     return;
   }
-  renderCloseoutReport(await response.json());
+  const data = await response.json();
+  renderCloseoutReport(data.report);
+  applyDashboardSnapshot(data);
 }
 
 async function resetData() {
-  const confirmed = window.confirm("Isso vai apagar pedidos e itens do banco. Deseja continuar?");
+  const confirmed = window.confirm("Isso vai encerrar o turno atual e abrir um novo painel vazio, mantendo o historico. Deseja continuar?");
   if (!confirmed) {
     return;
   }
@@ -280,7 +292,7 @@ async function resetData() {
     closeoutModal.classList.add("hidden");
     closeoutModal.setAttribute("aria-hidden", "true");
   }
-  await refreshDashboard();
+  applyDashboardSnapshot(await response.json());
 }
 
 pendingContainer?.addEventListener("click", (event) => {
