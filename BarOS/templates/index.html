@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+
+{% block title %}BarOS | Menu Digital{% endblock %}
+{% block body_class %}customer-body{% endblock %}
+
+{% block content %}
+<main class="customer-shell">
+  <section class="hero-panel">
+    <div class="hero-copy">
+      <p class="eyebrow">BarOS Experience</p>
+      <h1>Menu digital com cara de casa premium.</h1>
+      <p class="hero-text">
+        Inspirado na referencia, mas com layout mais profissional, pedido rapido e uma entrada separada para o time do bar.
+      </p>
+      <div class="hero-meta">
+        <span>{{ current_time }}</span>
+        <span>Atendimento em fluxo continuo</span>
+      </div>
+    </div>
+    <div class="hero-card">
+      <p class="mini-label">Acesso interno</p>
+      <h2>Painel do bar protegido</h2>
+      <p>Monitore pedidos, acompanhe faturamento e finalize entregas em uma tela dedicada.</p>
+      <a class="secondary-button" href="{{ url_for('login') }}">Entrar no painel</a>
+    </div>
+  </section>
+
+  <section class="menu-section">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">Cardapio</p>
+        <h2>Escolha a bebida da rodada</h2>
+      </div>
+      <form id="customer-form" class="customer-meta">
+        <label>
+          <span>Nome</span>
+          <input type="text" id="customer-name" placeholder="Ex.: Rafael">
+        </label>
+        <label>
+          <span>Mesa</span>
+          <input type="text" id="table-label" value="Mesa 07">
+        </label>
+      </form>
+    </div>
+
+    <div class="menu-grid">
+      {% for item in menu %}
+      <article class="menu-card {% if not item.is_available %}menu-card-disabled{% endif %}" data-menu-id="{{ item.id }}" data-available="{{ 'true' if item.is_available else 'false' }}">
+        <div class="menu-card-top">
+          <span class="tag">{{ item.category }}</span>
+          <span class="prep">{{ item.prep_time }}</span>
+        </div>
+        <h3>{{ item.name }}</h3>
+        <p>{{ item.description }}</p>
+        {% if not item.is_available %}
+        <p class="availability-note">{{ item.availability_note }}</p>
+        {% endif %}
+        <div class="menu-card-bottom">
+          <strong>R$ {{ "%.2f"|format(item.price) }}</strong>
+          <div class="qty-picker">
+            <button type="button" class="qty-btn" data-action="decrease" {% if not item.is_available %}disabled{% endif %}>-</button>
+            <span class="qty-value">0</span>
+            <button type="button" class="qty-btn" data-action="increase" {% if not item.is_available %}disabled{% endif %}>+</button>
+          </div>
+        </div>
+      </article>
+      {% endfor %}
+    </div>
+  </section>
+
+  <aside class="checkout-panel">
+    <div>
+      <p class="eyebrow">Resumo do pedido</p>
+      <h2>Feche a comanda em segundos</h2>
+    </div>
+    <div id="order-summary" class="summary-list empty-state">
+      Selecione itens do cardapio para montar o pedido.
+    </div>
+    <div class="checkout-footer">
+      <div class="total-line">
+        <span>Total</span>
+        <strong id="order-total">R$ 0,00</strong>
+      </div>
+      <button id="submit-order" class="primary-button" type="button" disabled>Confirmar pedido</button>
+      <p class="muted-note">Os pedidos enviados aparecem automaticamente no painel do bar.</p>
+    </div>
+  </aside>
+</main>
+
+<section id="confirmation-modal" class="modal hidden" aria-hidden="true">
+  <div class="modal-card">
+    <p class="eyebrow">Pedido enviado</p>
+    <h2>Codigo <span id="confirmation-code">----</span></h2>
+    <p id="confirmation-text">Seu pedido foi enviado para o bar.</p>
+    <button class="secondary-button full-width" type="button" id="close-confirmation">Novo pedido</button>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  window.BAROS_MENU = {{ menu|tojson }};
+</script>
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+{% endblock %}
