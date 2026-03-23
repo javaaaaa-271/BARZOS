@@ -1,16 +1,23 @@
+const dashboardConfig = window.BAROS_DASHBOARD || {};
+const canManageBar = Boolean(dashboardConfig.canManageBar);
+
 const pendingContainer = document.getElementById("pending-orders");
 const completedContainer = document.getElementById("completed-orders");
 const topItemsContainer = document.getElementById("top-items");
 const topTablesContainer = document.getElementById("top-tables");
 const inventoryContainer = document.getElementById("inventory-items");
 const notesContainer = document.getElementById("shift-notes");
+const shiftHistoryContainer = document.getElementById("shift-history");
 const refreshStatus = document.getElementById("refresh-status");
 const closeBarButton = document.getElementById("close-bar-button");
 const resetDataButton = document.getElementById("reset-data-button");
 const closeoutModal = document.getElementById("closeout-modal");
 const closeoutContent = document.getElementById("closeout-content");
 const closeoutDrinks = document.getElementById("closeout-drinks");
+const closeoutExportLink = document.getElementById("closeout-export-link");
 const closeCloseoutModalButton = document.getElementById("close-closeout-modal");
+
+let latestClosedShiftId = null;
 
 const brl = new Intl.NumberFormat("pt-BR", {
   style: "currency",
@@ -37,8 +44,8 @@ function renderPending(orders) {
           <strong>${order.code}</strong>
           <span class="pill">${order.created_at}</span>
         </div>
-        <h3>Pedido em aberto</h3>
-        <p>Retirada no balcao</p>
+        <h3>${order.customer_name}</h3>
+        <p>${order.table_label}</p>
         <ul>${renderOrderItems(order.items)}</ul>
         <div class="order-actions">
           <span class="muted-note">Total ${brl.format(order.total)}</span>
@@ -64,8 +71,8 @@ function renderCompleted(orders) {
           <strong>${order.code}</strong>
           <span class="status-badge">Concluido</span>
         </div>
-        <h3>Pedido finalizado</h3>
-        <p>Registrado em ${order.created_at}</p>
+        <h3>${order.customer_name}</h3>
+        <p>${order.table_label} · concluido em ${order.completed_at || order.created_at}</p>
         <ul>${renderOrderItems(order.items)}</ul>
       </article>
     `
@@ -86,13 +93,36 @@ function renderTopItems(items) {
 
 function renderTopTables(tables) {
   if (!tables.length) {
-    topTablesContainer.innerHTML = '<p class="empty-inline">Sem agrupamento adicional no MVP atual.</p>';
+    topTablesContainer.innerHTML = '<p class="empty-inline">As mesas aparecem quando houver pedidos.</p>';
     return;
   }
 
   topTablesContainer.innerHTML = tables
     .map((table) => `<div class="insight-row"><span>${table.table_label}</span><strong>${table.total}</strong></div>`)
     .join("");
+}
+
+function renderInventoryControls(item) {
+  if (!canManageBar) {
+    return "";
+  }
+
+  return `
+    <label class="inventory-input-group">
+      <span>Qtd.</span>
+      <input class="inventory-amount-input" type="number" min="0" step="0.1" value="1">
+    </label>
+    <button class="ghost-button small-button" type="button" data-stock-action="add">Repor</button>
+    <button class="ghost-button small-button" type="button" data-stock-action="set">Ajustar</button>
+    <label class="inventory-input-group">
+      <span>Min.</span>
+      <input class="inventory-par-input" type="number" min="0.1" step="0.1" value="${item.par_level}">
+    </label>
+    <button class="ghost-button small-button" type="button" data-save-par="true">Salvar minimo</button>
+    <button class="ghost-button small-button" type="button" data-status="ok">OK</button>
+    <button class="ghost-button small-button" type="button" data-status="attention">Atencao</button>
+    <button class="ghost-button small-button" type="button" data-status="critical">Critico</button>
+  `;
 }
 
 function renderInventory(items) {
@@ -105,15 +135,14 @@ function renderInventory(items) {
     .map(
       (item) => `
       <article class="inventory-row" data-item-id="${item.id}">
-        <div>
+        <div class="inventory-copy">
           <strong>${item.name}</strong>
           <p>${item.category} · ${item.stock_level} ${item.unit} / minimo ${item.par_level}</p>
+          <span class="muted-note">Atualizado ${item.updated_at}</span>
         </div>
         <div class="inventory-actions">
           <span class="status-pill ${item.status}">${item.status}</span>
-          <button class="ghost-button small-button" type="button" data-status="ok">OK</button>
-          <button class="ghost-button small-button" type="button" data-status="attention">Atencao</button>
-          <button class="ghost-button small-button" type="button" data-status="critical">Critico</button>
+          ${renderInventoryControls(item)}
         </div>
       </article>
     `
@@ -149,6 +178,83 @@ function renderNotes(notes) {
     .join("");
 }
 
+function renderShiftHistory(shifts) {
+  if (!shiftHistoryContainer) {
+    return;
+  }
+
+  if (!shifts.length) {
+    shiftHistoryContainer.innerHTML = '<p class="empty-inline">Os turnos fechados vao aparecer aqui com resumo e exportacao.</p>';
+    return;
+  }
+
+  shiftHistoryContainer.innerHTML = shifts
+    .map((shift) => {
+      const totalVendido = Number(shift.summary.total_vendido || 0);
+      const totalPedidos = Number(shift.summary.total_pedidos || 0);
+      const ticketMedio = Number(shift.summary.ticket_medio || 0);
+      const lucroEstimado = Number(shift.summary.lucro_estimado || 0);
+      const bebidaMaisVendida = shift.summary.bebida_mais_vendida?.name || "Sem dados";
+      const horarioPico = shift.summary.horario_pico?.label || "Sem dados";
+      const observacoes = Array.isArray(shift.observations) && shift.observations.length
+        ? shift.observations.join(" · ")
+        : "Sem observacoes registradas.";
+
+      return `
+        <article class="shift-card" data-shift-id="${shift.id}">
+          <div class="shift-card-top">
+            <div>
+              <strong>Turno ${shift.id}</strong>
+              <p>${shift.opened_at} ate ${shift.closed_at}</p>
+            </div>
+            <span class="pill">${shift.duration}</span>
+          </div>
+          <div class="shift-stats">
+            <div class="summary-item">
+              <div><strong>Faturamento</strong></div>
+              <strong>${brl.format(totalVendido)}</strong>
+            </div>
+            <div class="summary-item">
+              <div><strong>Pedidos</strong></div>
+              <strong>${totalPedidos}</strong>
+            </div>
+            <div class="summary-item">
+              <div><strong>Ticket medio</strong></div>
+              <strong>${brl.format(ticketMedio)}</strong>
+            </div>
+            <div class="summary-item">
+              <div><strong>Bebida lider</strong></div>
+              <strong>${bebidaMaisVendida}</strong>
+            </div>
+            <div class="summary-item">
+              <div><strong>Horario de pico</strong></div>
+              <strong>${horarioPico}</strong>
+            </div>
+            <div class="summary-item">
+              <div><strong>Lucro estimado</strong></div>
+              <strong>${brl.format(lucroEstimado)}</strong>
+            </div>
+          </div>
+          <div class="shift-observations-inline">
+            <strong>Observacoes</strong>
+            <p>${observacoes}</p>
+          </div>
+          ${
+            `<div class="shift-actions">
+              <a class="primary-button small-button" href="/historico-turnos/${shift.id}">Ver detalhes</a>
+              ${
+                canManageBar
+                  ? `<a class="secondary-button small-button" href="/api/reports/shifts/${shift.id}/export">Exportar CSV</a>`
+                  : ""
+              }
+            </div>`
+          }
+        </article>
+      `;
+    })
+    .join("");
+}
+
 function updateSummary(summary) {
   document.getElementById("pending-count").textContent = summary.pending_count;
   document.getElementById("completed-count").textContent = summary.completed_count;
@@ -163,6 +269,21 @@ function updateLogistics(logistics) {
   document.getElementById("tracked-count").textContent = logistics.inventory_summary.tracked_count;
   renderInventory(logistics.inventory);
   renderNotes(logistics.notes);
+}
+
+function setCloseoutExportLink(shiftId) {
+  if (!closeoutExportLink) {
+    return;
+  }
+
+  latestClosedShiftId = shiftId;
+  if (shiftId) {
+    closeoutExportLink.href = `/api/reports/shifts/${shiftId}/export`;
+    closeoutExportLink.classList.remove("hidden-link");
+  } else {
+    closeoutExportLink.href = "#";
+    closeoutExportLink.classList.add("hidden-link");
+  }
 }
 
 async function refreshDashboard() {
@@ -180,6 +301,7 @@ async function refreshDashboard() {
   renderTopItems(data.summary.top_items);
   renderTopTables(data.summary.top_tables);
   updateLogistics(data.logistics);
+  renderShiftHistory(data.shifts || []);
 }
 
 async function completeOrder(code) {
@@ -191,16 +313,19 @@ async function completeOrder(code) {
   await refreshDashboard();
 }
 
-async function updateInventoryStatus(itemId, status) {
+async function updateInventoryRequest(itemId, payload) {
   const response = await fetch(`/api/logistics/inventory/${itemId}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ status }),
+    body: JSON.stringify(payload),
   });
+
   if (!response.ok) {
-    refreshStatus.textContent = "Falha na logistica";
+    const data = await response.json().catch(() => ({}));
+    refreshStatus.textContent = data.error || "Falha na logistica";
     return;
   }
+
   updateLogistics(await response.json());
 }
 
@@ -265,17 +390,20 @@ function applyDashboardSnapshot(data) {
   renderTopItems(data.summary.top_items);
   renderTopTables(data.summary.top_tables);
   updateLogistics(data.logistics);
+  renderShiftHistory(data.shifts || []);
 }
 
 async function closeBar() {
   const response = await fetch("/api/reports/closeout", { method: "POST" });
   if (!response.ok) {
-    refreshStatus.textContent = "Falha ao fechar bar";
+    const data = await response.json().catch(() => ({}));
+    refreshStatus.textContent = data.error || "Falha ao fechar bar";
     return;
   }
   const data = await response.json();
+  setCloseoutExportLink(data.closed_shift_id);
   renderCloseoutReport(data.report);
-  applyDashboardSnapshot(data);
+  await refreshDashboard();
 }
 
 async function resetData() {
@@ -285,14 +413,17 @@ async function resetData() {
   }
   const response = await fetch("/api/reports/reset", { method: "POST" });
   if (!response.ok) {
-    refreshStatus.textContent = "Falha ao resetar";
+    const data = await response.json().catch(() => ({}));
+    refreshStatus.textContent = data.error || "Falha ao resetar";
     return;
   }
   if (!closeoutModal.classList.contains("hidden")) {
     closeoutModal.classList.add("hidden");
     closeoutModal.setAttribute("aria-hidden", "true");
   }
-  applyDashboardSnapshot(await response.json());
+  const data = await response.json();
+  setCloseoutExportLink(data.closed_shift_id);
+  applyDashboardSnapshot(data);
 }
 
 pendingContainer?.addEventListener("click", (event) => {
@@ -303,10 +434,31 @@ pendingContainer?.addEventListener("click", (event) => {
 });
 
 inventoryContainer?.addEventListener("click", (event) => {
-  const button = event.target.closest("[data-status]");
-  if (button) {
-    const row = button.closest("[data-item-id]");
-    updateInventoryStatus(row.dataset.itemId, button.dataset.status);
+  const statusButton = event.target.closest("[data-status]");
+  if (statusButton) {
+    const row = statusButton.closest("[data-item-id]");
+    updateInventoryRequest(row.dataset.itemId, { status: statusButton.dataset.status });
+    return;
+  }
+
+  const stockActionButton = event.target.closest("[data-stock-action]");
+  if (stockActionButton) {
+    const row = stockActionButton.closest("[data-item-id]");
+    const amountInput = row.querySelector(".inventory-amount-input");
+    updateInventoryRequest(row.dataset.itemId, {
+      stock_action: stockActionButton.dataset.stockAction,
+      amount: amountInput?.value,
+    });
+    return;
+  }
+
+  const saveParButton = event.target.closest("[data-save-par]");
+  if (saveParButton) {
+    const row = saveParButton.closest("[data-item-id]");
+    const parInput = row.querySelector(".inventory-par-input");
+    updateInventoryRequest(row.dataset.itemId, {
+      par_level: parInput?.value,
+    });
   }
 });
 
@@ -324,5 +476,6 @@ closeCloseoutModalButton?.addEventListener("click", () => {
   closeoutModal.setAttribute("aria-hidden", "true");
 });
 
+setCloseoutExportLink(null);
 refreshDashboard();
 setInterval(refreshDashboard, 5000);
