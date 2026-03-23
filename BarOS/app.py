@@ -315,6 +315,50 @@ def currency_brl(value: float | int | None) -> str:
     return f"R$ {float(value or 0):.2f}"
 
 
+def sanitize_optional_text(value: str | None, limit: int = 255) -> str:
+    return (value or "").strip()[:limit]
+
+
+def parse_decimal_input(raw_value: str | None, label: str, minimum: float = 0.0) -> float:
+    cleaned = (raw_value or "").strip().replace(",", ".")
+    try:
+        value = float(cleaned)
+    except (TypeError, ValueError):
+        raise ValueError(f"{label} invalido.")
+    if value < minimum:
+        raise ValueError(f"{label} nao pode ser menor que {minimum}.")
+    return round(value, 2)
+
+
+def parse_integer_input(raw_value: str | None, label: str, minimum: int = 0) -> int:
+    cleaned = (raw_value or "").strip()
+    try:
+        value = int(cleaned)
+    except (TypeError, ValueError):
+        raise ValueError(f"{label} invalido.")
+    if value < minimum:
+        raise ValueError(f"{label} nao pode ser menor que {minimum}.")
+    return value
+
+
+def checkbox_to_bool(raw_value: str | None) -> bool:
+    return str(raw_value or "").strip().lower() in {"1", "true", "on", "yes"}
+
+
+def normalize_product_image(value: str | None) -> str:
+    cleaned = sanitize_optional_text(value, limit=255)
+    if cleaned.startswith("static/"):
+        return f"/{cleaned}"
+    return cleaned
+
+
+def build_initials(value: str | None) -> str:
+    words = [chunk[:1] for chunk in re.findall(r"[A-Za-z0-9À-ÿ]+", value or "")]
+    if not words:
+        return "BO"
+    return "".join(words[:2]).upper()
+
+
 def load_summary_payload(raw_value: str | None) -> dict:
     if not raw_value:
         return {}
@@ -419,6 +463,16 @@ def init_db() -> None:
             FOREIGN KEY(bebida_id) REFERENCES bebidas(id)
         );
 
+        CREATE TABLE IF NOT EXISTS combo_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            combo_beverage_id INTEGER NOT NULL,
+            component_beverage_id INTEGER NOT NULL,
+            quantity INTEGER NOT NULL DEFAULT 1,
+            FOREIGN KEY(combo_beverage_id) REFERENCES bebidas(id) ON DELETE CASCADE,
+            FOREIGN KEY(component_beverage_id) REFERENCES bebidas(id),
+            UNIQUE(combo_beverage_id, component_beverage_id)
+        );
+
         CREATE TABLE IF NOT EXISTS inventory_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE,
@@ -452,6 +506,20 @@ def init_db() -> None:
         """
     )
 
+    beverage_columns = [row["name"] for row in db.execute("PRAGMA table_info(bebidas)").fetchall()]
+    if "categoria" not in beverage_columns:
+        db.execute("ALTER TABLE bebidas ADD COLUMN categoria TEXT")
+    if "descricao" not in beverage_columns:
+        db.execute("ALTER TABLE bebidas ADD COLUMN descricao TEXT")
+    if "tempo_preparo" not in beverage_columns:
+        db.execute("ALTER TABLE bebidas ADD COLUMN tempo_preparo TEXT")
+    if "imagem_url" not in beverage_columns:
+        db.execute("ALTER TABLE bebidas ADD COLUMN imagem_url TEXT")
+    if "is_active" not in beverage_columns:
+        db.execute("ALTER TABLE bebidas ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
+    if "is_combo" not in beverage_columns:
+        db.execute("ALTER TABLE bebidas ADD COLUMN is_combo INTEGER NOT NULL DEFAULT 0")
+
     pedido_columns = [row["name"] for row in db.execute("PRAGMA table_info(pedidos)").fetchall()]
     if "turno_id" not in pedido_columns:
         db.execute("ALTER TABLE pedidos ADD COLUMN turno_id INTEGER")
@@ -466,16 +534,68 @@ def init_db() -> None:
     if "completed_by_user_id" not in pedido_columns:
         db.execute("ALTER TABLE pedidos ADD COLUMN completed_by_user_id INTEGER")
 
+    order_item_columns = [row["name"] for row in db.execute("PRAGMA table_info(itens_pedido)").fetchall()]
+    if "item_name_snapshot" not in order_item_columns:
+        db.execute("ALTER TABLE itens_pedido ADD COLUMN item_name_snapshot TEXT")
+    if "item_type_snapshot" not in order_item_columns:
+        db.execute("ALTER TABLE itens_pedido ADD COLUMN item_type_snapshot TEXT")
+    if "unit_price_snapshot" not in order_item_columns:
+        db.execute("ALTER TABLE itens_pedido ADD COLUMN unit_price_snapshot REAL")
+    if "unit_cost_snapshot" not in order_item_columns:
+        db.execute("ALTER TABLE itens_pedido ADD COLUMN unit_cost_snapshot REAL")
+
     for beverage in BEVERAGE_SEED:
-        exists = db.execute("SELECT 1 FROM bebidas WHERE nome = ?", (beverage["nome"],)).fetchone()
+        exists = db.execute(
+            "SELECT id, categoria, descricao, tempo_preparo, is_active, is_combo FROM bebidas WHERE nome = ?",
+            (beverage["nome"],),
+        ).fetchone()
         if not exists:
             db.execute(
                 """
-                INSERT INTO bebidas (nome, preco_venda, custo_estimado)
-                VALUES (:nome, :preco_venda, :custo_estimado)
+                INSERT INTO bebidas (
+                    nome,
+                    preco_venda,
+                    custo_estimado,
+                    categoria,
+                    descricao,
+                    tempo_preparo,
+                    imagem_url,
+                    is_active,
+                    is_combo
+                )
+                VALUES (
+                    :nome,
+                    :preco_venda,
+                    :custo_estimado,
+                    :category,
+                    :description,
+                    :prep_time,
+                    :image_url,
+                    1,
+                    0
+                )
                 """,
-                beverage,
+                {**beverage, "image_url": ""},
             )
+            continue
+        db.execute(
+            """
+            UPDATE bebidas
+            SET
+                categoria = COALESCE(NULLIF(TRIM(categoria), ''), ?),
+                descricao = COALESCE(NULLIF(TRIM(descricao), ''), ?),
+                tempo_preparo = COALESCE(NULLIF(TRIM(tempo_preparo), ''), ?),
+                is_active = COALESCE(is_active, 1),
+                is_combo = COALESCE(is_combo, 0)
+            WHERE id = ?
+            """,
+            (
+                beverage["category"],
+                beverage["description"],
+                beverage["prep_time"],
+                exists["id"],
+            ),
+        )
 
     for item in LOGISTICS_SEED:
         exists = db.execute("SELECT 1 FROM inventory_items WHERE name = ?", (item["name"],)).fetchone()
@@ -528,6 +648,65 @@ def init_db() -> None:
     db.execute(
         "UPDATE pedidos SET source = ? WHERE source IS NULL OR TRIM(source) = ''",
         (DEFAULT_ORDER_SOURCE,),
+    )
+    db.execute(
+        """
+        UPDATE bebidas
+        SET categoria = COALESCE(NULLIF(TRIM(categoria), ''), 'Bebida'),
+            descricao = COALESCE(descricao, ''),
+            tempo_preparo = COALESCE(NULLIF(TRIM(tempo_preparo), ''), '3 min'),
+            imagem_url = COALESCE(imagem_url, ''),
+            is_active = COALESCE(is_active, 1),
+            is_combo = COALESCE(is_combo, 0)
+        """
+    )
+    db.execute(
+        """
+        UPDATE itens_pedido
+        SET item_name_snapshot = (
+            SELECT bebidas.nome
+            FROM bebidas
+            WHERE bebidas.id = itens_pedido.bebida_id
+        )
+        WHERE item_name_snapshot IS NULL OR TRIM(item_name_snapshot) = ''
+        """
+    )
+    db.execute(
+        """
+        UPDATE itens_pedido
+        SET item_type_snapshot = (
+            CASE
+                WHEN (
+                    SELECT bebidas.is_combo
+                    FROM bebidas
+                    WHERE bebidas.id = itens_pedido.bebida_id
+                ) = 1 THEN 'combo'
+                ELSE 'product'
+            END
+        )
+        WHERE item_type_snapshot IS NULL OR TRIM(item_type_snapshot) = ''
+        """
+    )
+    db.execute(
+        """
+        UPDATE itens_pedido
+        SET unit_price_snapshot = ROUND(
+            subtotal / CASE WHEN quantidade > 0 THEN quantidade ELSE 1 END,
+            2
+        )
+        WHERE unit_price_snapshot IS NULL
+        """
+    )
+    db.execute(
+        """
+        UPDATE itens_pedido
+        SET unit_cost_snapshot = (
+            SELECT bebidas.custo_estimado
+            FROM bebidas
+            WHERE bebidas.id = itens_pedido.bebida_id
+        )
+        WHERE unit_cost_snapshot IS NULL
+        """
     )
 
     db.commit()
@@ -635,36 +814,210 @@ def get_inventory_by_name() -> dict[str, sqlite3.Row]:
     return {row["name"]: row for row in rows}
 
 
-def beverage_availability(beverage_name: str, inventory_by_name: dict[str, sqlite3.Row]) -> tuple[bool, str | None]:
-    recipe = BEVERAGE_RECIPES.get(beverage_name, {})
-    if not recipe:
+def fetch_beverage_rows(include_inactive: bool = True) -> list[sqlite3.Row]:
+    query = """
+        SELECT
+            id,
+            nome,
+            preco_venda,
+            custo_estimado,
+            categoria,
+            descricao,
+            tempo_preparo,
+            imagem_url,
+            is_active,
+            is_combo
+        FROM bebidas
+    """
+    params: list = []
+    if not include_inactive:
+        query += " WHERE is_active = 1"
+    query += " ORDER BY is_combo ASC, nome ASC"
+    return get_db().execute(query, params).fetchall()
+
+
+def fetch_beverage_map(include_inactive: bool = True) -> dict[int, sqlite3.Row]:
+    return {row["id"]: row for row in fetch_beverage_rows(include_inactive=include_inactive)}
+
+
+def fetch_combo_components_map(combo_ids: list[int] | None = None) -> dict[int, list[dict]]:
+    if combo_ids is not None and not combo_ids:
+        return {}
+
+    query = """
+        SELECT
+            ci.combo_beverage_id,
+            ci.component_beverage_id,
+            ci.quantity,
+            b.nome AS component_name,
+            b.custo_estimado AS component_cost,
+            b.is_active AS component_active,
+            b.is_combo AS component_is_combo
+        FROM combo_items ci
+        JOIN bebidas b ON b.id = ci.component_beverage_id
+    """
+    params: list = []
+    if combo_ids:
+        query += " WHERE ci.combo_beverage_id IN ({})".format(",".join("?" for _ in combo_ids))
+        params.extend(combo_ids)
+    query += " ORDER BY ci.combo_beverage_id ASC, b.nome ASC"
+    rows = get_db().execute(query, params).fetchall()
+    components: dict[int, list[dict]] = {}
+    for row in rows:
+        components.setdefault(row["combo_beverage_id"], []).append(
+            {
+                "component_beverage_id": row["component_beverage_id"],
+                "quantity": int(row["quantity"] or 0),
+                "name": row["component_name"],
+                "cost": float(row["component_cost"] or 0),
+                "is_active": bool(row["component_active"]),
+                "is_combo": bool(row["component_is_combo"]),
+            }
+        )
+    return components
+
+
+def get_beverage_display_data(row: sqlite3.Row | dict) -> dict:
+    row_data = dict(row)
+    fallback = BEVERAGE_META.get(row["nome"], {})
+    category = row_data["categoria"] if row_data["categoria"] else fallback.get("category", "Bebida")
+    if row_data["is_combo"]:
+        category = category or "Combo"
+    prep_time = row_data["tempo_preparo"] if row_data["tempo_preparo"] else fallback.get("prep_time", "3 min")
+    if row_data["is_combo"] and not prep_time:
+        prep_time = "4 min"
+    description = row_data["descricao"] if row_data["descricao"] else fallback.get("description", "")
+    image_url = normalize_product_image(row_data["imagem_url"])
+    return {
+        "id": row_data["id"],
+        "name": row_data["nome"],
+        "price": float(row_data["preco_venda"] or 0),
+        "cost": float(row_data["custo_estimado"] or 0),
+        "category": category or ("Combo" if row_data["is_combo"] else "Bebida"),
+        "description": description or "Item cadastrado no sistema.",
+        "prep_time": prep_time or "3 min",
+        "image_url": row_data["imagem_url"] or "",
+        "image_src": image_url,
+        "placeholder": build_initials(row_data["nome"]),
+        "is_active": bool(row_data["is_active"]),
+        "is_combo": bool(row_data["is_combo"]),
+    }
+
+
+def build_item_requirements(
+    beverage_row: sqlite3.Row | dict,
+    quantity: int,
+    beverages_by_id: dict[int, sqlite3.Row],
+    combo_components_map: dict[int, list[dict]],
+    *,
+    stack: set[int] | None = None,
+) -> tuple[dict[str, float], str | None]:
+    stack = stack or set()
+    beverage_id = int(beverage_row["id"])
+    if beverage_id in stack:
+        return {}, f"Composicao circular detectada em {beverage_row['nome']}."
+
+    if not beverage_row["is_active"]:
+        return {}, f"{beverage_row['nome']} esta inativo no cardapio."
+
+    if beverage_row["is_combo"]:
+        components = combo_components_map.get(beverage_id, [])
+        if sum(component["quantity"] for component in components) < 2:
+            return {}, f"Combo {beverage_row['nome']} ainda nao possui composicao valida."
+
+        required: dict[str, float] = {}
+        for component in components:
+            component_row = beverages_by_id.get(component["component_beverage_id"])
+            if not component_row:
+                return {}, f"Componente do combo {beverage_row['nome']} nao encontrado."
+            if component_row["is_combo"]:
+                return {}, f"Combo {beverage_row['nome']} nao pode conter outro combo."
+            partial_requirements, error = build_item_requirements(
+                component_row,
+                quantity * component["quantity"],
+                beverages_by_id,
+                combo_components_map,
+                stack=stack | {beverage_id},
+            )
+            if error:
+                return {}, error
+            for ingredient_name, amount in partial_requirements.items():
+                required[ingredient_name] = required.get(ingredient_name, 0) + amount
+        return required, None
+
+    recipe = BEVERAGE_RECIPES.get(beverage_row["nome"], {})
+    required = {
+        ingredient_name: amount * quantity
+        for ingredient_name, amount in recipe.items()
+    }
+    return required, None
+
+
+def beverage_availability(
+    beverage_row: sqlite3.Row | dict,
+    inventory_by_name: dict[str, sqlite3.Row],
+    beverages_by_id: dict[int, sqlite3.Row],
+    combo_components_map: dict[int, list[dict]],
+) -> tuple[bool, str | None]:
+    if not beverage_row["is_active"]:
+        return False, "Item inativo no cardapio."
+
+    required, error = build_item_requirements(
+        beverage_row,
+        1,
+        beverages_by_id,
+        combo_components_map,
+    )
+    if error:
+        return False, f"Indisponivel: {error}"
+    if not required:
         return True, None
 
-    for ingredient_name, amount in recipe.items():
+    for ingredient_name, amount in required.items():
         inventory_item = inventory_by_name.get(ingredient_name)
         if not inventory_item:
             return False, f"Indisponivel: {ingredient_name} nao cadastrado."
         if inventory_item["stock_level"] < amount:
-            return (
-                False,
-                f"Indisponivel por estoque de {ingredient_name}.",
-            )
+            return False, f"Indisponivel por estoque de {ingredient_name}."
 
     return True, None
 
 
-def apply_stock_deductions(items: list[dict]) -> None:
-    db = get_db()
-    recipes_to_apply: dict[str, float] = {}
+def build_required_ingredients(
+    items: list[dict],
+    beverages_by_id: dict[int, sqlite3.Row] | None = None,
+    combo_components_map: dict[int, list[dict]] | None = None,
+) -> tuple[dict[str, float], str | None]:
+    catalog = beverages_by_id or fetch_beverage_map(include_inactive=True)
+    combos = combo_components_map or fetch_combo_components_map()
+    required: dict[str, float] = {}
 
     for item in items:
-        recipe = BEVERAGE_RECIPES.get(item["name"], {})
-        for ingredient_name, base_amount in recipe.items():
-            recipes_to_apply[ingredient_name] = recipes_to_apply.get(ingredient_name, 0) + (
-                base_amount * item["quantity"]
-            )
+        beverage_row = catalog.get(item["bebida_id"])
+        if not beverage_row:
+            return {}, f"Item {item.get('name', 'desconhecido')} nao encontrado."
+        partial_requirements, error = build_item_requirements(
+            beverage_row,
+            int(item["quantity"]),
+            catalog,
+            combos,
+        )
+        if error:
+            return {}, error
+        for ingredient_name, amount in partial_requirements.items():
+            required[ingredient_name] = required.get(ingredient_name, 0) + amount
 
-    if not recipes_to_apply:
+    return required, None
+
+
+def apply_stock_deductions(
+    items: list[dict],
+    beverages_by_id: dict[int, sqlite3.Row] | None = None,
+    combo_components_map: dict[int, list[dict]] | None = None,
+) -> None:
+    db = get_db()
+    recipes_to_apply, error = build_required_ingredients(items, beverages_by_id, combo_components_map)
+    if error or not recipes_to_apply:
         return
 
     inventory_rows = db.execute(
@@ -688,15 +1041,15 @@ def apply_stock_deductions(items: list[dict]) -> None:
         )
 
 
-def check_stock_availability(items: list[dict]) -> list[dict]:
+def check_stock_availability(
+    items: list[dict],
+    beverages_by_id: dict[int, sqlite3.Row] | None = None,
+    combo_components_map: dict[int, list[dict]] | None = None,
+) -> list[dict]:
     db = get_db()
-    required: dict[str, float] = {}
-
-    for item in items:
-        recipe = BEVERAGE_RECIPES.get(item["name"], {})
-        for ingredient_name, amount in recipe.items():
-            required[ingredient_name] = required.get(ingredient_name, 0) + (amount * item["quantity"])
-
+    required, error = build_required_ingredients(items, beverages_by_id, combo_components_map)
+    if error:
+        return [{"item": error, "needed": 0, "available": 0, "unit": ""}]
     if not required:
         return []
 
@@ -736,33 +1089,151 @@ def check_stock_availability(items: list[dict]) -> list[dict]:
 
 def fetch_menu() -> list[dict]:
     inventory_by_name = get_inventory_by_name()
-    rows = get_db().execute(
-        "SELECT id, nome, preco_venda, custo_estimado FROM bebidas ORDER BY nome ASC"
-    ).fetchall()
+    rows = fetch_beverage_rows(include_inactive=False)
+    beverages_by_id = fetch_beverage_map(include_inactive=True)
+    combo_components_map = fetch_combo_components_map([row["id"] for row in rows if row["is_combo"]])
     menu = []
     for row in rows:
-        meta = BEVERAGE_META.get(row["nome"], {})
-        is_available, availability_note = beverage_availability(row["nome"], inventory_by_name)
-        menu.append(
+        menu_item = get_beverage_display_data(row)
+        is_available, availability_note = beverage_availability(
+            row,
+            inventory_by_name,
+            beverages_by_id,
+            combo_components_map,
+        )
+        menu_item.update(
             {
-                "id": row["id"],
-                "name": row["nome"],
-                "price": row["preco_venda"],
-                "cost": row["custo_estimado"],
-                "category": meta.get("category", "Bebida"),
-                "description": meta.get("description", "Bebida cadastrada no sistema."),
-                "prep_time": meta.get("prep_time", "3 min"),
                 "is_available": is_available,
                 "availability_note": availability_note,
             }
         )
+        menu.append(menu_item)
     return menu
+
+
+def calculate_combo_cost_estimate(
+    selected_components: list[dict],
+    beverages_by_id: dict[int, sqlite3.Row] | None = None,
+) -> float:
+    catalog = beverages_by_id or fetch_beverage_map(include_inactive=True)
+    return round(
+        sum(
+            float((catalog.get(component["component_beverage_id"]) or {"custo_estimado": 0})["custo_estimado"] or 0)
+            * int(component["quantity"])
+            for component in selected_components
+        ),
+        2,
+    )
+
+
+def refresh_combo_costs_for_component(component_beverage_id: int) -> None:
+    db = get_db()
+    combo_ids = db.execute(
+        """
+        SELECT DISTINCT combo_beverage_id
+        FROM combo_items
+        WHERE component_beverage_id = ?
+        """,
+        (component_beverage_id,),
+    ).fetchall()
+    if not combo_ids:
+        return
+
+    catalog = fetch_beverage_map(include_inactive=True)
+    combo_components_map = fetch_combo_components_map([row["combo_beverage_id"] for row in combo_ids])
+    for row in combo_ids:
+        combo_id = row["combo_beverage_id"]
+        estimated_cost = calculate_combo_cost_estimate(combo_components_map.get(combo_id, []), catalog)
+        db.execute(
+            "UPDATE bebidas SET custo_estimado = ? WHERE id = ?",
+            (estimated_cost, combo_id),
+        )
+
+
+def fetch_products_management_snapshot() -> dict:
+    rows = fetch_beverage_rows(include_inactive=True)
+    combo_components_map = fetch_combo_components_map([row["id"] for row in rows if row["is_combo"]])
+    products = []
+    combos = []
+    base_products = []
+
+    for row in rows:
+        product = get_beverage_display_data(row)
+        product["raw_description"] = row["descricao"] or ""
+        product["raw_image_url"] = row["imagem_url"] or ""
+        product["component_count"] = 0
+        product["components"] = []
+        if row["is_combo"]:
+            components = combo_components_map.get(row["id"], [])
+            product["components"] = components
+            product["component_count"] = sum(component["quantity"] for component in components)
+            combos.append(product)
+        else:
+            products.append(product)
+            base_products.append(product)
+
+    return {
+        "products": products,
+        "combos": combos,
+        "component_options": base_products,
+    }
+
+
+def build_products_redirect(message: str | None = None, error: str | None = None):
+    params = {}
+    if message:
+        params["message"] = message
+    if error:
+        params["error"] = error
+    return redirect(url_for("products_page", **params))
+
+
+def parse_combo_components_from_form(selected_ids: list[str]) -> list[dict]:
+    component_ids: list[int] = []
+    for raw_id in selected_ids:
+        try:
+            component_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if component_id > 0 and component_id not in component_ids:
+            component_ids.append(component_id)
+
+    components = []
+    total_units = 0
+    for component_id in component_ids:
+        quantity = parse_integer_input(
+            request.form.get(f"component_quantity_{component_id}"),
+            "Quantidade do componente",
+            minimum=1,
+        )
+        components.append(
+            {
+                "component_beverage_id": component_id,
+                "quantity": quantity,
+            }
+        )
+        total_units += quantity
+
+    if total_units < 2:
+        raise ValueError("O combo precisa ter pelo menos 2 itens na composicao.")
+
+    return components
 
 
 def serialize_order(row: sqlite3.Row) -> dict:
     items = get_db().execute(
         """
-        SELECT ip.id, ip.quantidade, ip.subtotal, b.id AS bebida_id, b.nome, b.preco_venda
+        SELECT
+            ip.id,
+            ip.quantidade,
+            ip.subtotal,
+            ip.item_name_snapshot,
+            ip.item_type_snapshot,
+            ip.unit_price_snapshot,
+            b.id AS bebida_id,
+            b.nome,
+            b.preco_venda,
+            b.is_combo
         FROM itens_pedido ip
         JOIN bebidas b ON b.id = ip.bebida_id
         WHERE ip.pedido_id = ?
@@ -784,10 +1255,11 @@ def serialize_order(row: sqlite3.Row) -> dict:
         "items": [
             {
                 "id": item["bebida_id"],
-                "name": item["nome"],
+                "name": item["item_name_snapshot"] or item["nome"],
                 "quantity": item["quantidade"],
-                "price": item["preco_venda"],
+                "price": item["unit_price_snapshot"] if item["unit_price_snapshot"] is not None else item["preco_venda"],
                 "subtotal": item["subtotal"],
+                "item_type": item["item_type_snapshot"] or ("combo" if item["is_combo"] else "product"),
             }
             for item in items
         ],
@@ -1057,16 +1529,16 @@ def build_shift_metrics(shift_id: int) -> dict:
         """
         SELECT
             b.id AS beverage_id,
-            b.nome AS nome,
+            COALESCE(ip.item_name_snapshot, b.nome) AS nome,
             SUM(ip.quantidade) AS quantidade,
             COALESCE(SUM(ip.subtotal), 0) AS total_vendido,
-            COALESCE(SUM(b.custo_estimado * ip.quantidade), 0) AS custo_estimado
+            COALESCE(SUM(COALESCE(ip.unit_cost_snapshot, b.custo_estimado) * ip.quantidade), 0) AS custo_estimado
         FROM itens_pedido ip
         JOIN bebidas b ON b.id = ip.bebida_id
         JOIN pedidos p ON p.id = ip.pedido_id
         WHERE p.turno_id = ?
-        GROUP BY b.id, b.nome
-        ORDER BY quantidade DESC, b.nome ASC
+        GROUP BY b.id, COALESCE(ip.item_name_snapshot, b.nome)
+        ORDER BY quantidade DESC, nome ASC
         """,
         (shift_id,),
     ).fetchall()
@@ -1733,6 +2205,131 @@ def build_shift_export_pdf(shift_id: int) -> bytes:
     return buffer.getvalue()
 
 
+def upsert_product_from_form(product_id: int | None = None) -> str:
+    db = get_db()
+    name = sanitize_text(request.form.get("name"), "", limit=80)
+    if not name:
+        raise ValueError("Nome do produto e obrigatorio.")
+
+    price = parse_decimal_input(request.form.get("price"), "Preco de venda", minimum=0.01)
+    cost = parse_decimal_input(request.form.get("cost"), "Custo estimado", minimum=0.0)
+    description = sanitize_optional_text(request.form.get("description"), limit=280)
+    image_url = normalize_product_image(request.form.get("image_url"))
+    is_active = 1 if checkbox_to_bool(request.form.get("is_active")) else 0
+
+    if product_id:
+        row = db.execute(
+            """
+            SELECT id, categoria, tempo_preparo
+            FROM bebidas
+            WHERE id = ? AND is_combo = 0
+            """,
+            (product_id,),
+        ).fetchone()
+        if not row:
+            raise ValueError("Produto nao encontrado.")
+        db.execute(
+            """
+            UPDATE bebidas
+            SET nome = ?, preco_venda = ?, custo_estimado = ?, descricao = ?, imagem_url = ?, is_active = ?
+            WHERE id = ?
+            """,
+            (name, price, cost, description, image_url, is_active, product_id),
+        )
+        refresh_combo_costs_for_component(product_id)
+        return "Produto atualizado com sucesso."
+
+    db.execute(
+        """
+        INSERT INTO bebidas (
+            nome,
+            preco_venda,
+            custo_estimado,
+            categoria,
+            descricao,
+            tempo_preparo,
+            imagem_url,
+            is_active,
+            is_combo
+        )
+        VALUES (?, ?, ?, 'Bebida', ?, '3 min', ?, ?, 0)
+        """,
+        (name, price, cost, description, image_url, is_active),
+    )
+    return "Produto criado com sucesso."
+
+
+def upsert_combo_from_form(combo_id: int | None = None) -> str:
+    db = get_db()
+    name = sanitize_text(request.form.get("name"), "", limit=80)
+    if not name:
+        raise ValueError("Nome do combo e obrigatorio.")
+
+    price = parse_decimal_input(request.form.get("price"), "Preco do combo", minimum=0.01)
+    description = sanitize_optional_text(request.form.get("description"), limit=280)
+    image_url = normalize_product_image(request.form.get("image_url"))
+    is_active = 1 if checkbox_to_bool(request.form.get("is_active")) else 0
+    components = parse_combo_components_from_form(request.form.getlist("component_ids"))
+    catalog = fetch_beverage_map(include_inactive=True)
+    for component in components:
+        component_row = catalog.get(component["component_beverage_id"])
+        if not component_row or component_row["is_combo"]:
+            raise ValueError("Combos so podem ser formados por produtos simples.")
+
+    estimated_cost = calculate_combo_cost_estimate(components, catalog)
+
+    if combo_id:
+        row = db.execute(
+            "SELECT id FROM bebidas WHERE id = ? AND is_combo = 1",
+            (combo_id,),
+        ).fetchone()
+        if not row:
+            raise ValueError("Combo nao encontrado.")
+        db.execute(
+            """
+            UPDATE bebidas
+            SET nome = ?, preco_venda = ?, custo_estimado = ?, descricao = ?, imagem_url = ?, is_active = ?
+            WHERE id = ?
+            """,
+            (name, price, estimated_cost, description, image_url, is_active, combo_id),
+        )
+        db.execute("DELETE FROM combo_items WHERE combo_beverage_id = ?", (combo_id,))
+        target_combo_id = combo_id
+        success_message = "Combo atualizado com sucesso."
+    else:
+        cursor = db.execute(
+            """
+            INSERT INTO bebidas (
+                nome,
+                preco_venda,
+                custo_estimado,
+                categoria,
+                descricao,
+                tempo_preparo,
+                imagem_url,
+                is_active,
+                is_combo
+            )
+            VALUES (?, ?, ?, 'Combo', ?, '4 min', ?, ?, 1)
+            """,
+            (name, price, estimated_cost, description, image_url, is_active),
+        )
+        target_combo_id = cursor.lastrowid
+        success_message = "Combo criado com sucesso."
+
+    db.executemany(
+        """
+        INSERT INTO combo_items (combo_beverage_id, component_beverage_id, quantity)
+        VALUES (?, ?, ?)
+        """,
+        [
+            (target_combo_id, component["component_beverage_id"], component["quantity"])
+            for component in components
+        ],
+    )
+    return success_message
+
+
 @app.get("/")
 def index():
     return render_template(
@@ -1800,6 +2397,58 @@ def dashboard():
         shifts=fetch_shift_history(limit=5),
         current_user=get_current_user(),
     )
+
+
+@app.get("/painel/produtos")
+@login_required
+@role_required("admin")
+def products_page():
+    snapshot = fetch_products_management_snapshot()
+    return render_template(
+        "products.html",
+        products=snapshot["products"],
+        combos=snapshot["combos"],
+        component_options=snapshot["component_options"],
+        current_user=get_current_user(),
+        message=request.args.get("message"),
+        error=request.args.get("error"),
+    )
+
+
+@app.post("/painel/produtos/salvar")
+@login_required
+@role_required("admin")
+def save_product():
+    raw_product_id = request.form.get("product_id", "").strip()
+    product_id = int(raw_product_id) if raw_product_id.isdigit() else None
+    try:
+        message = upsert_product_from_form(product_id)
+        get_db().commit()
+        return build_products_redirect(message=message)
+    except sqlite3.IntegrityError:
+        get_db().rollback()
+        return build_products_redirect(error="Ja existe um produto com esse nome.")
+    except ValueError as error:
+        get_db().rollback()
+        return build_products_redirect(error=str(error))
+
+
+@app.post("/painel/produtos/combos/salvar")
+@login_required
+@role_required("admin")
+def save_combo():
+    raw_combo_id = request.form.get("combo_id", "").strip()
+    combo_id = int(raw_combo_id) if raw_combo_id.isdigit() else None
+    try:
+        message = upsert_combo_from_form(combo_id)
+        get_db().commit()
+        return build_products_redirect(message=message)
+    except sqlite3.IntegrityError:
+        get_db().rollback()
+        return build_products_redirect(error="Ja existe um item com esse nome.")
+    except ValueError as error:
+        get_db().rollback()
+        return build_products_redirect(error=str(error))
 
 
 @app.get("/historico-turnos")
@@ -1931,10 +2580,9 @@ def create_order():
     customer_name = sanitize_text(payload.get("customer_name"), "Cliente", limit=48)
     table_label = sanitize_text(payload.get("table_label"), "Retirada", limit=32)
     source = sanitize_text(payload.get("source"), DEFAULT_ORDER_SOURCE, limit=24)
-    bebidas_por_id = {
-        row["id"]: row
-        for row in db.execute("SELECT id, nome, preco_venda, custo_estimado FROM bebidas").fetchall()
-    }
+    bebidas_por_id = fetch_beverage_map(include_inactive=True)
+    combo_components_map = fetch_combo_components_map()
+    inventory_by_name = get_inventory_by_name()
 
     itens = []
     valor_total = 0.0
@@ -1942,8 +2590,16 @@ def create_order():
         bebida_id = entry["id"]
         quantidade = entry["quantity"]
         bebida = bebidas_por_id.get(bebida_id)
-        if not bebida or quantidade <= 0:
+        if not bebida or quantidade <= 0 or not bebida["is_active"]:
             continue
+        is_available, availability_note = beverage_availability(
+            bebida,
+            inventory_by_name,
+            bebidas_por_id,
+            combo_components_map,
+        )
+        if not is_available:
+            return jsonify({"error": availability_note or f"{bebida['nome']} indisponivel."}), 400
         subtotal = round(bebida["preco_venda"] * quantidade, 2)
         valor_total += subtotal
         itens.append(
@@ -1952,14 +2608,16 @@ def create_order():
                 "name": bebida["nome"],
                 "quantity": quantidade,
                 "price": bebida["preco_venda"],
+                "cost": bebida["custo_estimado"],
                 "subtotal": subtotal,
+                "item_type": "combo" if bebida["is_combo"] else "product",
             }
         )
 
     if not itens:
         return jsonify({"error": "Itens invalidos."}), 400
 
-    shortages = check_stock_availability(itens)
+    shortages = check_stock_availability(itens, bebidas_por_id, combo_components_map)
     if shortages:
         readable = ", ".join(
             f'{entry["item"]} ({entry["available"]}/{entry["needed"]} {entry["unit"]})'.strip()
@@ -1986,15 +2644,33 @@ def create_order():
 
     db.executemany(
         """
-        INSERT INTO itens_pedido (pedido_id, bebida_id, quantidade, subtotal)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO itens_pedido (
+            pedido_id,
+            bebida_id,
+            quantidade,
+            subtotal,
+            item_name_snapshot,
+            item_type_snapshot,
+            unit_price_snapshot,
+            unit_cost_snapshot
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
-            (pedido_id, item["bebida_id"], item["quantity"], item["subtotal"])
+            (
+                pedido_id,
+                item["bebida_id"],
+                item["quantity"],
+                item["subtotal"],
+                item["name"],
+                item["item_type"],
+                item["price"],
+                item["cost"],
+            )
             for item in itens
         ],
     )
-    apply_stock_deductions(itens)
+    apply_stock_deductions(itens, bebidas_por_id, combo_components_map)
     db.commit()
 
     row = db.execute(
