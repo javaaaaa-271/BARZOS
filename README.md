@@ -25,3 +25,4 @@ In development and already tested in real-world scenarios.
 ## Goal
 
 To simplify bar operations and provide real-time insights for decision making.
+LINK: https://baros-hh80.onrender.com/
