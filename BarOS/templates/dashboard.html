@@ -4,12 +4,12 @@
 {% block body_class %}dashboard-body{% endblock %}
 
 {% block content %}
-<main class="dashboard-shell">
+<main class="dashboard-shell dashboard-shell-premium">
   <header class="dashboard-header">
     <div>
       <p class="eyebrow">Painel do bar</p>
       <h1>Operacao em tempo real</h1>
-      <p class="dashboard-user-meta">{{ current_user.display_name }} · {{ current_user.role_label }}</p>
+      <p class="dashboard-user-meta">{{ current_user.display_name }} / {{ current_user.role_label }}</p>
     </div>
     <div class="dashboard-actions">
       <a class="secondary-button" href="{{ url_for('index') }}">Ver menu</a>
@@ -25,31 +25,31 @@
     </div>
   </header>
 
-  <section class="stats-grid">
-    <article class="stat-card">
+  <section class="stats-grid premium-stats-grid">
+    <article class="stat-card stat-card-highlight">
       <span>Pedidos pendentes</span>
       <strong id="pending-count">{{ summary.pending_count }}</strong>
     </article>
-    <article class="stat-card">
+    <article class="stat-card stat-card-highlight">
       <span>Pedidos finalizados</span>
       <strong id="completed-count">{{ summary.completed_count }}</strong>
     </article>
-    <article class="stat-card">
+    <article class="stat-card stat-card-highlight">
       <span>Total de pedidos</span>
       <strong id="total-count">{{ summary.total_count }}</strong>
     </article>
-    <article class="stat-card">
+    <article class="stat-card stat-card-highlight stat-card-accent">
       <span>Faturamento</span>
       <strong id="revenue-total">R$ {{ "%.2f"|format(summary.revenue) }}</strong>
     </article>
-    <article class="stat-card">
+    <article class="stat-card stat-card-highlight">
       <span>Ticket medio</span>
       <strong id="average-ticket">R$ {{ "%.2f"|format(summary.average_ticket) }}</strong>
     </article>
   </section>
 
-  <section class="dashboard-grid">
-    <article class="panel-card">
+  <section class="dashboard-grid dashboard-grid-premium">
+    <article class="panel-card panel-card-premium">
       <div class="panel-head">
         <div>
           <p class="mini-label">Fila</p>
@@ -60,7 +60,7 @@
       <div id="pending-orders" class="order-list"></div>
     </article>
 
-    <article class="panel-card">
+    <article class="panel-card panel-card-premium">
       <div class="panel-head">
         <div>
           <p class="mini-label">Destaques</p>
@@ -96,7 +96,7 @@
       </div>
     </article>
 
-    <article class="panel-card">
+    <article class="panel-card panel-card-premium">
       <div class="panel-head">
         <div>
           <p class="mini-label">Logistica</p>
@@ -122,7 +122,7 @@
         <article class="inventory-row" data-item-id="{{ item.id }}">
           <div class="inventory-copy">
             <strong>{{ item.name }}</strong>
-            <p>{{ item.category }} · {{ item.stock_level }} {{ item.unit }} / minimo {{ item.par_level }}</p>
+            <p>{{ item.category }} / {{ item.stock_level }} {{ item.unit }} / minimo {{ item.par_level }}</p>
             <span class="muted-note">Atualizado {{ item.updated_at }}</span>
           </div>
           <div class="inventory-actions">
@@ -152,7 +152,7 @@
       {% endif %}
     </article>
 
-    <article class="panel-card wide-card">
+    <article class="panel-card panel-card-premium wide-card">
       <div class="panel-head">
         <div>
           <p class="mini-label">Historico</p>
@@ -162,7 +162,7 @@
       <div id="completed-orders" class="order-list compact"></div>
     </article>
 
-    <article class="panel-card wide-card">
+    <article class="panel-card panel-card-premium wide-card">
       <div class="panel-head">
         <div>
           <p class="mini-label">Turnos</p>
@@ -209,7 +209,7 @@
             </div>
             <div class="shift-observations-inline">
               <strong>Observacoes</strong>
-              <p>{{ shift.observations|join(' · ') if shift.observations else 'Sem observacoes registradas.' }}</p>
+              <p>{{ shift.observations|join(' / ') if shift.observations else 'Sem observacoes registradas.' }}</p>
             </div>
             <div class="shift-actions">
               <a class="primary-button small-button" href="{{ url_for('shift_detail_page', shift_id=shift.id) }}">Ver detalhes</a>
@@ -226,7 +226,7 @@
       </div>
     </article>
 
-    <article class="panel-card wide-card">
+    <article class="panel-card panel-card-premium wide-card">
       <div class="panel-head">
         <div>
           <p class="mini-label">Checklist do turno</p>

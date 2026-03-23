@@ -4,8 +4,8 @@
 {% block body_class %}customer-body{% endblock %}
 
 {% block content %}
-<main class="customer-shell">
-  <section class="hero-panel">
+<main class="customer-shell customer-shell-premium">
+  <section class="hero-panel hero-panel-premium">
     <div class="hero-copy">
       <p class="eyebrow">BarOS Experience</p>
       <h1>Menu digital com cara de casa premium.</h1>
@@ -28,7 +28,7 @@
     </div>
   </section>
 
-  <section class="menu-section">
+  <section class="menu-section menu-section-premium">
     <div class="section-heading">
       <div>
         <p class="eyebrow">Cardapio</p>
@@ -46,10 +46,13 @@
       </form>
     </div>
 
-    <div class="menu-grid">
+    <div class="menu-grid premium-product-grid">
       {% for item in menu %}
-      <article class="menu-card {% if not item.is_available %}menu-card-disabled{% endif %}" data-menu-id="{{ item.id }}" data-available="{{ 'true' if item.is_available else 'false' }}">
+      <article class="menu-card premium-product-card {% if item.is_combo %}menu-card-combo{% endif %} {% if not item.is_available %}menu-card-disabled{% endif %}" data-menu-id="{{ item.id }}" data-available="{{ 'true' if item.is_available else 'false' }}">
         <div class="menu-card-media">
+          {% if item.is_combo %}
+          <span class="menu-badge-combo">Combo</span>
+          {% endif %}
           {% if item.image_src %}
           <img class="menu-card-image" src="{{ item.image_src }}" alt="{{ item.name }}">
           {% else %}
@@ -58,20 +61,22 @@
           </div>
           {% endif %}
         </div>
-        <div class="menu-card-top">
+        <div class="menu-card-top menu-card-meta-row">
           <span class="tag">{{ item.category }}</span>
           <span class="prep">{{ item.prep_time }}</span>
         </div>
-        <h3>{{ item.name }}</h3>
-        {% if item.is_combo %}
-        <p class="combo-note">Combo vendavel com baixa automatica dos itens da composicao.</p>
-        {% endif %}
-        <p>{{ item.description }}</p>
-        {% if not item.is_available %}
-        <p class="availability-note">{{ item.availability_note }}</p>
-        {% endif %}
+        <div class="menu-card-content">
+          <h3>{{ item.name }}</h3>
+          {% if item.is_combo %}
+          <p class="combo-note">Combo vendavel com baixa automatica dos itens da composicao.</p>
+          {% endif %}
+          <p>{{ item.description }}</p>
+          {% if not item.is_available %}
+          <p class="availability-note">{{ item.availability_note }}</p>
+          {% endif %}
+        </div>
         <div class="menu-card-bottom">
-          <strong>R$ {{ "%.2f"|format(item.price) }}</strong>
+          <strong class="menu-price">R$ {{ "%.2f"|format(item.price) }}</strong>
           <div class="qty-picker">
             <button type="button" class="qty-btn" data-action="decrease" {% if not item.is_available %}disabled{% endif %}>-</button>
             <span class="qty-value">0</span>
@@ -83,7 +88,7 @@
     </div>
   </section>
 
-  <aside class="checkout-panel">
+  <aside class="checkout-panel checkout-panel-premium">
     <div class="checkout-header">
       <div>
         <p class="eyebrow">Resumo do pedido</p>

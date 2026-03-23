@@ -4,7 +4,7 @@
 {% block body_class %}dashboard-body{% endblock %}
 
 {% block content %}
-<main class="dashboard-shell products-shell">
+<main class="dashboard-shell products-shell products-shell-premium">
   <header class="dashboard-header">
     <div>
       <p class="eyebrow">Gestao de produtos</p>
@@ -24,241 +24,245 @@
   <div class="alert">{{ error }}</div>
   {% endif %}
 
-  <section class="products-grid">
-    <article class="panel-card">
-      <div class="panel-head">
-        <div>
-          <p class="mini-label">Novo produto</p>
-          <h2>Criar item simples</h2>
+  <section class="products-layout">
+    <div class="products-sidebar">
+      <article class="panel-card panel-card-premium sticky-form-card">
+        <div class="panel-head">
+          <div>
+            <p class="mini-label">Novo produto</p>
+            <h2>Criar item simples</h2>
+          </div>
         </div>
-      </div>
-      <form class="product-form" method="post" action="{{ url_for('save_product') }}">
-        <label>
-          <span>Nome</span>
-          <input type="text" name="name" placeholder="Ex.: Gin Tropical" required>
-        </label>
-        <label>
-          <span>Descricao</span>
-          <textarea name="description" rows="3" placeholder="Resumo curto exibido no cardapio"></textarea>
-        </label>
-        <div class="form-grid-two">
+        <form class="product-form" method="post" action="{{ url_for('save_product') }}">
           <label>
-            <span>Preco de venda</span>
-            <input type="text" name="price" placeholder="29.90" required>
+            <span>Nome</span>
+            <input type="text" name="name" placeholder="Ex.: Gin Tropical" required>
           </label>
           <label>
-            <span>Custo estimado</span>
-            <input type="text" name="cost" placeholder="9.40" required>
+            <span>Descricao</span>
+            <textarea name="description" rows="3" placeholder="Resumo curto exibido no cardapio"></textarea>
           </label>
-        </div>
-        <label>
-          <span>Imagem</span>
-          <input type="text" name="image_url" placeholder="https://... ou /static/imagens/item.jpg">
-        </label>
-        <label class="checkbox-row">
-          <input type="checkbox" name="is_active" checked>
-          <span>Produto ativo no cardapio</span>
-        </label>
-        <button class="primary-button" type="submit">Salvar produto</button>
-      </form>
-    </article>
-
-    <article class="panel-card">
-      <div class="panel-head">
-        <div>
-          <p class="mini-label">Novo combo</p>
-          <h2>Criar item composto</h2>
-        </div>
-      </div>
-      <form class="product-form" method="post" action="{{ url_for('save_combo') }}">
-        <label>
-          <span>Nome do combo</span>
-          <input type="text" name="name" placeholder="Ex.: Combo Gin + Tonica" required>
-        </label>
-        <label>
-          <span>Descricao</span>
-          <textarea name="description" rows="3" placeholder="Ex.: 2 drinks + energetico"></textarea>
-        </label>
-        <label>
-          <span>Preco do combo</span>
-          <input type="text" name="price" placeholder="54.90" required>
-        </label>
-        <label>
-          <span>Imagem</span>
-          <input type="text" name="image_url" placeholder="https://... ou /static/imagens/combo.jpg">
-        </label>
-        <label class="checkbox-row">
-          <input type="checkbox" name="is_active" checked>
-          <span>Combo ativo no cardapio</span>
-        </label>
-        <div class="combo-selector">
-          <p class="mini-label">Composicao</p>
-          <div class="component-list">
-            {% for option in component_options %}
-            <label class="component-row">
-              <div class="component-row-main">
-                <input type="checkbox" name="component_ids" value="{{ option.id }}">
-                <span>{{ option.name }}</span>
-              </div>
-              <input type="number" min="1" step="1" name="component_quantity_{{ option.id }}" value="1">
-            </label>
-            {% endfor %}
-          </div>
-        </div>
-        <button class="primary-button" type="submit">Salvar combo</button>
-      </form>
-    </article>
-  </section>
-
-  <section class="panel-card">
-    <div class="panel-head">
-      <div>
-        <p class="mini-label">Produtos</p>
-        <h2>Itens simples do cardapio</h2>
-      </div>
-    </div>
-    <div class="managed-product-list">
-      {% if products %}
-        {% for product in products %}
-        <article class="managed-product-card">
-          <div class="managed-product-preview">
-            {% if product.image_src %}
-            <img class="managed-product-thumb" src="{{ product.image_src }}" alt="{{ product.name }}">
-            {% else %}
-            <div class="managed-product-placeholder">{{ product.placeholder }}</div>
-            {% endif %}
-            <div>
-              <strong>{{ product.name }}</strong>
-              <p>{{ product.description }}</p>
-              <div class="hero-meta compact-meta">
-                <span>{{ product.category }}</span>
-                <span>{{ 'Ativo' if product.is_active else 'Inativo' }}</span>
-              </div>
-            </div>
-          </div>
-          <form class="product-form compact-form" method="post" action="{{ url_for('save_product') }}">
-            <input type="hidden" name="product_id" value="{{ product.id }}">
-            <div class="form-grid-two">
-              <label>
-                <span>Nome</span>
-                <input type="text" name="name" value="{{ product.name }}" required>
-              </label>
-              <label>
-                <span>Preco</span>
-                <input type="text" name="price" value="{{ '%.2f'|format(product.price) }}" required>
-              </label>
-            </div>
-            <div class="form-grid-two">
-              <label>
-                <span>Custo estimado</span>
-                <input type="text" name="cost" value="{{ '%.2f'|format(product.cost) }}" required>
-              </label>
-              <label>
-                <span>Imagem</span>
-                <input type="text" name="image_url" value="{{ product.raw_image_url }}">
-              </label>
-            </div>
+          <div class="form-grid-two">
             <label>
-              <span>Descricao</span>
-              <textarea name="description" rows="2">{{ product.raw_description }}</textarea>
-            </label>
-            <label class="checkbox-row">
-              <input type="checkbox" name="is_active" {% if product.is_active %}checked{% endif %}>
-              <span>Produto ativo</span>
-            </label>
-            <button class="secondary-button" type="submit">Atualizar produto</button>
-          </form>
-        </article>
-        {% endfor %}
-      {% else %}
-      <p class="empty-inline">Nenhum produto simples cadastrado.</p>
-      {% endif %}
-    </div>
-  </section>
-
-  <section class="panel-card">
-    <div class="panel-head">
-      <div>
-        <p class="mini-label">Combos</p>
-        <h2>Itens compostos vendaveis</h2>
-      </div>
-    </div>
-    <div class="managed-product-list">
-      {% if combos %}
-        {% for combo in combos %}
-        <article class="managed-product-card">
-          <div class="managed-product-preview">
-            {% if combo.image_src %}
-            <img class="managed-product-thumb" src="{{ combo.image_src }}" alt="{{ combo.name }}">
-            {% else %}
-            <div class="managed-product-placeholder">{{ combo.placeholder }}</div>
-            {% endif %}
-            <div>
-              <strong>{{ combo.name }}</strong>
-              <p>{{ combo.description }}</p>
-              <div class="hero-meta compact-meta">
-                <span>{{ combo.component_count }} itens</span>
-                <span>{{ 'Ativo' if combo.is_active else 'Inativo' }}</span>
-              </div>
-              <div class="combo-component-chips">
-                {% for component in combo.components %}
-                <span>{{ component.quantity }}x {{ component.name }}</span>
-                {% endfor %}
-              </div>
-            </div>
-          </div>
-          <form class="product-form compact-form" method="post" action="{{ url_for('save_combo') }}">
-            <input type="hidden" name="combo_id" value="{{ combo.id }}">
-            <div class="form-grid-two">
-              <label>
-                <span>Nome</span>
-                <input type="text" name="name" value="{{ combo.name }}" required>
-              </label>
-              <label>
-                <span>Preco</span>
-                <input type="text" name="price" value="{{ '%.2f'|format(combo.price) }}" required>
-              </label>
-            </div>
-            <label>
-              <span>Imagem</span>
-              <input type="text" name="image_url" value="{{ combo.raw_image_url }}">
+              <span>Preco de venda</span>
+              <input type="text" name="price" placeholder="29.90" required>
             </label>
             <label>
-              <span>Descricao</span>
-              <textarea name="description" rows="2">{{ combo.raw_description }}</textarea>
+              <span>Custo estimado</span>
+              <input type="text" name="cost" placeholder="9.40" required>
             </label>
-            <label class="checkbox-row">
-              <input type="checkbox" name="is_active" {% if combo.is_active %}checked{% endif %}>
-              <span>Combo ativo</span>
-            </label>
-            <div class="combo-selector">
-              <p class="mini-label">Composicao</p>
-              <div class="component-list">
-                {% for option in component_options %}
-                {% set selected = combo.components|selectattr('component_beverage_id', 'equalto', option.id)|list %}
-                <label class="component-row">
-                  <div class="component-row-main">
-                    <input type="checkbox" name="component_ids" value="{{ option.id }}" {% if selected %}checked{% endif %}>
-                    <span>{{ option.name }}</span>
+          </div>
+          <label>
+            <span>Imagem</span>
+            <input type="text" name="image_url" placeholder="https://... ou /static/imagens/item.jpg">
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" name="is_active" checked>
+            <span>Produto ativo no cardapio</span>
+          </label>
+          <button class="primary-button" type="submit">Salvar produto</button>
+        </form>
+      </article>
+
+      <article class="panel-card panel-card-premium sticky-form-card secondary-form-card">
+        <div class="panel-head">
+          <div>
+            <p class="mini-label">Novo combo</p>
+            <h2>Criar item composto</h2>
+          </div>
+        </div>
+        <form class="product-form" method="post" action="{{ url_for('save_combo') }}">
+          <label>
+            <span>Nome do combo</span>
+            <input type="text" name="name" placeholder="Ex.: Combo Gin + Tonica" required>
+          </label>
+          <label>
+            <span>Descricao</span>
+            <textarea name="description" rows="3" placeholder="Ex.: 2 drinks + energetico"></textarea>
+          </label>
+          <label>
+            <span>Preco do combo</span>
+            <input type="text" name="price" placeholder="54.90" required>
+          </label>
+          <label>
+            <span>Imagem</span>
+            <input type="text" name="image_url" placeholder="https://... ou /static/imagens/combo.jpg">
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" name="is_active" checked>
+            <span>Combo ativo no cardapio</span>
+          </label>
+          <div class="combo-selector">
+            <p class="mini-label">Composicao</p>
+            <div class="component-list">
+              {% for option in component_options %}
+              <label class="component-row">
+                <div class="component-row-main">
+                  <input type="checkbox" name="component_ids" value="{{ option.id }}">
+                  <span>{{ option.name }}</span>
+                </div>
+                <input type="number" min="1" step="1" name="component_quantity_{{ option.id }}" value="1">
+              </label>
+              {% endfor %}
+            </div>
+          </div>
+          <button class="primary-button" type="submit">Salvar combo</button>
+        </form>
+      </article>
+    </div>
+
+    <div class="products-content">
+      <section class="panel-card panel-card-premium">
+        <div class="panel-head">
+          <div>
+            <p class="mini-label">Produtos</p>
+            <h2>Itens simples do cardapio</h2>
+          </div>
+        </div>
+        <div class="managed-product-list">
+          {% if products %}
+            {% for product in products %}
+            <article class="managed-product-card">
+              <div class="managed-product-preview">
+                {% if product.image_src %}
+                <img class="managed-product-thumb" src="{{ product.image_src }}" alt="{{ product.name }}">
+                {% else %}
+                <div class="managed-product-placeholder">{{ product.placeholder }}</div>
+                {% endif %}
+                <div>
+                  <strong>{{ product.name }}</strong>
+                  <p>{{ product.description }}</p>
+                  <div class="hero-meta compact-meta">
+                    <span>{{ product.category }}</span>
+                    <span>{{ 'Ativo' if product.is_active else 'Inativo' }}</span>
                   </div>
-                  <input
-                    type="number"
-                    min="1"
-                    step="1"
-                    name="component_quantity_{{ option.id }}"
-                    value="{{ selected[0].quantity if selected else 1 }}"
-                  >
-                </label>
-                {% endfor %}
+                </div>
               </div>
-            </div>
-            <button class="secondary-button" type="submit">Atualizar combo</button>
-          </form>
-        </article>
-        {% endfor %}
-      {% else %}
-      <p class="empty-inline">Nenhum combo cadastrado ainda.</p>
-      {% endif %}
+              <form class="product-form compact-form" method="post" action="{{ url_for('save_product') }}">
+                <input type="hidden" name="product_id" value="{{ product.id }}">
+                <div class="form-grid-two">
+                  <label>
+                    <span>Nome</span>
+                    <input type="text" name="name" value="{{ product.name }}" required>
+                  </label>
+                  <label>
+                    <span>Preco</span>
+                    <input type="text" name="price" value="{{ '%.2f'|format(product.price) }}" required>
+                  </label>
+                </div>
+                <div class="form-grid-two">
+                  <label>
+                    <span>Custo estimado</span>
+                    <input type="text" name="cost" value="{{ '%.2f'|format(product.cost) }}" required>
+                  </label>
+                  <label>
+                    <span>Imagem</span>
+                    <input type="text" name="image_url" value="{{ product.raw_image_url }}">
+                  </label>
+                </div>
+                <label>
+                  <span>Descricao</span>
+                  <textarea name="description" rows="2">{{ product.raw_description }}</textarea>
+                </label>
+                <label class="checkbox-row">
+                  <input type="checkbox" name="is_active" {% if product.is_active %}checked{% endif %}>
+                  <span>Produto ativo</span>
+                </label>
+                <button class="secondary-button" type="submit">Atualizar produto</button>
+              </form>
+            </article>
+            {% endfor %}
+          {% else %}
+          <p class="empty-inline">Nenhum produto simples cadastrado.</p>
+          {% endif %}
+        </div>
+      </section>
+
+      <section class="panel-card panel-card-premium">
+        <div class="panel-head">
+          <div>
+            <p class="mini-label">Combos</p>
+            <h2>Itens compostos vendaveis</h2>
+          </div>
+        </div>
+        <div class="managed-product-list">
+          {% if combos %}
+            {% for combo in combos %}
+            <article class="managed-product-card">
+              <div class="managed-product-preview">
+                {% if combo.image_src %}
+                <img class="managed-product-thumb" src="{{ combo.image_src }}" alt="{{ combo.name }}">
+                {% else %}
+                <div class="managed-product-placeholder">{{ combo.placeholder }}</div>
+                {% endif %}
+                <div>
+                  <strong>{{ combo.name }}</strong>
+                  <p>{{ combo.description }}</p>
+                  <div class="hero-meta compact-meta">
+                    <span>{{ combo.component_count }} itens</span>
+                    <span>{{ 'Ativo' if combo.is_active else 'Inativo' }}</span>
+                  </div>
+                  <div class="combo-component-chips">
+                    {% for component in combo.components %}
+                    <span>{{ component.quantity }}x {{ component.name }}</span>
+                    {% endfor %}
+                  </div>
+                </div>
+              </div>
+              <form class="product-form compact-form" method="post" action="{{ url_for('save_combo') }}">
+                <input type="hidden" name="combo_id" value="{{ combo.id }}">
+                <div class="form-grid-two">
+                  <label>
+                    <span>Nome</span>
+                    <input type="text" name="name" value="{{ combo.name }}" required>
+                  </label>
+                  <label>
+                    <span>Preco</span>
+                    <input type="text" name="price" value="{{ '%.2f'|format(combo.price) }}" required>
+                  </label>
+                </div>
+                <label>
+                  <span>Imagem</span>
+                  <input type="text" name="image_url" value="{{ combo.raw_image_url }}">
+                </label>
+                <label>
+                  <span>Descricao</span>
+                  <textarea name="description" rows="2">{{ combo.raw_description }}</textarea>
+                </label>
+                <label class="checkbox-row">
+                  <input type="checkbox" name="is_active" {% if combo.is_active %}checked{% endif %}>
+                  <span>Combo ativo</span>
+                </label>
+                <div class="combo-selector">
+                  <p class="mini-label">Composicao</p>
+                  <div class="component-list">
+                    {% for option in component_options %}
+                    {% set selected = combo.components|selectattr('component_beverage_id', 'equalto', option.id)|list %}
+                    <label class="component-row">
+                      <div class="component-row-main">
+                        <input type="checkbox" name="component_ids" value="{{ option.id }}" {% if selected %}checked{% endif %}>
+                        <span>{{ option.name }}</span>
+                      </div>
+                      <input
+                        type="number"
+                        min="1"
+                        step="1"
+                        name="component_quantity_{{ option.id }}"
+                        value="{{ selected[0].quantity if selected else 1 }}"
+                      >
+                    </label>
+                    {% endfor %}
+                  </div>
+                </div>
+                <button class="secondary-button" type="submit">Atualizar combo</button>
+              </form>
+            </article>
+            {% endfor %}
+          {% else %}
+          <p class="empty-inline">Nenhum combo cadastrado ainda.</p>
+          {% endif %}
+        </div>
+      </section>
     </div>
   </section>
 </main>
