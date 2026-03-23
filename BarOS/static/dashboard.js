@@ -16,6 +16,7 @@ const closeoutContent = document.getElementById("closeout-content");
 const closeoutDrinks = document.getElementById("closeout-drinks");
 const closeoutExportLink = document.getElementById("closeout-export-link");
 const closeCloseoutModalButton = document.getElementById("close-closeout-modal");
+const closeCloseoutModalTopButton = document.getElementById("close-closeout-modal-top");
 
 let latestClosedShiftId = null;
 
@@ -23,6 +24,11 @@ const brl = new Intl.NumberFormat("pt-BR", {
   style: "currency",
   currency: "BRL",
 });
+
+function closeCloseoutModal() {
+  closeoutModal?.classList.add("hidden");
+  closeoutModal?.setAttribute("aria-hidden", "true");
+}
 
 function renderOrderItems(items) {
   return items
@@ -471,9 +477,17 @@ notesContainer?.addEventListener("click", (event) => {
 
 closeBarButton?.addEventListener("click", closeBar);
 resetDataButton?.addEventListener("click", resetData);
-closeCloseoutModalButton?.addEventListener("click", () => {
-  closeoutModal.classList.add("hidden");
-  closeoutModal.setAttribute("aria-hidden", "true");
+closeCloseoutModalButton?.addEventListener("click", closeCloseoutModal);
+closeCloseoutModalTopButton?.addEventListener("click", closeCloseoutModal);
+closeoutModal?.addEventListener("click", (event) => {
+  if (event.target === closeoutModal) {
+    closeCloseoutModal();
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !closeoutModal?.classList.contains("hidden")) {
+    closeCloseoutModal();
+  }
 });
 
 setCloseoutExportLink(null);
