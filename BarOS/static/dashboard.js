@@ -78,7 +78,7 @@ function renderCompleted(orders) {
           <span class="status-badge">Concluido</span>
         </div>
         <h3>${order.customer_name}</h3>
-        <p>${order.table_label} · concluido em ${order.completed_at || order.created_at}</p>
+        <p>${order.table_label} / concluido em ${order.completed_at || order.created_at}</p>
         <ul>${renderOrderItems(order.items)}</ul>
       </article>
     `
@@ -143,7 +143,7 @@ function renderInventory(items) {
       <article class="inventory-row" data-item-id="${item.id}">
         <div class="inventory-copy">
           <strong>${item.name}</strong>
-          <p>${item.category} · ${item.stock_level} ${item.unit} / minimo ${item.par_level}</p>
+          <p>${item.category} / ${item.stock_level} ${item.unit} / minimo ${item.par_level}</p>
           <span class="muted-note">Atualizado ${item.updated_at}</span>
         </div>
         <div class="inventory-actions">
@@ -203,7 +203,7 @@ function renderShiftHistory(shifts) {
       const bebidaMaisVendida = shift.summary.bebida_mais_vendida?.name || "Sem dados";
       const horarioPico = shift.summary.horario_pico?.label || "Sem dados";
       const observacoes = Array.isArray(shift.observations) && shift.observations.length
-        ? shift.observations.join(" · ")
+        ? shift.observations.join(" / ")
         : "Sem observacoes registradas.";
 
       return `

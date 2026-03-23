@@ -8,13 +8,27 @@ const currencyFormatter = new Intl.NumberFormat("pt-BR", {
 
 const orderSummary = document.getElementById("order-summary");
 const orderTotal = document.getElementById("order-total");
+const orderCountBadge = document.getElementById("order-count-badge");
 const submitOrderButton = document.getElementById("submit-order");
 const confirmationModal = document.getElementById("confirmation-modal");
 const confirmationCode = document.getElementById("confirmation-code");
 const confirmationText = document.getElementById("confirmation-text");
+const checkoutPanel = document.querySelector(".checkout-panel");
+const toggleCheckoutButton = document.getElementById("toggle-checkout");
+let checkoutCollapsed = false;
 
 function updateCardQuantity(card, nextQuantity) {
   card.querySelector(".qty-value").textContent = String(nextQuantity);
+}
+
+function updateCheckoutToggle(collapsed) {
+  if (!toggleCheckoutButton || !checkoutPanel) {
+    return;
+  }
+  checkoutCollapsed = collapsed;
+  checkoutPanel.classList.toggle("is-collapsed", collapsed);
+  toggleCheckoutButton.textContent = collapsed ? "Expandir" : "Minimizar";
+  toggleCheckoutButton.setAttribute("aria-expanded", collapsed ? "false" : "true");
 }
 
 function buildSummary() {
@@ -25,11 +39,16 @@ function buildSummary() {
     })
     .filter(Boolean);
 
+  const totalItems = selected.reduce((sum, item) => sum + item.quantity, 0);
+  orderCountBadge.textContent = `${totalItems} ${totalItems === 1 ? "item" : "itens"}`;
+  checkoutPanel?.classList.toggle("has-items", totalItems > 0);
+
   if (!selected.length) {
     orderSummary.className = "summary-list empty-state";
     orderSummary.textContent = "Selecione itens do cardapio para montar o pedido.";
     orderTotal.textContent = "R$ 0,00";
     submitOrderButton.disabled = true;
+    updateCheckoutToggle(false);
     return;
   }
 
@@ -88,6 +107,7 @@ async function submitOrder() {
     body: JSON.stringify({
       customer_name: customerName,
       table_label: tableLabel,
+      source: "menu-digital",
       items: selectedItems,
     }),
   });
@@ -120,6 +140,10 @@ document.querySelectorAll(".menu-card").forEach((card) => {
     const delta = button.dataset.action === "increase" ? 1 : -1;
     handleQuantityChange(card, delta);
   });
+});
+
+toggleCheckoutButton?.addEventListener("click", () => {
+  updateCheckoutToggle(!checkoutCollapsed);
 });
 
 submitOrderButton?.addEventListener("click", submitOrder);
