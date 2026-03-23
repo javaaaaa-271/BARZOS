@@ -17,11 +17,14 @@
         <span>Atendimento em fluxo continuo</span>
       </div>
     </div>
-    <div class="hero-card">
-      <p class="mini-label">Acesso interno</p>
-      <h2>Painel do bar protegido</h2>
-      <p>Monitore pedidos, acompanhe faturamento e finalize entregas em uma tela dedicada.</p>
-      <a class="secondary-button" href="{{ url_for('login') }}">Entrar no painel</a>
+    <div class="hero-card service-card">
+      <p class="mini-label">Servico da casa</p>
+      <h2>Pedidos rapidos, fila organizada e operacao protegida.</h2>
+      <p>O cliente monta a comanda aqui e a equipe acompanha tudo em uma rota separada, sem misturar atendimento com operacao.</p>
+      <div class="hero-meta compact-meta">
+        <span>Fluxo por turno</span>
+        <span>Baixa automatica</span>
+      </div>
     </div>
   </section>
 
@@ -46,11 +49,23 @@
     <div class="menu-grid">
       {% for item in menu %}
       <article class="menu-card {% if not item.is_available %}menu-card-disabled{% endif %}" data-menu-id="{{ item.id }}" data-available="{{ 'true' if item.is_available else 'false' }}">
+        <div class="menu-card-media">
+          {% if item.image_src %}
+          <img class="menu-card-image" src="{{ item.image_src }}" alt="{{ item.name }}">
+          {% else %}
+          <div class="menu-card-placeholder">
+            <span>{{ item.placeholder }}</span>
+          </div>
+          {% endif %}
+        </div>
         <div class="menu-card-top">
           <span class="tag">{{ item.category }}</span>
           <span class="prep">{{ item.prep_time }}</span>
         </div>
         <h3>{{ item.name }}</h3>
+        {% if item.is_combo %}
+        <p class="combo-note">Combo vendavel com baixa automatica dos itens da composicao.</p>
+        {% endif %}
         <p>{{ item.description }}</p>
         {% if not item.is_available %}
         <p class="availability-note">{{ item.availability_note }}</p>
@@ -69,12 +84,22 @@
   </section>
 
   <aside class="checkout-panel">
-    <div>
-      <p class="eyebrow">Resumo do pedido</p>
-      <h2>Feche a comanda em segundos</h2>
+    <div class="checkout-header">
+      <div>
+        <p class="eyebrow">Resumo do pedido</p>
+        <h2>Feche a comanda em segundos</h2>
+      </div>
+      <button id="toggle-checkout" class="ghost-button small-button" type="button" aria-expanded="true">
+        Minimizar
+      </button>
     </div>
-    <div id="order-summary" class="summary-list empty-state">
-      Selecione itens do cardapio para montar o pedido.
+    <div class="checkout-body">
+      <div class="checkout-inline-meta">
+        <span id="order-count-badge" class="pill">0 itens</span>
+      </div>
+      <div id="order-summary" class="summary-list empty-state">
+        Selecione itens do cardapio para montar o pedido.
+      </div>
     </div>
     <div class="checkout-footer">
       <div class="total-line">
@@ -85,6 +110,10 @@
       <p class="muted-note">Os pedidos enviados aparecem automaticamente no painel do bar.</p>
     </div>
   </aside>
+
+  <div class="customer-footer-actions">
+    <a class="subtle-entry-link" href="{{ staff_access_url }}">Area da equipe</a>
+  </div>
 </main>
 
 <section id="confirmation-modal" class="modal hidden" aria-hidden="true">

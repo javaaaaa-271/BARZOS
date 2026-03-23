@@ -15,6 +15,7 @@
       <a class="secondary-button" href="{{ url_for('index') }}">Ver menu</a>
       <a class="secondary-button" href="{{ url_for('shift_history_page') }}">Historico de turnos</a>
       {% if current_user.can_manage_bar %}
+      <a class="secondary-button" href="{{ url_for('products_page') }}">Produtos</a>
       <button class="primary-button" type="button" id="close-bar-button">Fechar bar</button>
       <button class="ghost-button" type="button" id="reset-data-button">Resetar dados</button>
       {% endif %}
@@ -256,14 +257,25 @@
 
 <section id="closeout-modal" class="modal hidden" aria-hidden="true">
   <div class="modal-card report-modal">
-    <p class="eyebrow">Fechamento</p>
-    <h2>Resumo do bar</h2>
-    <div id="closeout-content" class="report-grid"></div>
-    <div id="closeout-drinks" class="summary-list"></div>
-    {% if current_user.can_manage_bar %}
-    <a id="closeout-export-link" class="secondary-button full-width hidden-link" href="#">Exportar fechamento em CSV</a>
-    {% endif %}
-    <button class="secondary-button full-width" type="button" id="close-closeout-modal">Fechar</button>
+    <div class="modal-header">
+      <div>
+        <p class="eyebrow">Fechamento</p>
+        <h2>Resumo do bar</h2>
+      </div>
+      <button class="ghost-button small-button modal-close-button" type="button" id="close-closeout-modal-top" aria-label="Fechar resumo">
+        Fechar
+      </button>
+    </div>
+    <div class="modal-scroll-area">
+      <div id="closeout-content" class="report-grid"></div>
+      <div id="closeout-drinks" class="summary-list"></div>
+    </div>
+    <div class="modal-actions">
+      {% if current_user.can_manage_bar %}
+      <a id="closeout-export-link" class="secondary-button full-width hidden-link" href="#">Exportar fechamento em CSV</a>
+      {% endif %}
+      <button class="secondary-button full-width" type="button" id="close-closeout-modal">Fechar</button>
+    </div>
   </div>
 </section>
 {% endblock %}
