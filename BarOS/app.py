@@ -1,14 +1,24 @@
 from __future__ import annotations
 
+import csv
 import json
+import io
 import os
+import re
 import secrets
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import wraps
+from html import escape
 from pathlib import Path
 
-from flask import Flask, g, jsonify, redirect, render_template, request, session, url_for
+from flask import Flask, Response, g, jsonify, redirect, render_template, request, session, url_for
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import mm
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from werkzeug.security import check_password_hash, generate_password_hash
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -18,7 +28,14 @@ INSTANCE_DIR.mkdir(exist_ok=True)
 DATABASE_PATH = Path(os.getenv("BAROS_DB_PATH", INSTANCE_DIR / "baros.db"))
 BAR_USERNAME = os.getenv("BAROS_USERNAME", "admin")
 BAR_PASSWORD = os.getenv("BAROS_PASSWORD", "bar123")
+BAR_OPERATOR_USERNAME = os.getenv("BAROS_OPERATOR_USERNAME", "operacao")
+BAR_OPERATOR_PASSWORD = os.getenv("BAROS_OPERATOR_PASSWORD", BAR_PASSWORD)
 DEFAULT_SECRET = "troque-esta-chave-em-producao"
+DEFAULT_ORDER_SOURCE = "menu-digital"
+ROLE_LABELS = {
+    "admin": "Administrador",
+    "operator": "Operacao",
+}
 
 BEVERAGE_SEED = [
     {
@@ -234,6 +251,14 @@ SHIFT_NOTES_SEED = [
 ]
 
 
+def normalize_internal_access_path(raw_value: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9-]+", "-", (raw_value or "").strip().lower()).strip("-")
+    return cleaned or "backstage"
+
+
+INTERNAL_ACCESS_PATH = normalize_internal_access_path(os.getenv("BAROS_INTERNAL_ACCESS_PATH", "backstage"))
+
+
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.getenv("BAROS_SECRET_KEY", DEFAULT_SECRET)
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024
@@ -256,6 +281,48 @@ def hour_bucket_label(value: str | None) -> str:
     if not value:
         return "-"
     return datetime.fromisoformat(value).astimezone().strftime("%Hh")
+
+
+def duration_label(start_value: str | None, end_value: str | None) -> str:
+    if not start_value or not end_value:
+        return "-"
+    start = datetime.fromisoformat(start_value)
+    end = datetime.fromisoformat(end_value)
+    total_minutes = max(0, int((end - start).total_seconds() // 60))
+    hours, minutes = divmod(total_minutes, 60)
+    if hours and minutes:
+        return f"{hours}h {minutes}min"
+    if hours:
+        return f"{hours}h"
+    return f"{minutes}min"
+
+
+def peak_window_label(start_value: datetime | None) -> str:
+    if not start_value:
+        return "-"
+    end_value = start_value + timedelta(hours=1)
+    return f'{start_value.strftime("%d/%m %Hh")} - {end_value.strftime("%Hh")}'
+
+
+def sanitize_text(value: str | None, fallback: str, limit: int = 40) -> str:
+    normalized = (value or "").strip()
+    if not normalized:
+        return fallback
+    return normalized[:limit]
+
+
+def currency_brl(value: float | int | None) -> str:
+    return f"R$ {float(value or 0):.2f}"
+
+
+def load_summary_payload(raw_value: str | None) -> dict:
+    if not raw_value:
+        return {}
+    try:
+        data = json.loads(raw_value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def get_db() -> sqlite3.Connection:
@@ -282,6 +349,35 @@ def apply_response_headers(response):
     if request.path.startswith("/api/") or request.path == "/painel":
         response.headers["Cache-Control"] = "no-store"
     return response
+
+
+def seed_user(db: sqlite3.Connection, username: str, password: str, role: str, display_name: str) -> None:
+    if not username or not password:
+        return
+
+    password_hash = generate_password_hash(password)
+    existing = db.execute(
+        "SELECT id FROM staff_users WHERE username = ?",
+        (username,),
+    ).fetchone()
+    if existing:
+        db.execute(
+            """
+            UPDATE staff_users
+            SET password_hash = ?, role = ?, display_name = ?, is_active = 1, updated_at = ?
+            WHERE id = ?
+            """,
+            (password_hash, role, display_name, utc_now_iso(), existing["id"]),
+        )
+        return
+
+    db.execute(
+        """
+        INSERT INTO staff_users (username, password_hash, role, display_name, is_active, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 1, ?, ?)
+        """,
+        (username, password_hash, role, display_name, utc_now_iso(), utc_now_iso()),
+    )
 
 
 def init_db() -> None:
@@ -342,12 +438,33 @@ def init_db() -> None:
             status TEXT NOT NULL DEFAULT 'open',
             created_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS staff_users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'operator',
+            display_name TEXT NOT NULL,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
         """
     )
 
     pedido_columns = [row["name"] for row in db.execute("PRAGMA table_info(pedidos)").fetchall()]
     if "turno_id" not in pedido_columns:
         db.execute("ALTER TABLE pedidos ADD COLUMN turno_id INTEGER")
+    if "customer_name" not in pedido_columns:
+        db.execute("ALTER TABLE pedidos ADD COLUMN customer_name TEXT")
+    if "table_label" not in pedido_columns:
+        db.execute("ALTER TABLE pedidos ADD COLUMN table_label TEXT")
+    if "source" not in pedido_columns:
+        db.execute("ALTER TABLE pedidos ADD COLUMN source TEXT")
+    if "completed_at" not in pedido_columns:
+        db.execute("ALTER TABLE pedidos ADD COLUMN completed_at TEXT")
+    if "completed_by_user_id" not in pedido_columns:
+        db.execute("ALTER TABLE pedidos ADD COLUMN completed_by_user_id INTEGER")
 
     for beverage in BEVERAGE_SEED:
         exists = db.execute("SELECT 1 FROM bebidas WHERE nome = ?", (beverage["nome"],)).fetchone()
@@ -382,6 +499,9 @@ def init_db() -> None:
                 {**note, "created_at": utc_now_iso()},
             )
 
+    seed_user(db, BAR_USERNAME, BAR_PASSWORD, "admin", "Administrador")
+    seed_user(db, BAR_OPERATOR_USERNAME, BAR_OPERATOR_PASSWORD, "operator", "Operacao")
+
     open_shift = db.execute("SELECT id FROM turnos WHERE status = 'open' ORDER BY id DESC LIMIT 1").fetchone()
     if not open_shift:
         cursor = db.execute(
@@ -399,6 +519,16 @@ def init_db() -> None:
         "UPDATE pedidos SET turno_id = ? WHERE turno_id IS NULL",
         (open_shift_id,),
     )
+    db.execute(
+        "UPDATE pedidos SET customer_name = 'Cliente' WHERE customer_name IS NULL OR TRIM(customer_name) = ''"
+    )
+    db.execute(
+        "UPDATE pedidos SET table_label = 'Retirada' WHERE table_label IS NULL OR TRIM(table_label) = ''"
+    )
+    db.execute(
+        "UPDATE pedidos SET source = ? WHERE source IS NULL OR TRIM(source) = ''",
+        (DEFAULT_ORDER_SOURCE,),
+    )
 
     db.commit()
     db.close()
@@ -408,10 +538,38 @@ def login_required(view):
     @wraps(view)
     def wrapped_view(*args, **kwargs):
         if not session.get("bar_authenticated"):
-            return redirect(url_for("login"))
+            return redirect(url_for("staff_access"))
         return view(*args, **kwargs)
 
     return wrapped_view
+
+
+def role_required(*allowed_roles: str):
+    def decorator(view):
+        @wraps(view)
+        def wrapped_view(*args, **kwargs):
+            if not session.get("bar_authenticated"):
+                return redirect(url_for("staff_access"))
+            if session.get("bar_role") not in allowed_roles:
+                if request.path.startswith("/api/"):
+                    return jsonify({"error": "Voce nao tem permissao para esta acao."}), 403
+                return redirect(url_for("dashboard"))
+            return view(*args, **kwargs)
+
+        return wrapped_view
+
+    return decorator
+
+
+def get_current_user() -> dict:
+    role = session.get("bar_role", "operator")
+    return {
+        "id": session.get("bar_user_id"),
+        "display_name": session.get("bar_display_name", "Equipe"),
+        "role": role,
+        "role_label": ROLE_LABELS.get(role, role.title()),
+        "can_manage_bar": role == "admin",
+    }
 
 
 def generate_order_code() -> str:
@@ -620,9 +778,9 @@ def serialize_order(row: sqlite3.Row) -> dict:
         "created_at": display_datetime(row["horario_pedido"]),
         "completed_at": display_datetime(row["completed_at"]) if "completed_at" in row.keys() and row["completed_at"] else None,
         "total": row["valor_total"],
-        "customer_name": "Cliente",
-        "table_label": "Retirada",
-        "source": "salon",
+        "customer_name": row["customer_name"] if "customer_name" in row.keys() and row["customer_name"] else "Cliente",
+        "table_label": row["table_label"] if "table_label" in row.keys() and row["table_label"] else "Retirada",
+        "source": row["source"] if "source" in row.keys() and row["source"] else DEFAULT_ORDER_SOURCE,
         "items": [
             {
                 "id": item["bebida_id"],
@@ -638,7 +796,19 @@ def serialize_order(row: sqlite3.Row) -> dict:
 
 def fetch_orders(status: str | None = None, limit: int | None = None, shift_id: int | None = None) -> list[dict]:
     current_shift_id = shift_id or get_current_shift_id()
-    query = "SELECT id, codigo_retirada, horario_pedido, status, valor_total, NULL AS completed_at FROM pedidos"
+    query = """
+        SELECT
+            id,
+            codigo_retirada,
+            horario_pedido,
+            status,
+            valor_total,
+            customer_name,
+            table_label,
+            source,
+            completed_at
+        FROM pedidos
+    """
     params: list = []
     conditions = ["turno_id = ?"]
     params.append(current_shift_id)
@@ -746,9 +916,132 @@ def fetch_logistics_snapshot() -> dict:
     }
 
 
-def build_sales_report(shift_id: int | None = None) -> dict:
+def parse_shift_observations(summary_data: dict | None) -> list[str]:
+    if not isinstance(summary_data, dict):
+        return []
+
+    candidates = [
+        summary_data.get("observacoes"),
+        summary_data.get("observations"),
+        summary_data.get("observacoes_turno"),
+        summary_data.get("shift_notes"),
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, str):
+            cleaned = [line.strip() for line in candidate.splitlines() if line.strip()]
+            if cleaned:
+                return cleaned
+        if isinstance(candidate, list):
+            cleaned = [str(item).strip() for item in candidate if str(item).strip()]
+            if cleaned:
+                return cleaned
+    return []
+
+
+def fetch_shift_orders_rows(shift_id: int) -> list[sqlite3.Row]:
+    return get_db().execute(
+        """
+        SELECT
+            id,
+            codigo_retirada,
+            horario_pedido,
+            status,
+            valor_total,
+            customer_name,
+            table_label,
+            source,
+            completed_at
+        FROM pedidos
+        WHERE turno_id = ?
+        ORDER BY horario_pedido DESC
+        """,
+        (shift_id,),
+    ).fetchall()
+
+
+def build_peak_window_metrics(order_rows: list[sqlite3.Row]) -> dict | None:
+    if not order_rows:
+        return None
+
+    buckets: dict[datetime, dict[str, float]] = {}
+    for row in order_rows:
+        local_dt = datetime.fromisoformat(row["horario_pedido"]).astimezone()
+        bucket_start = local_dt.replace(minute=0, second=0, microsecond=0)
+        bucket = buckets.setdefault(bucket_start, {"orders": 0, "revenue": 0.0})
+        bucket["orders"] += 1
+        bucket["revenue"] += float(row["valor_total"] or 0)
+
+    peak_start, peak_data = sorted(
+        buckets.items(),
+        key=lambda item: (-item[1]["orders"], item[0]),
+    )[0]
+
+    return {
+        "label": peak_window_label(peak_start),
+        "hour": peak_window_label(peak_start),
+        "start_iso": peak_start.isoformat(),
+        "orders": int(peak_data["orders"]),
+        "order_count": int(peak_data["orders"]),
+        "revenue": round(peak_data["revenue"], 2),
+    }
+
+
+def build_change_indicator(delta_value: float, tolerance: float = 0.01) -> tuple[str, str]:
+    if abs(delta_value) < tolerance:
+        return "sem mudanca relevante", "neutral"
+    if delta_value > 0:
+        return "aumentou", "positive"
+    return "caiu", "negative"
+
+
+def build_numeric_metric_comparison(
+    label: str,
+    current_value: float,
+    compared_value: float,
+    *,
+    value_type: str = "number",
+    percentage: bool = True,
+    tolerance: float = 0.01,
+) -> dict:
+    current_number = float(current_value or 0)
+    compared_number = float(compared_value or 0)
+    delta_absolute = round(current_number - compared_number, 2)
+    indicator, tone = build_change_indicator(delta_absolute, tolerance=tolerance)
+    delta_percentage = None
+    if percentage and compared_number != 0:
+        delta_percentage = round((delta_absolute / compared_number) * 100, 1)
+
+    return {
+        "label": label,
+        "value_type": value_type,
+        "current": current_number,
+        "compared": compared_number,
+        "delta_absolute": delta_absolute,
+        "delta_percentage": delta_percentage,
+        "indicator": indicator,
+        "tone": tone,
+    }
+
+
+def build_text_metric_comparison(label: str, current_value: str, compared_value: str) -> dict:
+    normalized_current = current_value or "Sem dados"
+    normalized_compared = compared_value or "Sem dados"
+    indicator = "sem mudanca relevante" if normalized_current == normalized_compared else "mudou"
+    tone = "neutral"
+    return {
+        "label": label,
+        "value_type": "text",
+        "current": normalized_current,
+        "compared": normalized_compared,
+        "delta_absolute": None,
+        "delta_percentage": None,
+        "indicator": indicator,
+        "tone": tone,
+    }
+
+
+def build_shift_metrics(shift_id: int) -> dict:
     db = get_db()
-    current_shift_id = shift_id or get_current_shift_id()
     totals = db.execute(
         """
         SELECT
@@ -756,59 +1049,321 @@ def build_sales_report(shift_id: int | None = None) -> dict:
             COALESCE(SUM(valor_total), 0) AS total_vendido
         FROM pedidos
         WHERE turno_id = ?
-        """
-    , (current_shift_id,)).fetchone()
+        """,
+        (shift_id,),
+    ).fetchone()
 
-    by_beverage = db.execute(
+    ranking_rows = db.execute(
         """
-        SELECT b.nome, SUM(ip.quantidade) AS quantidade
+        SELECT
+            b.id AS beverage_id,
+            b.nome AS nome,
+            SUM(ip.quantidade) AS quantidade,
+            COALESCE(SUM(ip.subtotal), 0) AS total_vendido,
+            COALESCE(SUM(b.custo_estimado * ip.quantidade), 0) AS custo_estimado
         FROM itens_pedido ip
         JOIN bebidas b ON b.id = ip.bebida_id
         JOIN pedidos p ON p.id = ip.pedido_id
         WHERE p.turno_id = ?
         GROUP BY b.id, b.nome
         ORDER BY quantidade DESC, b.nome ASC
-        """
-    , (current_shift_id,)).fetchall()
+        """,
+        (shift_id,),
+    ).fetchall()
 
-    peak = db.execute(
+    shift_row = db.execute(
         """
-        SELECT strftime('%H', horario_pedido) AS hora, COUNT(*) AS total
-        FROM pedidos
-        WHERE turno_id = ?
-        GROUP BY hora
-        ORDER BY total DESC, hora ASC
-        LIMIT 1
-        """
-    , (current_shift_id,)).fetchone()
+        SELECT id, aberto_em, fechado_em, resumo_fechamento
+        FROM turnos
+        WHERE id = ?
+        """,
+        (shift_id,),
+    ).fetchone()
+    stored_summary = load_summary_payload(shift_row["resumo_fechamento"]) if shift_row else {}
 
-    top_item = by_beverage[0] if by_beverage else None
+    order_rows = fetch_shift_orders_rows(shift_id)
+    peak_window = build_peak_window_metrics(order_rows)
+
+    total_vendido = round(float(totals["total_vendido"] or 0), 2)
+    total_pedidos = int(totals["total_pedidos"] or 0)
+    custo_estimado = round(
+        sum(float(row["custo_estimado"] or 0) for row in ranking_rows),
+        2,
+    )
+    ticket_medio = round(total_vendido / total_pedidos, 2) if total_pedidos else 0.0
+
+    ranking_bebidas = [
+        {
+            "id": row["beverage_id"],
+            "name": row["nome"],
+            "quantity": int(row["quantidade"] or 0),
+            "revenue": round(float(row["total_vendido"] or 0), 2),
+            "cost": round(float(row["custo_estimado"] or 0), 2),
+        }
+        for row in ranking_rows
+    ]
+    bebida_mais_vendida = ranking_bebidas[0] if ranking_bebidas else None
 
     return {
-        "total_vendido": round(totals["total_vendido"] or 0, 2),
-        "total_pedidos": totals["total_pedidos"] or 0,
+        "total_vendido": total_vendido,
+        "total_pedidos": total_pedidos,
+        "ticket_medio": ticket_medio,
+        "total_itens_vendidos": sum(item["quantity"] for item in ranking_bebidas),
+        "bebida_mais_vendida": bebida_mais_vendida,
+        "bebida_mais_pedida": bebida_mais_vendida,
+        "top_5_bebidas": ranking_bebidas[:5],
+        "ranking_bebidas": ranking_bebidas,
         "quantidade_por_bebida": [
-            {"name": row["nome"], "quantity": row["quantidade"]}
-            for row in by_beverage
+            {"name": item["name"], "quantity": item["quantity"]}
+            for item in ranking_bebidas
         ],
-        "bebida_mais_pedida": {
-            "name": top_item["nome"],
-            "quantity": top_item["quantidade"],
+        "horario_pico": peak_window,
+        "pico_atendimento": peak_window,
+        "quantidade_pedidos_pico": peak_window["order_count"] if peak_window else 0,
+        "valor_vendido_pico": peak_window["revenue"] if peak_window else 0.0,
+        "custo_estimado": custo_estimado,
+        "custo_total": custo_estimado,
+        "lucro_estimado": round(total_vendido - custo_estimado, 2),
+        "observacoes": parse_shift_observations(stored_summary),
+    }
+
+
+def fetch_comparable_shift_choices(current_shift_id: int, limit: int = 30) -> list[dict]:
+    rows = get_db().execute(
+        """
+        SELECT id, aberto_em, fechado_em
+        FROM turnos
+        WHERE status = 'closed' AND id != ?
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (current_shift_id, limit),
+    ).fetchall()
+    return [
+        {
+            "id": row["id"],
+            "label": f'Turno {row["id"]} · {display_datetime(row["aberto_em"])} ate {display_datetime(row["fechado_em"])}',
         }
-        if top_item
-        else None,
-        "pico_atendimento": {
-            "hour": f'{peak["hora"]}h',
-            "orders": peak["total"],
-        }
-        if peak and peak["hora"] is not None
-        else None,
+        for row in rows
+    ]
+
+
+def find_previous_closed_shift_id(current_shift_id: int) -> int | None:
+    row = get_db().execute(
+        """
+        SELECT id
+        FROM turnos
+        WHERE status = 'closed' AND id < ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (current_shift_id,),
+    ).fetchone()
+    return row["id"] if row else None
+
+
+def validate_comparison_shift_id(current_shift_id: int, comparison_shift_id: int | None) -> int | None:
+    if not comparison_shift_id or comparison_shift_id == current_shift_id:
+        return None
+    row = get_db().execute(
+        """
+        SELECT id
+        FROM turnos
+        WHERE id = ? AND status = 'closed'
+        """,
+        (comparison_shift_id,),
+    ).fetchone()
+    return row["id"] if row else None
+
+
+def summarize_shift_comparison(
+    current_metrics: dict,
+    compared_metrics: dict,
+    revenue_comparison: dict,
+    peak_comparison: dict,
+) -> str:
+    revenue_pct = revenue_comparison["delta_percentage"]
+    if revenue_pct is None:
+        revenue_part = (
+            "Este turno manteve o mesmo faturamento do comparado."
+            if revenue_comparison["indicator"] == "sem mudanca relevante"
+            else f'Este turno {revenue_comparison["indicator"]} no faturamento em relacao ao comparado.'
+        )
+    else:
+        revenue_part = f'Este turno faturou {abs(revenue_pct):.1f}% {"a mais" if revenue_pct > 0 else "a menos"} que o comparado.'
+
+    current_peak = current_metrics.get("horario_pico") or {}
+    compared_peak = compared_metrics.get("horario_pico") or {}
+    current_peak_start = current_peak.get("start_iso")
+    compared_peak_start = compared_peak.get("start_iso")
+    if current_peak_start and compared_peak_start:
+        current_dt = datetime.fromisoformat(current_peak_start)
+        compared_dt = datetime.fromisoformat(compared_peak_start)
+        minute_delta = int((current_dt - compared_dt).total_seconds() // 60)
+        if minute_delta == 0:
+            peak_part = "O pico aconteceu na mesma faixa horaria do turno comparado."
+        elif minute_delta < 0:
+            peak_part = f'O pico veio {abs(minute_delta)} minutos mais cedo.'
+        else:
+            peak_part = f'O pico veio {minute_delta} minutos mais tarde.'
+    else:
+        peak_part = "Nao ha dados suficientes para comparar o horario de pico."
+
+    leader_current = (current_metrics.get("bebida_mais_vendida") or {}).get("name")
+    leader_compared = (compared_metrics.get("bebida_mais_vendida") or {}).get("name")
+    if leader_current and leader_compared and leader_current != leader_compared:
+        leader_part = f'A bebida lider mudou de {leader_compared} para {leader_current}.'
+    elif leader_current:
+        leader_part = f'A bebida lider permaneceu {leader_current}.'
+    else:
+        leader_part = "Sem bebida lider registrada na comparacao."
+
+    return " ".join([revenue_part, peak_part, leader_part])
+
+
+def build_shift_comparison(current_shift_id: int, comparison_shift_id: int | None = None) -> dict | None:
+    selected_shift_id = validate_comparison_shift_id(current_shift_id, comparison_shift_id)
+    if selected_shift_id is None:
+        selected_shift_id = find_previous_closed_shift_id(current_shift_id)
+    if selected_shift_id is None:
+        return None
+
+    current_metrics = build_shift_metrics(current_shift_id)
+    compared_metrics = build_shift_metrics(selected_shift_id)
+    compared_shift = fetch_shift_details(selected_shift_id, include_comparison=False)
+
+    revenue_comparison = build_numeric_metric_comparison(
+        "Total vendido",
+        current_metrics["total_vendido"],
+        compared_metrics["total_vendido"],
+        value_type="currency",
+    )
+    total_orders_comparison = build_numeric_metric_comparison(
+        "Total de pedidos",
+        current_metrics["total_pedidos"],
+        compared_metrics["total_pedidos"],
+        value_type="count",
+        tolerance=0.5,
+    )
+    ticket_comparison = build_numeric_metric_comparison(
+        "Ticket medio",
+        current_metrics["ticket_medio"],
+        compared_metrics["ticket_medio"],
+        value_type="currency",
+    )
+    cost_comparison = build_numeric_metric_comparison(
+        "Custo estimado",
+        current_metrics["custo_estimado"],
+        compared_metrics["custo_estimado"],
+        value_type="currency",
+    )
+    profit_comparison = build_numeric_metric_comparison(
+        "Lucro estimado",
+        current_metrics["lucro_estimado"],
+        compared_metrics["lucro_estimado"],
+        value_type="currency",
+    )
+    peak_orders_comparison = build_numeric_metric_comparison(
+        "Pedidos no pico",
+        current_metrics["quantidade_pedidos_pico"],
+        compared_metrics["quantidade_pedidos_pico"],
+        value_type="count",
+        tolerance=0.5,
+    )
+    peak_revenue_comparison = build_numeric_metric_comparison(
+        "Valor vendido no pico",
+        current_metrics["valor_vendido_pico"],
+        compared_metrics["valor_vendido_pico"],
+        value_type="currency",
+    )
+
+    leader_current = current_metrics.get("bebida_mais_vendida") or {}
+    leader_compared = compared_metrics.get("bebida_mais_vendida") or {}
+    peak_current = current_metrics.get("horario_pico") or {}
+    peak_compared = compared_metrics.get("horario_pico") or {}
+
+    return {
+        "current_shift_id": current_shift_id,
+        "compared_shift": {
+            "id": compared_shift["id"],
+            "opened_at": compared_shift["opened_at"],
+            "closed_at": compared_shift["closed_at"],
+            "duration": compared_shift["duration"],
+        },
+        "summary_text": summarize_shift_comparison(
+            current_metrics,
+            compared_metrics,
+            revenue_comparison,
+            build_text_metric_comparison(
+                "Horario de pico",
+                peak_current.get("label", "Sem dados"),
+                peak_compared.get("label", "Sem dados"),
+            ),
+        ),
+        "metrics": [
+            revenue_comparison,
+            total_orders_comparison,
+            ticket_comparison,
+            cost_comparison,
+            profit_comparison,
+            peak_orders_comparison,
+            peak_revenue_comparison,
+        ],
+        "beverage_leader": {
+            "label": "Bebida mais vendida",
+            "current": leader_current.get("name", "Sem dados"),
+            "compared": leader_compared.get("name", "Sem dados"),
+            "current_quantity": leader_current.get("quantity", 0),
+            "compared_quantity": leader_compared.get("quantity", 0),
+            "indicator": "sem mudanca relevante"
+            if leader_current.get("name") == leader_compared.get("name")
+            else "mudou",
+            "tone": "neutral",
+        },
+        "peak_window": {
+            "label": "Horario de pico",
+            "current": peak_current.get("label", "Sem dados"),
+            "compared": peak_compared.get("label", "Sem dados"),
+            "current_orders": peak_current.get("order_count", 0),
+            "compared_orders": peak_compared.get("order_count", 0),
+            "current_revenue": peak_current.get("revenue", 0),
+            "compared_revenue": peak_compared.get("revenue", 0),
+            "indicator": "sem mudanca relevante"
+            if peak_current.get("label") == peak_compared.get("label")
+            else "mudou",
+            "tone": "neutral",
+        },
+    }
+
+
+def build_sales_report(shift_id: int | None = None) -> dict:
+    current_shift_id = shift_id or get_current_shift_id()
+    metrics = build_shift_metrics(current_shift_id)
+    return {
+        "total_vendido": metrics["total_vendido"],
+        "total_pedidos": metrics["total_pedidos"],
+        "quantidade_por_bebida": metrics["quantidade_por_bebida"],
+        "bebida_mais_pedida": metrics["bebida_mais_pedida"],
+        "pico_atendimento": metrics["pico_atendimento"],
     }
 
 
 def build_order_summary(shift_id: int | None = None) -> dict:
     current_shift_id = shift_id or get_current_shift_id()
     report = build_sales_report(current_shift_id)
+    top_tables = get_db().execute(
+        """
+        SELECT
+            COALESCE(NULLIF(TRIM(table_label), ''), 'Retirada') AS table_label,
+            COUNT(*) AS total
+        FROM pedidos
+        WHERE turno_id = ?
+        GROUP BY COALESCE(NULLIF(TRIM(table_label), ''), 'Retirada')
+        ORDER BY total DESC, table_label ASC
+        LIMIT 4
+        """,
+        (current_shift_id,),
+    ).fetchall()
     pending = get_db().execute(
         "SELECT COUNT(*) AS total FROM pedidos WHERE status = 'pending' AND turno_id = ?",
         (current_shift_id,),
@@ -827,36 +1382,17 @@ def build_order_summary(shift_id: int | None = None) -> dict:
         "revenue": report["total_vendido"],
         "average_ticket": average_ticket,
         "top_items": report["quantidade_por_bebida"][:4],
-        "top_tables": [],
+        "top_tables": [
+            {"table_label": row["table_label"], "total": row["total"]}
+            for row in top_tables
+        ],
     }
 
 
 def build_closeout_report(shift_id: int | None = None) -> dict:
-    db = get_db()
     current_shift_id = shift_id or get_current_shift_id()
-    sales = build_sales_report(current_shift_id)
-    totals = db.execute(
-        """
-        SELECT
-            COALESCE(SUM(ip.quantidade), 0) AS total_itens,
-            COALESCE(SUM(b.custo_estimado * ip.quantidade), 0) AS custo_total
-        FROM itens_pedido ip
-        JOIN bebidas b ON b.id = ip.bebida_id
-        JOIN pedidos p ON p.id = ip.pedido_id
-        WHERE p.turno_id = ?
-        """
-    , (current_shift_id,)).fetchone()
-
-    return {
-        "total_vendido": sales["total_vendido"],
-        "total_pedidos": sales["total_pedidos"],
-        "total_itens_vendidos": totals["total_itens"] or 0,
-        "bebida_mais_pedida": sales["bebida_mais_pedida"],
-        "pico_atendimento": sales["pico_atendimento"],
-        "custo_total": round(totals["custo_total"] or 0, 2),
-        "lucro_estimado": round(sales["total_vendido"] - (totals["custo_total"] or 0), 2),
-        "quantidade_por_bebida": sales["quantidade_por_bebida"],
-    }
+    metrics = build_shift_metrics(current_shift_id)
+    return metrics
 
 
 def archive_current_shift_and_open_next() -> dict:
@@ -881,26 +1417,371 @@ def archive_current_shift_and_open_next() -> dict:
         "pending": fetch_orders(status="pending", shift_id=new_shift_id),
         "completed": fetch_orders(status="completed", limit=20, shift_id=new_shift_id),
         "logistics": fetch_logistics_snapshot(),
+        "shifts": fetch_shift_history(),
         "generated_at": display_datetime(utc_now_iso()),
     }
 
 
+def fetch_shift_history(limit: int = 10) -> list[dict]:
+    rows = get_db().execute(
+        """
+        SELECT id, aberto_em, fechado_em
+        FROM turnos
+        WHERE status = 'closed'
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    shifts = []
+    for row in rows:
+        metrics = build_shift_metrics(row["id"])
+        shifts.append(
+            {
+                "id": row["id"],
+                "opened_at": display_datetime(row["aberto_em"]),
+                "closed_at": display_datetime(row["fechado_em"]),
+                "duration": duration_label(row["aberto_em"], row["fechado_em"]),
+                "summary": metrics,
+                "observations": metrics["observacoes"],
+            }
+        )
+    return shifts
+
+
+def fetch_shift_details(
+    shift_id: int,
+    comparison_shift_id: int | None = None,
+    *,
+    include_comparison: bool = True,
+) -> dict:
+    row = get_db().execute(
+        """
+        SELECT id, aberto_em, fechado_em, status
+        FROM turnos
+        WHERE id = ?
+        """,
+        (shift_id,),
+    ).fetchone()
+    if not row or row["status"] != "closed":
+        raise LookupError("Turno nao encontrado.")
+
+    metrics = build_shift_metrics(shift_id)
+    orders = [serialize_order(order_row) for order_row in fetch_shift_orders_rows(shift_id)]
+    comparison = build_shift_comparison(shift_id, comparison_shift_id) if include_comparison else None
+    comparable_choices = fetch_comparable_shift_choices(shift_id)
+
+    return {
+        "id": row["id"],
+        "opened_at": display_datetime(row["aberto_em"]),
+        "closed_at": display_datetime(row["fechado_em"]),
+        "duration": duration_label(row["aberto_em"], row["fechado_em"]),
+        "summary": metrics,
+        "orders": orders,
+        "items": metrics["ranking_bebidas"],
+        "ranking": metrics["ranking_bebidas"],
+        "observations": metrics["observacoes"],
+        "comparison": comparison,
+        "comparison_choices": comparable_choices,
+        "selected_comparison_id": comparison["compared_shift"]["id"] if comparison else None,
+    }
+
+
+def build_shift_export_csv(shift_id: int) -> str:
+    db = get_db()
+    shift_row = db.execute(
+        """
+        SELECT id, aberto_em, fechado_em, resumo_fechamento
+        FROM turnos
+        WHERE id = ? AND status = 'closed'
+        """,
+        (shift_id,),
+    ).fetchone()
+    if not shift_row:
+        raise LookupError("Turno nao encontrado.")
+
+    summary = build_shift_metrics(shift_id)
+    orders = db.execute(
+        """
+        SELECT codigo_retirada, horario_pedido, status, valor_total, customer_name, table_label
+        FROM pedidos
+        WHERE turno_id = ?
+        ORDER BY horario_pedido ASC
+        """,
+        (shift_id,),
+    ).fetchall()
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["BarOS", f"Turno {shift_id}"])
+    writer.writerow(["Aberto em", display_datetime(shift_row["aberto_em"])])
+    writer.writerow(["Fechado em", display_datetime(shift_row["fechado_em"])])
+    writer.writerow(["Duracao", duration_label(shift_row["aberto_em"], shift_row["fechado_em"])])
+    writer.writerow([])
+    writer.writerow(["Resumo", "Valor"])
+    writer.writerow(["Total vendido", summary.get("total_vendido", 0)])
+    writer.writerow(["Total de pedidos", summary.get("total_pedidos", 0)])
+    writer.writerow(["Ticket medio", summary.get("ticket_medio", 0)])
+    writer.writerow(["Itens vendidos", summary.get("total_itens_vendidos", 0)])
+    writer.writerow(["Custo estimado", summary.get("custo_estimado", 0)])
+    writer.writerow(["Lucro estimado", summary.get("lucro_estimado", 0)])
+    if summary.get("bebida_mais_pedida"):
+        writer.writerow(
+            [
+                "Bebida mais pedida",
+                f'{summary["bebida_mais_pedida"]["name"]} ({summary["bebida_mais_pedida"]["quantity"]}x)',
+            ]
+        )
+    if summary.get("pico_atendimento"):
+        writer.writerow(
+            [
+                "Pico de atendimento",
+                f'{summary["pico_atendimento"]["hour"]} ({summary["pico_atendimento"]["orders"]} pedidos)',
+            ]
+        )
+        writer.writerow(["Valor vendido no pico", summary["pico_atendimento"].get("revenue", 0)])
+
+    writer.writerow([])
+    writer.writerow(["Bebida", "Quantidade"])
+    for item in summary.get("quantidade_por_bebida", []):
+        writer.writerow([item["name"], item["quantity"]])
+
+    writer.writerow([])
+    writer.writerow(["Codigo", "Horario", "Cliente", "Mesa", "Status", "Total"])
+    for row in orders:
+        writer.writerow(
+            [
+                row["codigo_retirada"],
+                display_datetime(row["horario_pedido"]),
+                row["customer_name"] or "Cliente",
+                row["table_label"] or "Retirada",
+                row["status"],
+                row["valor_total"],
+            ]
+        )
+
+    return buffer.getvalue()
+
+
+def build_shift_export_pdf(shift_id: int) -> bytes:
+    shift = fetch_shift_details(shift_id, include_comparison=False)
+    summary = shift["summary"]
+    orders = shift["orders"]
+    observations = shift["observations"]
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=18 * mm,
+        leftMargin=18 * mm,
+        topMargin=18 * mm,
+        bottomMargin=16 * mm,
+        title=f"BarOS - Turno {shift_id}",
+        author="BarOS",
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "BarOSTitle",
+        parent=styles["Title"],
+        fontName="Helvetica-Bold",
+        fontSize=20,
+        leading=24,
+        textColor=colors.HexColor("#15202d"),
+        spaceAfter=10,
+    )
+    section_style = ParagraphStyle(
+        "BarOSSection",
+        parent=styles["Heading2"],
+        fontName="Helvetica-Bold",
+        fontSize=12,
+        leading=15,
+        textColor=colors.HexColor("#223247"),
+        spaceBefore=8,
+        spaceAfter=8,
+    )
+    body_style = ParagraphStyle(
+        "BarOSBody",
+        parent=styles["BodyText"],
+        fontName="Helvetica",
+        fontSize=9.5,
+        leading=13,
+        textColor=colors.HexColor("#334155"),
+    )
+    small_style = ParagraphStyle(
+        "BarOSSmall",
+        parent=body_style,
+        fontSize=8.5,
+        leading=12,
+        textColor=colors.HexColor("#64748b"),
+    )
+
+    story = [
+        Paragraph("BarOS", title_style),
+        Paragraph(f"Relatorio de turno encerrado #{shift['id']}", styles["Heading3"]),
+        Paragraph(
+            f"Abertura: {shift['opened_at']}<br/>Fechamento: {shift['closed_at']}<br/>Duracao: {shift['duration']}",
+            body_style,
+        ),
+        Spacer(1, 10),
+        Paragraph("Resumo executivo", section_style),
+    ]
+
+    summary_table_data = [
+        ["Total vendido", currency_brl(summary["total_vendido"]), "Total de pedidos", str(summary["total_pedidos"])],
+        ["Ticket medio", currency_brl(summary["ticket_medio"]), "Custo estimado", currency_brl(summary["custo_estimado"])],
+        ["Lucro estimado", currency_brl(summary["lucro_estimado"]), "Bebida mais vendida", escape((summary.get("bebida_mais_vendida") or {}).get("name", "Sem dados"))],
+        ["Horario de pico", escape((summary.get("horario_pico") or {}).get("label", "Sem dados")), "Pedidos no pico", str(summary.get("quantidade_pedidos_pico", 0))],
+        ["Valor vendido no pico", currency_brl(summary.get("valor_vendido_pico", 0)), "Itens vendidos", str(summary.get("total_itens_vendidos", 0))],
+    ]
+    summary_table = Table(summary_table_data, colWidths=[38 * mm, 42 * mm, 38 * mm, 52 * mm])
+    summary_table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, -1), colors.whitesmoke),
+                ("TEXTCOLOR", (0, 0), (-1, -1), colors.HexColor("#0f172a")),
+                ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+                ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+                ("FONTNAME", (2, 0), (2, -1), "Helvetica-Bold"),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e1")),
+                ("PADDING", (0, 0), (-1, -1), 8),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ]
+        )
+    )
+    story.extend([summary_table, Spacer(1, 12), Paragraph("Top 5 bebidas", section_style)])
+
+    top_items = summary.get("top_5_bebidas") or []
+    if top_items:
+        top_items_data = [["Bebida", "Quantidade", "Faturamento", "Custo"]]
+        for item in top_items:
+            top_items_data.append(
+                [
+                    escape(item["name"]),
+                    str(item["quantity"]),
+                    currency_brl(item["revenue"]),
+                    currency_brl(item["cost"]),
+                ]
+            )
+    else:
+        top_items_data = [["Bebida", "Quantidade", "Faturamento", "Custo"], ["Sem vendas registradas", "-", "-", "-"]]
+    top_items_table = Table(top_items_data, colWidths=[78 * mm, 26 * mm, 34 * mm, 34 * mm])
+    top_items_table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1e293b")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e1")),
+                ("PADDING", (0, 0), (-1, -1), 7),
+            ]
+        )
+    )
+    story.extend([top_items_table, Spacer(1, 12), Paragraph("Pedidos do turno", section_style)])
+
+    if orders:
+        order_rows = [["Codigo", "Horario", "Cliente", "Mesa", "Status", "Total"]]
+        for order in orders:
+            order_rows.append(
+                [
+                    order["code"],
+                    order["created_at"],
+                    escape(order["customer_name"]),
+                    escape(order["table_label"]),
+                    escape(order["status"]),
+                    currency_brl(order["total"]),
+                ]
+            )
+    else:
+        order_rows = [["Codigo", "Horario", "Cliente", "Mesa", "Status", "Total"], ["Sem pedidos", "-", "-", "-", "-", "-"]]
+
+    orders_table = Table(order_rows, colWidths=[22 * mm, 28 * mm, 40 * mm, 28 * mm, 24 * mm, 24 * mm], repeatRows=1)
+    orders_table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0f172a")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#cbd5e1")),
+                ("PADDING", (0, 0), (-1, -1), 6),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]
+        )
+    )
+    story.append(orders_table)
+
+    story.extend([Spacer(1, 12), Paragraph("Observacoes do turno", section_style)])
+    if observations:
+        for observation in observations:
+            story.append(Paragraph(f"• {escape(observation)}", body_style))
+            story.append(Spacer(1, 4))
+    else:
+        story.append(Paragraph("Sem observacoes registradas para este turno.", small_style))
+
+    def draw_page(canvas, document):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(colors.HexColor("#64748b"))
+        canvas.drawString(document.leftMargin, 10 * mm, f"BarOS · Turno {shift['id']}")
+        canvas.drawRightString(A4[0] - document.rightMargin, 10 * mm, f"Pagina {canvas.getPageNumber()}")
+        canvas.restoreState()
+
+    doc.build(story, onFirstPage=draw_page, onLaterPages=draw_page)
+    return buffer.getvalue()
+
+
 @app.get("/")
 def index():
-    return render_template("index.html", menu=fetch_menu(), current_time=display_datetime(utc_now_iso()))
+    return render_template(
+        "index.html",
+        menu=fetch_menu(),
+        current_time=display_datetime(utc_now_iso()),
+        staff_access_url=url_for("staff_access"),
+    )
 
 
-@app.route("/login", methods=["GET", "POST"])
-def login():
+def handle_staff_login():
     error = None
     if request.method == "POST":
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
-        if username == BAR_USERNAME and password == BAR_PASSWORD:
+        user = get_db().execute(
+            """
+            SELECT id, username, password_hash, role, display_name, is_active
+            FROM staff_users
+            WHERE username = ?
+            """,
+            (username,),
+        ).fetchone()
+        if user and user["is_active"] and check_password_hash(user["password_hash"], password):
             session["bar_authenticated"] = True
+            session["bar_user_id"] = user["id"]
+            session["bar_role"] = user["role"]
+            session["bar_display_name"] = user["display_name"]
             return redirect(url_for("dashboard"))
         error = "Usuario ou senha invalidos."
-    return render_template("login.html", error=error)
+    return render_template(
+        "login.html",
+        error=error,
+        internal_access_path=INTERNAL_ACCESS_PATH,
+    )
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "GET":
+        return redirect(url_for("staff_access"))
+    return handle_staff_login()
+
+
+def staff_access():
+    return handle_staff_login()
+
+
+app.add_url_rule(f"/{INTERNAL_ACCESS_PATH}", "staff_access", staff_access, methods=["GET", "POST"])
 
 
 @app.post("/logout")
@@ -916,6 +1797,38 @@ def dashboard():
         "dashboard.html",
         summary=build_order_summary(),
         logistics=fetch_logistics_snapshot(),
+        shifts=fetch_shift_history(limit=5),
+        current_user=get_current_user(),
+    )
+
+
+@app.get("/historico-turnos")
+@login_required
+def shift_history_page():
+    return render_template(
+        "shift_history.html",
+        shifts=fetch_shift_history(limit=30),
+        current_user=get_current_user(),
+    )
+
+
+@app.get("/historico-turnos/<int:shift_id>")
+@login_required
+def shift_detail_page(shift_id: int):
+    compare_to_raw = request.args.get("compare_to", "").strip()
+    try:
+        compare_to = int(compare_to_raw) if compare_to_raw else None
+    except ValueError:
+        compare_to = None
+    try:
+        shift = fetch_shift_details(shift_id, compare_to)
+    except LookupError:
+        return redirect(url_for("shift_history_page"))
+
+    return render_template(
+        "shift_detail.html",
+        shift=shift,
+        current_user=get_current_user(),
     )
 
 
@@ -928,6 +1841,7 @@ def get_orders():
             "pending": fetch_orders(status="pending"),
             "completed": fetch_orders(status="completed", limit=20),
             "logistics": fetch_logistics_snapshot(),
+            "shifts": fetch_shift_history(),
             "generated_at": display_datetime(utc_now_iso()),
         }
     )
@@ -936,27 +1850,74 @@ def get_orders():
 @app.get("/api/reports/shifts")
 @login_required
 def list_closed_shifts():
-    rows = get_db().execute(
-        """
-        SELECT id, aberto_em, fechado_em, resumo_fechamento
-        FROM turnos
-        WHERE status = 'closed'
-        ORDER BY id DESC
-        LIMIT 10
-        """
-    ).fetchall()
-    shifts = []
-    for row in rows:
-        summary = json.loads(row["resumo_fechamento"] or "{}")
-        shifts.append(
-            {
-                "id": row["id"],
-                "opened_at": display_datetime(row["aberto_em"]),
-                "closed_at": display_datetime(row["fechado_em"]),
-                "summary": summary,
-            }
-        )
-    return jsonify({"shifts": shifts})
+    return jsonify({"shifts": fetch_shift_history(limit=30)})
+
+
+@app.get("/api/reports/shifts/<int:shift_id>")
+@login_required
+def get_shift_details(shift_id: int):
+    compare_to_raw = request.args.get("compare_to", "").strip()
+    try:
+        compare_to = int(compare_to_raw) if compare_to_raw else None
+    except ValueError:
+        compare_to = None
+    try:
+        shift = fetch_shift_details(shift_id, compare_to)
+    except LookupError:
+        return jsonify({"error": "Turno nao encontrado."}), 404
+    return jsonify({"shift": shift})
+
+
+@app.get("/api/reports/shifts/<int:shift_id>/compare")
+@login_required
+def get_shift_comparison(shift_id: int):
+    compare_to_raw = request.args.get("against", "").strip()
+    try:
+        compare_to = int(compare_to_raw) if compare_to_raw else None
+    except ValueError:
+        compare_to = None
+
+    row = get_db().execute(
+        "SELECT id FROM turnos WHERE id = ? AND status = 'closed'",
+        (shift_id,),
+    ).fetchone()
+    if not row:
+        return jsonify({"error": "Turno nao encontrado."}), 404
+
+    comparison = build_shift_comparison(shift_id, compare_to)
+    return jsonify({"comparison": comparison})
+
+
+@app.get("/api/reports/shifts/<int:shift_id>/export")
+@login_required
+@role_required("admin")
+def export_shift_report(shift_id: int):
+    try:
+        csv_content = build_shift_export_csv(shift_id)
+    except LookupError:
+        return jsonify({"error": "Turno nao encontrado."}), 404
+
+    return Response(
+        csv_content,
+        mimetype="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="baros-turno-{shift_id}.csv"'},
+    )
+
+
+@app.get("/api/reports/shifts/<int:shift_id>/export.pdf")
+@login_required
+@role_required("admin")
+def export_shift_pdf(shift_id: int):
+    try:
+        pdf_bytes = build_shift_export_pdf(shift_id)
+    except LookupError:
+        return jsonify({"error": "Turno nao encontrado."}), 404
+
+    return Response(
+        pdf_bytes,
+        mimetype="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="baros-turno-{shift_id}.pdf"'},
+    )
 
 
 @app.post("/api/orders")
@@ -967,6 +1928,9 @@ def create_order():
         return jsonify({"error": validation_error}), 400
 
     db = get_db()
+    customer_name = sanitize_text(payload.get("customer_name"), "Cliente", limit=48)
+    table_label = sanitize_text(payload.get("table_label"), "Retirada", limit=32)
+    source = sanitize_text(payload.get("source"), DEFAULT_ORDER_SOURCE, limit=24)
     bebidas_por_id = {
         row["id"]: row
         for row in db.execute("SELECT id, nome, preco_venda, custo_estimado FROM bebidas").fetchall()
@@ -1013,10 +1977,10 @@ def create_order():
     turno_id = get_current_shift_id()
     cursor = db.execute(
         """
-        INSERT INTO pedidos (codigo_retirada, horario_pedido, status, valor_total, turno_id)
-        VALUES (?, ?, 'pending', ?, ?)
+        INSERT INTO pedidos (codigo_retirada, horario_pedido, status, valor_total, turno_id, customer_name, table_label, source)
+        VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)
         """,
-        (codigo, horario, round(valor_total, 2), turno_id),
+        (codigo, horario, round(valor_total, 2), turno_id, customer_name, table_label, source),
     )
     pedido_id = cursor.lastrowid
 
@@ -1034,7 +1998,20 @@ def create_order():
     db.commit()
 
     row = db.execute(
-        "SELECT id, codigo_retirada, horario_pedido, status, valor_total, NULL AS completed_at FROM pedidos WHERE id = ?",
+        """
+        SELECT
+            id,
+            codigo_retirada,
+            horario_pedido,
+            status,
+            valor_total,
+            customer_name,
+            table_label,
+            source,
+            completed_at
+        FROM pedidos
+        WHERE id = ?
+        """,
         (pedido_id,),
     ).fetchone()
     return jsonify({"order": serialize_order(row), "summary": build_order_summary()}), 201
@@ -1053,19 +2030,49 @@ def complete_order(code: str):
         return jsonify({"error": "Pedido nao encontrado."}), 404
     if row["status"] == "completed":
         updated = db.execute(
-            "SELECT id, codigo_retirada, horario_pedido, status, valor_total, NULL AS completed_at FROM pedidos WHERE codigo_retirada = ? AND turno_id = ?",
+            """
+            SELECT
+                id,
+                codigo_retirada,
+                horario_pedido,
+                status,
+                valor_total,
+                customer_name,
+                table_label,
+                source,
+                completed_at
+            FROM pedidos
+            WHERE codigo_retirada = ? AND turno_id = ?
+            """,
             (code, current_shift_id),
         ).fetchone()
         return jsonify({"order": serialize_order(updated), "summary": build_order_summary()})
 
     db.execute(
-        "UPDATE pedidos SET status = 'completed' WHERE codigo_retirada = ? AND turno_id = ?",
-        (code, current_shift_id),
+        """
+        UPDATE pedidos
+        SET status = 'completed', completed_at = ?, completed_by_user_id = ?
+        WHERE codigo_retirada = ? AND turno_id = ?
+        """,
+        (utc_now_iso(), session.get("bar_user_id"), code, current_shift_id),
     )
     db.commit()
 
     updated = db.execute(
-        "SELECT id, codigo_retirada, horario_pedido, status, valor_total, NULL AS completed_at FROM pedidos WHERE codigo_retirada = ? AND turno_id = ?",
+        """
+        SELECT
+            id,
+            codigo_retirada,
+            horario_pedido,
+            status,
+            valor_total,
+            customer_name,
+            table_label,
+            source,
+            completed_at
+        FROM pedidos
+        WHERE codigo_retirada = ? AND turno_id = ?
+        """,
         (code, current_shift_id),
     ).fetchone()
     return jsonify({"order": serialize_order(updated), "summary": build_order_summary()})
@@ -1073,12 +2080,14 @@ def complete_order(code: str):
 
 @app.post("/api/reports/closeout")
 @login_required
+@role_required("admin")
 def closeout_report():
     return jsonify(archive_current_shift_and_open_next())
 
 
 @app.post("/api/reports/reset")
 @login_required
+@role_required("admin")
 def reset_data():
     archived = archive_current_shift_and_open_next()
     archived["ok"] = True
@@ -1087,22 +2096,62 @@ def reset_data():
 
 @app.post("/api/logistics/inventory/<int:item_id>")
 @login_required
+@role_required("admin")
 def update_inventory(item_id: int):
     payload = request.get_json(silent=True) or {}
     status = payload.get("status")
-    if status not in {"ok", "attention", "critical"}:
-        return jsonify({"error": "Status invalido."}), 400
+    stock_action = payload.get("stock_action")
+    amount = payload.get("amount")
+    par_level = payload.get("par_level")
     db = get_db()
-    row = db.execute("SELECT id, stock_level FROM inventory_items WHERE id = ?", (item_id,)).fetchone()
+    row = db.execute(
+        "SELECT id, stock_level, par_level FROM inventory_items WHERE id = ?",
+        (item_id,),
+    ).fetchone()
     if not row:
         return jsonify({"error": "Item nao encontrado."}), 404
+
+    next_stock = row["stock_level"]
+    next_par = row["par_level"]
+
+    if stock_action:
+        try:
+            amount_value = float(amount)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Quantidade invalida."}), 400
+        if stock_action == "add":
+            if amount_value <= 0:
+                return jsonify({"error": "Informe uma quantidade positiva para reabastecer."}), 400
+            next_stock = row["stock_level"] + amount_value
+        elif stock_action == "set":
+            if amount_value < 0:
+                return jsonify({"error": "O estoque nao pode ficar negativo."}), 400
+            next_stock = amount_value
+        else:
+            return jsonify({"error": "Acao de estoque invalida."}), 400
+
+    if par_level not in (None, ""):
+        try:
+            next_par = float(par_level)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Nivel minimo invalido."}), 400
+        if next_par <= 0:
+            return jsonify({"error": "O nivel minimo deve ser maior que zero."}), 400
+
+    if stock_action or par_level not in (None, ""):
+        next_status = calculate_inventory_status(next_stock, next_par)
+    else:
+        if status not in {"ok", "attention", "critical"}:
+            return jsonify({"error": "Status invalido."}), 400
+        next_status = status
+
     db.execute(
         """
         UPDATE inventory_items
-        SET status = ?, updated_at = ?
+        SET stock_level = ?, par_level = ?, status = ?, updated_at = ?
         WHERE id = ?
         """,
-        (status, utc_now_iso(), item_id),
+        (next_stock, next_par, next_status, utc_now_iso(), item_id),
     )
     db.commit()
     return jsonify(fetch_logistics_snapshot())
