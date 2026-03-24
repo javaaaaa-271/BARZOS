@@ -232,6 +232,7 @@ input {
 }
 
 .customer-meta input,
+.customer-meta select,
 .auth-form input {
   min-width: 180px;
   border-radius: 14px;
@@ -452,6 +453,7 @@ input {
 
 .checkout-inline-meta {
   margin-top: 14px;
+  flex-wrap: wrap;
 }
 
 .checkout-body {
@@ -785,11 +787,24 @@ input {
   padding-left: 18px;
 }
 
+.order-badges,
+.order-actions-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.order-badges {
+  margin-bottom: 10px;
+}
+
 .order-actions {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 12px;
+  flex-wrap: wrap;
 }
 
 .status-badge {
@@ -1074,6 +1089,11 @@ input {
 
 .status-pill.neutral {
   color: #88b8ff;
+}
+
+.subtle-pill {
+  border-color: rgba(196, 214, 255, 0.14);
+  color: #b6c7ff;
 }
 
 .history-list-page,

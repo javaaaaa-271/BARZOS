@@ -15,7 +15,14 @@ const confirmationCode = document.getElementById("confirmation-code");
 const confirmationText = document.getElementById("confirmation-text");
 const checkoutPanel = document.querySelector(".checkout-panel");
 const toggleCheckoutButton = document.getElementById("toggle-checkout");
+const paymentMethodSelect = document.getElementById("payment-method");
+const paymentMethodBadge = document.getElementById("payment-method-badge");
 let checkoutCollapsed = false;
+
+const paymentMethodLabels = {
+  counter: "Pagar no balcao",
+  pix: "Pix",
+};
 
 function updateCardQuantity(card, nextQuantity) {
   card.querySelector(".qty-value").textContent = String(nextQuantity);
@@ -42,6 +49,9 @@ function buildSummary() {
   const totalItems = selected.reduce((sum, item) => sum + item.quantity, 0);
   orderCountBadge.textContent = `${totalItems} ${totalItems === 1 ? "item" : "itens"}`;
   checkoutPanel?.classList.toggle("has-items", totalItems > 0);
+  if (paymentMethodBadge) {
+    paymentMethodBadge.textContent = paymentMethodLabels[paymentMethodSelect?.value || "counter"] || "Pagar no balcao";
+  }
 
   if (!selected.length) {
     orderSummary.className = "summary-list empty-state";
@@ -97,6 +107,7 @@ async function submitOrder() {
 
   const customerName = document.getElementById("customer-name").value.trim();
   const tableLabel = document.getElementById("table-label").value.trim();
+  const paymentMethod = paymentMethodSelect?.value || "counter";
 
   submitOrderButton.disabled = true;
   submitOrderButton.textContent = "Enviando...";
@@ -108,6 +119,7 @@ async function submitOrder() {
       customer_name: customerName,
       table_label: tableLabel,
       source: "menu-digital",
+      payment_method: paymentMethod,
       items: selectedItems,
     }),
   });
@@ -121,8 +133,8 @@ async function submitOrder() {
     return;
   }
 
-  confirmationCode.textContent = data.order.code;
-  confirmationText.textContent = `Pedido de ${data.order.customer_name} enviado para ${data.order.table_label}.`;
+  confirmationCode.textContent = data.order.order_number || data.order.code;
+  confirmationText.textContent = `Pedido de ${data.order.customer_name} enviado para ${data.order.table_label} com ${data.order.payment_method_label}.`;
   confirmationModal.classList.remove("hidden");
   confirmationModal.setAttribute("aria-hidden", "false");
 
@@ -145,6 +157,8 @@ document.querySelectorAll(".menu-card").forEach((card) => {
 toggleCheckoutButton?.addEventListener("click", () => {
   updateCheckoutToggle(!checkoutCollapsed);
 });
+
+paymentMethodSelect?.addEventListener("change", buildSummary);
 
 submitOrderButton?.addEventListener("click", submitOrder);
 

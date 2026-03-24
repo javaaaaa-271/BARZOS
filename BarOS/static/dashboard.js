@@ -47,15 +47,27 @@ function renderPending(orders) {
       (order) => `
       <article class="order-card">
         <div class="order-meta">
-          <strong>${order.code}</strong>
+          <strong>Pedido ${order.order_number || order.code}</strong>
           <span class="pill">${order.created_at}</span>
         </div>
         <h3>${order.customer_name}</h3>
         <p>${order.table_label}</p>
+        <div class="order-badges">
+          <span class="status-pill neutral">${order.payment_method_label}</span>
+          <span class="status-pill ${order.payment_status === "paid" ? "ok" : order.payment_status === "failed" ? "critical" : "attention"}">${order.payment_status_label}</span>
+        </div>
         <ul>${renderOrderItems(order.items)}</ul>
         <div class="order-actions">
           <span class="muted-note">Total ${brl.format(order.total)}</span>
-          <button class="primary-button" data-complete="${order.code}" type="button">Marcar como entregue</button>
+          <div class="order-actions-group">
+            ${
+              order.payment_status !== "paid"
+                ? `<button class="ghost-button small-button" data-pay="${order.code}" type="button">Marcar pago</button>`
+                : ""
+            }
+            <a class="ghost-button small-button" href="/pedidos/${order.code}/imprimir" target="_blank" rel="noopener">Imprimir</a>
+            <button class="primary-button" data-complete="${order.code}" type="button">Marcar como entregue</button>
+          </div>
         </div>
       </article>
     `
@@ -74,12 +86,27 @@ function renderCompleted(orders) {
       (order) => `
       <article class="order-card">
         <div class="order-meta">
-          <strong>${order.code}</strong>
+          <strong>Pedido ${order.order_number || order.code}</strong>
           <span class="status-badge">Concluido</span>
         </div>
         <h3>${order.customer_name}</h3>
         <p>${order.table_label} / concluido em ${order.completed_at || order.created_at}</p>
+        <div class="order-badges">
+          <span class="status-pill neutral">${order.payment_method_label}</span>
+          <span class="status-pill ${order.payment_status === "paid" ? "ok" : order.payment_status === "failed" ? "critical" : "attention"}">${order.payment_status_label}</span>
+        </div>
         <ul>${renderOrderItems(order.items)}</ul>
+        <div class="order-actions">
+          <span class="muted-note">Total ${brl.format(order.total)}</span>
+          <div class="order-actions-group">
+            ${
+              order.payment_status !== "paid"
+                ? `<button class="ghost-button small-button" data-pay="${order.code}" type="button">Marcar pago</button>`
+                : ""
+            }
+            <a class="ghost-button small-button" href="/pedidos/${order.code}/imprimir" target="_blank" rel="noopener">Imprimir</a>
+          </div>
+        </div>
       </article>
     `
     )
@@ -313,7 +340,18 @@ async function refreshDashboard() {
 async function completeOrder(code) {
   const response = await fetch(`/api/orders/${code}/complete`, { method: "POST" });
   if (!response.ok) {
-    refreshStatus.textContent = "Nao foi possivel concluir";
+    const data = await response.json().catch(() => ({}));
+    refreshStatus.textContent = data.error || "Nao foi possivel concluir";
+    return;
+  }
+  await refreshDashboard();
+}
+
+async function payOrder(code) {
+  const response = await fetch(`/api/orders/${code}/pay`, { method: "POST" });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    refreshStatus.textContent = data.error || "Nao foi possivel registrar o pagamento";
     return;
   }
   await refreshDashboard();
@@ -433,9 +471,21 @@ async function resetData() {
 }
 
 pendingContainer?.addEventListener("click", (event) => {
+  const payButton = event.target.closest("[data-pay]");
+  if (payButton) {
+    payOrder(payButton.dataset.pay);
+    return;
+  }
   const button = event.target.closest("[data-complete]");
   if (button) {
     completeOrder(button.dataset.complete);
+  }
+});
+
+completedContainer?.addEventListener("click", (event) => {
+  const payButton = event.target.closest("[data-pay]");
+  if (payButton) {
+    payOrder(payButton.dataset.pay);
   }
 });
 
