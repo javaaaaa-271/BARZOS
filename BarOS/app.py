@@ -36,6 +36,17 @@ ROLE_LABELS = {
     "admin": "Administrador",
     "operator": "Operacao",
 }
+PAYMENT_METHOD_LABELS = {
+    "counter": "Pagar no balcao",
+    "pix": "Pix",
+}
+PAYMENT_STATUS_LABELS = {
+    "pending": "Pendente",
+    "paid": "Pago",
+    "failed": "Falhou",
+    "cancelled": "Cancelado",
+}
+ACTIVE_ORDER_STATUSES = ("new", "pending")
 
 BEVERAGE_SEED = [
     {
@@ -533,6 +544,22 @@ def init_db() -> None:
         db.execute("ALTER TABLE pedidos ADD COLUMN completed_at TEXT")
     if "completed_by_user_id" not in pedido_columns:
         db.execute("ALTER TABLE pedidos ADD COLUMN completed_by_user_id INTEGER")
+    if "order_number" not in pedido_columns:
+        db.execute("ALTER TABLE pedidos ADD COLUMN order_number TEXT")
+    if "payment_method" not in pedido_columns:
+        db.execute("ALTER TABLE pedidos ADD COLUMN payment_method TEXT")
+    if "payment_status" not in pedido_columns:
+        db.execute("ALTER TABLE pedidos ADD COLUMN payment_status TEXT")
+    if "payment_provider" not in pedido_columns:
+        db.execute("ALTER TABLE pedidos ADD COLUMN payment_provider TEXT")
+    if "payment_provider_id" not in pedido_columns:
+        db.execute("ALTER TABLE pedidos ADD COLUMN payment_provider_id TEXT")
+    if "paid_at" not in pedido_columns:
+        db.execute("ALTER TABLE pedidos ADD COLUMN paid_at TEXT")
+    if "pix_qr_code" not in pedido_columns:
+        db.execute("ALTER TABLE pedidos ADD COLUMN pix_qr_code TEXT")
+    if "pix_copy_paste" not in pedido_columns:
+        db.execute("ALTER TABLE pedidos ADD COLUMN pix_copy_paste TEXT")
 
     order_item_columns = [row["name"] for row in db.execute("PRAGMA table_info(itens_pedido)").fetchall()]
     if "item_name_snapshot" not in order_item_columns:
@@ -650,6 +677,22 @@ def init_db() -> None:
         (DEFAULT_ORDER_SOURCE,),
     )
     db.execute(
+        "UPDATE pedidos SET status = 'new' WHERE status IS NULL OR status = '' OR status = 'pending'"
+    )
+    db.execute(
+        "UPDATE pedidos SET payment_method = 'counter' WHERE payment_method IS NULL OR TRIM(payment_method) = ''"
+    )
+    db.execute(
+        "UPDATE pedidos SET payment_status = 'pending' WHERE payment_status IS NULL OR TRIM(payment_status) = ''"
+    )
+    db.execute(
+        """
+        UPDATE pedidos
+        SET order_number = printf('%02d-%04d', COALESCE(turno_id, 0), id)
+        WHERE order_number IS NULL OR TRIM(order_number) = ''
+        """
+    )
+    db.execute(
         """
         UPDATE bebidas
         SET categoria = COALESCE(NULLIF(TRIM(categoria), ''), 'Bebida'),
@@ -762,6 +805,108 @@ def generate_order_code() -> str:
         ).fetchone()
         if not exists:
             return code
+
+
+def generate_order_number(order_id: int, shift_id: int) -> str:
+    return f"{shift_id:02d}-{order_id:04d}"
+
+
+def normalize_payment_method(raw_value: str | None) -> str:
+    value = sanitize_text(raw_value, "counter", limit=16).lower()
+    return value if value in PAYMENT_METHOD_LABELS else "counter"
+
+
+def normalize_payment_status(raw_value: str | None, fallback: str = "pending") -> str:
+    value = sanitize_text(raw_value, fallback, limit=16).lower()
+    return value if value in PAYMENT_STATUS_LABELS else fallback
+
+
+def get_payment_method_label(method: str | None) -> str:
+    return PAYMENT_METHOD_LABELS.get(method or "", "Pagar no balcao")
+
+
+def get_payment_status_label(status: str | None) -> str:
+    return PAYMENT_STATUS_LABELS.get(status or "", "Pendente")
+
+
+def fetch_order_row_by_code(code: str, shift_id: int | None = None) -> sqlite3.Row | None:
+    query = """
+        SELECT
+            id,
+            codigo_retirada,
+            horario_pedido,
+            status,
+            valor_total,
+            customer_name,
+            table_label,
+            source,
+            completed_at,
+            order_number,
+            payment_method,
+            payment_status,
+            payment_provider,
+            payment_provider_id,
+            paid_at,
+            pix_qr_code,
+            pix_copy_paste
+        FROM pedidos
+        WHERE codigo_retirada = ?
+    """
+    params: list = [code]
+    if shift_id is not None:
+        query += " AND turno_id = ?"
+        params.append(shift_id)
+    return get_db().execute(query, params).fetchone()
+
+
+def mark_as_paid(code: str, shift_id: int | None = None) -> dict:
+    db = get_db()
+    current_shift_id = shift_id or get_current_shift_id()
+    row = fetch_order_row_by_code(code, current_shift_id)
+    if not row:
+        raise LookupError("Pedido nao encontrado.")
+
+    if normalize_payment_status(row["payment_status"], "pending") == "paid":
+        return serialize_order(row)
+
+    paid_at = utc_now_iso()
+    db.execute(
+        """
+        UPDATE pedidos
+        SET payment_status = 'paid',
+            paid_at = ?,
+            status = CASE
+                WHEN payment_method = 'pix' AND status = 'pending' THEN 'new'
+                ELSE status
+            END
+        WHERE id = ?
+        """,
+        (paid_at, row["id"]),
+    )
+    db.commit()
+    updated = fetch_order_row_by_code(code, current_shift_id)
+    if not updated:
+        raise LookupError("Pedido nao encontrado.")
+    return serialize_order(updated)
+
+
+def build_ticket(order: dict) -> dict:
+    return {
+        "id": order["id"],
+        "code": order["code"],
+        "order_number": order["order_number"],
+        "customer_name": order["customer_name"],
+        "table_label": order["table_label"],
+        "created_at": order["created_at"],
+        "payment_method": order["payment_method"],
+        "payment_method_label": order["payment_method_label"],
+        "payment_status": order["payment_status"],
+        "payment_status_label": order["payment_status_label"],
+        "paid_at": order["paid_at"],
+        "total": order["total"],
+        "items": order["items"],
+        "printed_at": display_datetime(utc_now_iso()),
+    }
 
 
 def get_current_shift_id() -> int:
@@ -1245,13 +1390,27 @@ def serialize_order(row: sqlite3.Row) -> dict:
     return {
         "id": row["id"],
         "code": row["codigo_retirada"],
+        "order_number": row["order_number"] if "order_number" in row.keys() and row["order_number"] else row["codigo_retirada"],
         "status": row["status"],
         "created_at": display_datetime(row["horario_pedido"]),
         "completed_at": display_datetime(row["completed_at"]) if "completed_at" in row.keys() and row["completed_at"] else None,
+        "paid_at": display_datetime(row["paid_at"]) if "paid_at" in row.keys() and row["paid_at"] else None,
         "total": row["valor_total"],
         "customer_name": row["customer_name"] if "customer_name" in row.keys() and row["customer_name"] else "Cliente",
         "table_label": row["table_label"] if "table_label" in row.keys() and row["table_label"] else "Retirada",
         "source": row["source"] if "source" in row.keys() and row["source"] else DEFAULT_ORDER_SOURCE,
+        "payment_method": row["payment_method"] if "payment_method" in row.keys() and row["payment_method"] else "counter",
+        "payment_method_label": get_payment_method_label(
+            row["payment_method"] if "payment_method" in row.keys() else "counter"
+        ),
+        "payment_status": row["payment_status"] if "payment_status" in row.keys() and row["payment_status"] else "pending",
+        "payment_status_label": get_payment_status_label(
+            row["payment_status"] if "payment_status" in row.keys() else "pending"
+        ),
+        "payment_provider": row["payment_provider"] if "payment_provider" in row.keys() and row["payment_provider"] else None,
+        "payment_provider_id": row["payment_provider_id"] if "payment_provider_id" in row.keys() and row["payment_provider_id"] else None,
+        "pix_qr_code": row["pix_qr_code"] if "pix_qr_code" in row.keys() and row["pix_qr_code"] else None,
+        "pix_copy_paste": row["pix_copy_paste"] if "pix_copy_paste" in row.keys() and row["pix_copy_paste"] else None,
         "items": [
             {
                 "id": item["bebida_id"],
@@ -1278,15 +1437,27 @@ def fetch_orders(status: str | None = None, limit: int | None = None, shift_id: 
             customer_name,
             table_label,
             source,
-            completed_at
+            completed_at,
+            order_number,
+            payment_method,
+            payment_status,
+            payment_provider,
+            payment_provider_id,
+            paid_at,
+            pix_qr_code,
+            pix_copy_paste
         FROM pedidos
     """
     params: list = []
     conditions = ["turno_id = ?"]
     params.append(current_shift_id)
     if status:
-        conditions.append("status = ?")
-        params.append(status)
+        if status == "pending":
+            conditions.append("status IN (?, ?)")
+            params.extend(ACTIVE_ORDER_STATUSES)
+        else:
+            conditions.append("status = ?")
+            params.append(status)
     query += " WHERE " + " AND ".join(conditions)
     query += " ORDER BY horario_pedido DESC"
     if limit:
@@ -1416,13 +1587,21 @@ def fetch_shift_orders_rows(shift_id: int) -> list[sqlite3.Row]:
         SELECT
             id,
             codigo_retirada,
+            order_number,
             horario_pedido,
             status,
             valor_total,
             customer_name,
             table_label,
             source,
-            completed_at
+            completed_at,
+            payment_method,
+            payment_status,
+            payment_provider,
+            payment_provider_id,
+            paid_at,
+            pix_qr_code,
+            pix_copy_paste
         FROM pedidos
         WHERE turno_id = ?
         ORDER BY horario_pedido DESC
@@ -1837,8 +2016,8 @@ def build_order_summary(shift_id: int | None = None) -> dict:
         (current_shift_id,),
     ).fetchall()
     pending = get_db().execute(
-        "SELECT COUNT(*) AS total FROM pedidos WHERE status = 'pending' AND turno_id = ?",
-        (current_shift_id,),
+        "SELECT COUNT(*) AS total FROM pedidos WHERE status IN (?, ?) AND turno_id = ?",
+        (*ACTIVE_ORDER_STATUSES, current_shift_id),
     ).fetchone()["total"]
     completed = get_db().execute(
         "SELECT COUNT(*) AS total FROM pedidos WHERE status = 'completed' AND turno_id = ?",
@@ -1919,6 +2098,74 @@ def fetch_shift_history(limit: int = 10) -> list[dict]:
             }
         )
     return shifts
+
+
+def fetch_order_row_by_code(code: str, shift_id: int | None = None) -> sqlite3.Row | None:
+    query = """
+        SELECT
+            id,
+            codigo_retirada,
+            order_number,
+            horario_pedido,
+            status,
+            valor_total,
+            customer_name,
+            table_label,
+            source,
+            completed_at,
+            payment_method,
+            payment_status,
+            payment_provider,
+            payment_provider_id,
+            paid_at,
+            pix_qr_code,
+            pix_copy_paste
+        FROM pedidos
+        WHERE codigo_retirada = ?
+    """
+    params: list = [code]
+    if shift_id is not None:
+        query += " AND turno_id = ?"
+        params.append(shift_id)
+    return get_db().execute(query, params).fetchone()
+
+
+def mark_as_paid(code: str, shift_id: int | None = None) -> dict:
+    db = get_db()
+    order_row = fetch_order_row_by_code(code, shift_id)
+    if not order_row:
+        raise LookupError("Pedido nao encontrado.")
+
+    if order_row["payment_status"] != "paid":
+        db.execute(
+            """
+            UPDATE pedidos
+            SET payment_status = 'paid', paid_at = ?
+            WHERE codigo_retirada = ?
+            """,
+            (utc_now_iso(), code),
+        )
+        db.commit()
+        order_row = fetch_order_row_by_code(code, shift_id)
+
+    return serialize_order(order_row)
+
+
+def build_ticket(order: dict) -> dict:
+    return {
+        "order_number": order["order_number"],
+        "pickup_code": order["code"],
+        "created_at": order["created_at"],
+        "customer_name": order["customer_name"],
+        "table_label": order["table_label"],
+        "payment_method": order["payment_method"],
+        "payment_method_label": order["payment_method_label"],
+        "payment_status": order["payment_status"],
+        "payment_status_label": order["payment_status_label"],
+        "paid_at": order["paid_at"],
+        "items": order["items"],
+        "total": order["total"],
+    }
 
 
 def fetch_shift_details(
@@ -2337,6 +2584,10 @@ def index():
         menu=fetch_menu(),
         current_time=display_datetime(utc_now_iso()),
         staff_access_url=url_for("staff_access"),
+        payment_methods=[
+            {"value": value, "label": label}
+            for value, label in PAYMENT_METHOD_LABELS.items()
+        ],
     )
 
 
@@ -2496,6 +2747,20 @@ def get_orders():
     )
 
 
+@app.get("/pedidos/<code>/imprimir")
+@login_required
+def print_order_ticket(code: str):
+    order_row = fetch_order_row_by_code(code)
+    if not order_row:
+        return redirect(url_for("dashboard"))
+    ticket = build_ticket(serialize_order(order_row))
+    return render_template(
+        "ticket_print.html",
+        ticket=ticket,
+        current_user=get_current_user(),
+    )
+
+
 @app.get("/api/reports/shifts")
 @login_required
 def list_closed_shifts():
@@ -2580,6 +2845,17 @@ def create_order():
     customer_name = sanitize_text(payload.get("customer_name"), "Cliente", limit=48)
     table_label = sanitize_text(payload.get("table_label"), "Retirada", limit=32)
     source = sanitize_text(payload.get("source"), DEFAULT_ORDER_SOURCE, limit=24)
+    payment_method = normalize_payment_method(payload.get("payment_method"))
+    payment_status = "pending"
+    payment_provider = sanitize_optional_text(payload.get("payment_provider"), limit=64) or None
+    payment_provider_id = sanitize_optional_text(payload.get("payment_provider_id"), limit=128) or None
+    pix_qr_code = sanitize_optional_text(payload.get("pix_qr_code"), limit=4000) or None
+    pix_copy_paste = sanitize_optional_text(payload.get("pix_copy_paste"), limit=4000) or None
+    if payment_method != "pix":
+        payment_provider = None
+        payment_provider_id = None
+        pix_qr_code = None
+        pix_copy_paste = None
     bebidas_por_id = fetch_beverage_map(include_inactive=True)
     combo_components_map = fetch_combo_components_map()
     inventory_by_name = get_inventory_by_name()
@@ -2635,12 +2911,46 @@ def create_order():
     turno_id = get_current_shift_id()
     cursor = db.execute(
         """
-        INSERT INTO pedidos (codigo_retirada, horario_pedido, status, valor_total, turno_id, customer_name, table_label, source)
-        VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)
+        INSERT INTO pedidos (
+            codigo_retirada,
+            horario_pedido,
+            status,
+            valor_total,
+            turno_id,
+            customer_name,
+            table_label,
+            source,
+            payment_method,
+            payment_status,
+            payment_provider,
+            payment_provider_id,
+            pix_qr_code,
+            pix_copy_paste
+        )
+        VALUES (?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (codigo, horario, round(valor_total, 2), turno_id, customer_name, table_label, source),
+        (
+            codigo,
+            horario,
+            round(valor_total, 2),
+            turno_id,
+            customer_name,
+            table_label,
+            source,
+            payment_method,
+            payment_status,
+            payment_provider,
+            payment_provider_id,
+            pix_qr_code,
+            pix_copy_paste,
+        ),
     )
     pedido_id = cursor.lastrowid
+    order_number = generate_order_number(pedido_id, turno_id)
+    db.execute(
+        "UPDATE pedidos SET order_number = ? WHERE id = ?",
+        (order_number, pedido_id),
+    )
 
     db.executemany(
         """
@@ -2684,7 +2994,15 @@ def create_order():
             customer_name,
             table_label,
             source,
-            completed_at
+            completed_at,
+            order_number,
+            payment_method,
+            payment_status,
+            payment_provider,
+            payment_provider_id,
+            paid_at,
+            pix_qr_code,
+            pix_copy_paste
         FROM pedidos
         WHERE id = ?
         """,
@@ -2693,36 +3011,29 @@ def create_order():
     return jsonify({"order": serialize_order(row), "summary": build_order_summary()}), 201
 
 
+@app.post("/api/orders/<code>/pay")
+@login_required
+def pay_order(code: str):
+    try:
+        order = mark_as_paid(code)
+    except LookupError:
+        return jsonify({"error": "Pedido nao encontrado."}), 404
+    return jsonify({"order": order, "summary": build_order_summary()})
+
+
 @app.post("/api/orders/<code>/complete")
 @login_required
 def complete_order(code: str):
     db = get_db()
     current_shift_id = get_current_shift_id()
-    row = db.execute(
-        "SELECT id, status FROM pedidos WHERE codigo_retirada = ? AND turno_id = ?",
-        (code, current_shift_id),
-    ).fetchone()
+    row = fetch_order_row_by_code(code, current_shift_id)
     if not row:
         return jsonify({"error": "Pedido nao encontrado."}), 404
     if row["status"] == "completed":
-        updated = db.execute(
-            """
-            SELECT
-                id,
-                codigo_retirada,
-                horario_pedido,
-                status,
-                valor_total,
-                customer_name,
-                table_label,
-                source,
-                completed_at
-            FROM pedidos
-            WHERE codigo_retirada = ? AND turno_id = ?
-            """,
-            (code, current_shift_id),
-        ).fetchone()
-        return jsonify({"order": serialize_order(updated), "summary": build_order_summary()})
+        return jsonify({"order": serialize_order(row), "summary": build_order_summary()})
+
+    if row["payment_method"] == "pix" and normalize_payment_status(row["payment_status"], "pending") != "paid":
+        return jsonify({"error": "Pedidos com Pix so podem ser concluidos depois da confirmacao de pagamento."}), 400
 
     db.execute(
         """
@@ -2734,23 +3045,7 @@ def complete_order(code: str):
     )
     db.commit()
 
-    updated = db.execute(
-        """
-        SELECT
-            id,
-            codigo_retirada,
-            horario_pedido,
-            status,
-            valor_total,
-            customer_name,
-            table_label,
-            source,
-            completed_at
-        FROM pedidos
-        WHERE codigo_retirada = ? AND turno_id = ?
-        """,
-        (code, current_shift_id),
-    ).fetchone()
+    updated = fetch_order_row_by_code(code, current_shift_id)
     return jsonify({"order": serialize_order(updated), "summary": build_order_summary()})
 
 
