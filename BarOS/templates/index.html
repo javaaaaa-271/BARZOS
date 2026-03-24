@@ -43,6 +43,14 @@
           <span>Mesa</span>
           <input type="text" id="table-label" value="Mesa 07">
         </label>
+        <label>
+          <span>Pagamento</span>
+          <select id="payment-method">
+            {% for method in payment_methods %}
+            <option value="{{ method.value }}">{{ method.label }}</option>
+            {% endfor %}
+          </select>
+        </label>
       </form>
     </div>
 
@@ -101,6 +109,7 @@
     <div class="checkout-body">
       <div class="checkout-inline-meta">
         <span id="order-count-badge" class="pill">0 itens</span>
+        <span id="payment-method-badge" class="pill subtle-pill">Pagar no balcao</span>
       </div>
       <div id="order-summary" class="summary-list empty-state">
         Selecione itens do cardapio para montar o pedido.
@@ -124,7 +133,7 @@
 <section id="confirmation-modal" class="modal hidden" aria-hidden="true">
   <div class="modal-card">
     <p class="eyebrow">Pedido enviado</p>
-    <h2>Codigo <span id="confirmation-code">----</span></h2>
+    <h2>Pedido <span id="confirmation-code">----</span></h2>
     <p id="confirmation-text">Seu pedido foi enviado para o bar.</p>
     <button class="secondary-button full-width" type="button" id="close-confirmation">Novo pedido</button>
   </div>
