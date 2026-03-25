@@ -193,6 +193,46 @@
     <button class="secondary-button full-width" type="button" id="close-confirmation">Novo pedido</button>
   </div>
 </section>
+
+<section id="pix-modal" class="modal hidden" aria-hidden="true">
+  <div class="modal-card pix-modal-card">
+    <div class="modal-header">
+      <div>
+        <p class="eyebrow">Pagamento Pix</p>
+        <h2>Finalize o pedido <span id="pix-order-code">-----</span></h2>
+      </div>
+      <button class="ghost-button small-button modal-close-button" type="button" id="close-pix-modal-top" aria-label="Fechar pagamento Pix">
+        Fechar
+      </button>
+    </div>
+
+    <div class="modal-scroll-area pix-payment-shell">
+      <div class="pix-preview-card">
+        <div class="pix-preview-copy">
+          <p class="mini-label">Status atual</p>
+          <strong id="pix-payment-status">Pendente</strong>
+          <p id="pix-payment-instruction" class="checkout-instruction">Escaneie o QR code ou use o copia e cola abaixo para pagar.</p>
+        </div>
+        <div class="pix-qr-wrapper">
+          <img id="pix-qr-image" class="pix-qr-image hidden" alt="QR code Pix do pedido">
+          <div id="pix-qr-placeholder" class="pix-qr-placeholder">PIX</div>
+        </div>
+      </div>
+
+      <div class="pix-copy-block">
+        <p class="mini-label">Pix copia e cola</p>
+        <textarea id="pix-copy-paste" class="pix-copy-text" rows="4" readonly></textarea>
+      </div>
+
+      <p id="pix-error" class="alert hidden"></p>
+    </div>
+
+    <div class="modal-actions">
+      <button class="secondary-button full-width" type="button" id="copy-pix-code">Copiar chave</button>
+      <button class="primary-button full-width" type="button" id="simulate-pix-payment">Simular pagamento</button>
+    </div>
+  </div>
+</section>
 {% endblock %}
 
 {% block scripts %}
