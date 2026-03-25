@@ -442,10 +442,8 @@ input {
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
 }
 
-.checkout-panel.is-suspended {
-  opacity: 0;
-  pointer-events: none;
-  transform: translateX(-50%) translateY(20px);
+.checkout-panel.is-flow-hidden {
+  display: none;
 }
 
 .checkout-panel::before {

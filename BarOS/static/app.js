@@ -42,7 +42,7 @@ const closePixModalTopButton = document.getElementById("close-pix-modal-top");
 let checkoutCollapsed = false;
 let currentPixOrder = null;
 let checkoutPanelWasCollapsedBeforeModal = false;
-let checkoutPanelSuspended = false;
+let checkoutPanelHiddenForFlow = false;
 
 const paymentMethodLabels = {
   counter: "Pagar no balcao",
@@ -102,26 +102,26 @@ function updateCheckoutToggle(collapsed) {
   toggleCheckoutButton.setAttribute("aria-expanded", collapsed ? "false" : "true");
 }
 
-function suspendCheckoutPanel() {
-  if (!checkoutPanel || checkoutPanelSuspended) {
+function hideCheckoutPanelForFlow() {
+  if (!checkoutPanel || checkoutPanelHiddenForFlow) {
     return;
   }
   checkoutPanelWasCollapsedBeforeModal = checkoutCollapsed;
-  checkoutPanelSuspended = true;
-  checkoutPanel.classList.add("is-suspended");
-  logCheckoutFlow("suspend_checkout_panel", {
+  checkoutPanelHiddenForFlow = true;
+  checkoutPanel.classList.add("is-flow-hidden");
+  logCheckoutFlow("hide_checkout_panel_for_flow", {
     wasCollapsed: checkoutPanelWasCollapsedBeforeModal,
   });
 }
 
-function resumeCheckoutPanel() {
-  if (!checkoutPanel || !checkoutPanelSuspended) {
+function showCheckoutPanelAfterFlow() {
+  if (!checkoutPanel || !checkoutPanelHiddenForFlow) {
     return;
   }
-  checkoutPanelSuspended = false;
-  checkoutPanel.classList.remove("is-suspended");
+  checkoutPanelHiddenForFlow = false;
+  checkoutPanel.classList.remove("is-flow-hidden");
   updateCheckoutToggle(checkoutPanelWasCollapsedBeforeModal);
-  logCheckoutFlow("resume_checkout_panel", {
+  logCheckoutFlow("show_checkout_panel_after_flow", {
     restoredCollapsed: checkoutPanelWasCollapsedBeforeModal,
   });
 }
@@ -229,7 +229,7 @@ function openCheckoutModal() {
   });
   syncCheckoutReview();
   updateCheckoutInstruction();
-  suspendCheckoutPanel();
+  hideCheckoutPanelForFlow();
   checkoutModal?.classList.remove("hidden");
   checkoutModal?.setAttribute("aria-hidden", "false");
 }
@@ -239,14 +239,14 @@ function closeCheckoutModal({ restorePanel = true } = {}) {
   checkoutModal?.setAttribute("aria-hidden", "true");
   setCheckoutError("");
   if (restorePanel) {
-    resumeCheckoutPanel();
+    showCheckoutPanelAfterFlow();
   }
 }
 
 function closeConfirmationModal() {
   confirmationModal?.classList.add("hidden");
   confirmationModal?.setAttribute("aria-hidden", "true");
-  resumeCheckoutPanel();
+  showCheckoutPanelAfterFlow();
 }
 
 function closePixModal({ restorePanel = true } = {}) {
@@ -254,7 +254,7 @@ function closePixModal({ restorePanel = true } = {}) {
   pixModal?.setAttribute("aria-hidden", "true");
   setPixError("");
   if (restorePanel) {
-    resumeCheckoutPanel();
+    showCheckoutPanelAfterFlow();
   }
 }
 
