@@ -344,6 +344,14 @@ input {
   gap: 12px;
 }
 
+.menu-card-statuses {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .menu-card-meta-row {
   margin-top: -2px;
 }
@@ -577,6 +585,10 @@ input {
   display: none;
 }
 
+.hidden {
+  display: none !important;
+}
+
 .modal-card {
   width: min(420px, 100%);
   border-radius: 28px;
@@ -591,6 +603,10 @@ input {
 
 .report-modal {
   width: min(760px, 100%);
+}
+
+.checkout-modal-card {
+  width: min(680px, 100%);
 }
 
 .modal-header,
@@ -612,6 +628,64 @@ input {
 .modal-scroll-area {
   overflow: auto;
   padding-right: 4px;
+}
+
+.checkout-review-shell {
+  display: grid;
+  gap: 18px;
+}
+
+.checkout-stage-note {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.checkout-review-total {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 18px;
+  border-radius: 18px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.checkout-review-total strong {
+  font-size: 1.2rem;
+}
+
+.checkout-payment-section {
+  display: grid;
+  gap: 12px;
+}
+
+.checkout-payment-options {
+  display: grid;
+  gap: 12px;
+}
+
+.checkout-payment-option {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 14px;
+  align-items: start;
+  padding: 16px;
+  border-radius: 18px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.03);
+  cursor: pointer;
+}
+
+.checkout-payment-option input {
+  margin-top: 4px;
+}
+
+.checkout-payment-option p,
+.checkout-instruction {
+  margin: 6px 0 0;
+  color: var(--muted);
+  line-height: 1.5;
 }
 
 .modal-actions {
@@ -1224,6 +1298,10 @@ input {
   padding: 18px;
   display: grid;
   gap: 18px;
+}
+
+.compact-product-card {
+  gap: 12px;
 }
 
 .managed-product-preview {
