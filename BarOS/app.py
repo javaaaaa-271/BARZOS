@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 from html import escape
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from flask import Flask, Response, g, jsonify, redirect, render_template, request, session, url_for
 from reportlab.lib import colors
@@ -60,6 +61,11 @@ PAYMENT_STATUS_LABELS = {
     "cancelled": "Cancelado",
 }
 ACTIVE_ORDER_STATUSES = ("new", "pending")
+PREORDER_ACTIVE_STATUSES = ("new", "preparing")
+try:
+    LOCAL_TIMEZONE = ZoneInfo(os.getenv("BAROS_TIMEZONE", "America/Sao_Paulo"))
+except ZoneInfoNotFoundError:
+    LOCAL_TIMEZONE = timezone(timedelta(hours=-3))
 
 BEVERAGE_SEED = [
     {
@@ -297,6 +303,10 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def local_now() -> datetime:
+    return datetime.now(LOCAL_TIMEZONE)
+
+
 def display_datetime(value: str | None) -> str:
     if not value:
         return "-"
@@ -364,6 +374,14 @@ def parse_integer_input(raw_value: str | None, label: str, minimum: int = 0) -> 
         raise ValueError(f"{label} invalido.")
     if value < minimum:
         raise ValueError(f"{label} nao pode ser menor que {minimum}.")
+    return value
+
+
+def parse_optional_integer_input(raw_value: str | None, label: str, minimum: int = 1) -> int | None:
+    cleaned = (raw_value or "").strip()
+    if not cleaned:
+        return None
+    value = parse_integer_input(cleaned, label, minimum=minimum)
     return value
 
 
@@ -530,6 +548,13 @@ def init_db() -> None:
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS preorder_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            preorder_start_time TEXT,
+            preorder_end_time TEXT,
+            updated_at TEXT NOT NULL
+        );
         """
     )
 
@@ -546,6 +571,8 @@ def init_db() -> None:
         db.execute("ALTER TABLE bebidas ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
     if "is_combo" not in beverage_columns:
         db.execute("ALTER TABLE bebidas ADD COLUMN is_combo INTEGER NOT NULL DEFAULT 0")
+    if "max_active_orders" not in beverage_columns:
+        db.execute("ALTER TABLE bebidas ADD COLUMN max_active_orders INTEGER")
 
     pedido_columns = [row["name"] for row in db.execute("PRAGMA table_info(pedidos)").fetchall()]
     if "turno_id" not in pedido_columns:
@@ -834,9 +861,11 @@ def generate_order_number(order_id: int, shift_id: int) -> str:
     return f"{shift_id:02d}-{order_id:04d}"
 
 
-def normalize_payment_method(raw_value: str | None) -> str:
-    value = sanitize_text(raw_value, "counter", limit=16).lower()
-    return value if value in PAYMENT_METHOD_LABELS else "counter"
+def normalize_payment_method(raw_value: str | None) -> str | None:
+    value = sanitize_optional_text(raw_value, limit=16).lower()
+    if not value:
+        return None
+    return value if value in PAYMENT_METHOD_LABELS else None
 
 
 def normalize_payment_status(raw_value: str | None, fallback: str = "pending") -> str:
@@ -994,7 +1023,8 @@ def fetch_beverage_rows(include_inactive: bool = True) -> list[sqlite3.Row]:
             tempo_preparo,
             imagem_url,
             is_active,
-            is_combo
+            is_combo,
+            max_active_orders
         FROM bebidas
     """
     params: list = []
@@ -1045,6 +1075,119 @@ def fetch_combo_components_map(combo_ids: list[int] | None = None) -> dict[int, 
     return components
 
 
+def parse_preorder_time_value(raw_value: str | None) -> str | None:
+    cleaned = (raw_value or "").strip()
+    if not cleaned:
+        return None
+    try:
+        datetime.strptime(cleaned, "%H:%M")
+    except ValueError:
+        raise ValueError("Horario de pre-order invalido. Use HH:MM.")
+    return cleaned
+
+
+def fetch_preorder_settings() -> dict:
+    row = get_db().execute(
+        """
+        SELECT preorder_start_time, preorder_end_time, updated_at
+        FROM preorder_settings
+        WHERE id = 1
+        """
+    ).fetchone()
+    start_time = row["preorder_start_time"] if row else None
+    end_time = row["preorder_end_time"] if row else None
+    status = resolve_preorder_window_status(start_time, end_time)
+    return {
+        "start_time": start_time or "",
+        "end_time": end_time or "",
+        "updated_at": display_datetime(row["updated_at"]) if row and row["updated_at"] else "-",
+        **status,
+    }
+
+
+def resolve_preorder_window_status(start_time: str | None, end_time: str | None) -> dict:
+    if not start_time or not end_time:
+        return {
+            "is_configured": False,
+            "status": "disabled",
+            "status_label": "Sem configuracao",
+            "status_note": "Sem janela configurada, o sistema segue normal.",
+        }
+
+    current_value = local_now().strftime("%H:%M")
+    if current_value < start_time:
+        return {
+            "is_configured": True,
+            "status": "not_started",
+            "status_label": "Ainda nao comecou",
+            "status_note": f"Pre-order abre as {start_time}.",
+        }
+    if current_value > end_time:
+        return {
+            "is_configured": True,
+            "status": "closed",
+            "status_label": "Fechado",
+            "status_note": f"Pre-order encerrou as {end_time}.",
+        }
+    return {
+        "is_configured": True,
+        "status": "open",
+        "status_label": "Aberto",
+        "status_note": f"Recebendo pre-orders ate {end_time}.",
+    }
+
+
+def fetch_active_preorder_counts() -> dict[int, int]:
+    placeholders = ",".join("?" for _ in PREORDER_ACTIVE_STATUSES)
+    rows = get_db().execute(
+        f"""
+        SELECT
+            ip.bebida_id,
+            COALESCE(SUM(ip.quantidade), 0) AS total
+        FROM itens_pedido ip
+        JOIN pedidos p ON p.id = ip.pedido_id
+        WHERE p.status IN ({placeholders})
+        GROUP BY ip.bebida_id
+        """,
+        PREORDER_ACTIVE_STATUSES,
+    ).fetchall()
+    return {row["bebida_id"]: int(row["total"] or 0) for row in rows}
+
+
+def preorder_availability(
+    beverage_row: sqlite3.Row | dict,
+    *,
+    requested_quantity: int = 1,
+    active_counts: dict[int, int] | None = None,
+    preorder_settings: dict | None = None,
+) -> tuple[bool, str, str | None]:
+    settings = preorder_settings or fetch_preorder_settings()
+    if not settings.get("is_configured"):
+        return True, "available", None
+
+    status = settings.get("status")
+    if status == "not_started":
+        return False, "available_soon", settings.get("status_note")
+    if status != "open":
+        return False, "unavailable_now", settings.get("status_note")
+
+    row_data = dict(beverage_row)
+    max_active_orders = row_data.get("max_active_orders")
+    if not max_active_orders:
+        return True, "available", settings.get("status_note")
+
+    counts = active_counts or fetch_active_preorder_counts()
+    current_active = int(counts.get(int(row_data["id"]), 0))
+    if current_active + requested_quantity > int(max_active_orders):
+        return (
+            False,
+            "unavailable_now",
+            f"Capacidade de pre-order atingida ({current_active}/{int(max_active_orders)} em preparo).",
+        )
+
+    return True, "available", f"{current_active}/{int(max_active_orders)} ativos no momento."
+
+
 def get_beverage_display_data(row: sqlite3.Row | dict) -> dict:
     row_data = dict(row)
     fallback = BEVERAGE_META.get(row["nome"], {})
@@ -1069,6 +1212,7 @@ def get_beverage_display_data(row: sqlite3.Row | dict) -> dict:
         "placeholder": build_initials(row_data["nome"]),
         "is_active": bool(row_data["is_active"]),
         "is_combo": bool(row_data["is_combo"]),
+        "max_active_orders": int(row_data["max_active_orders"]) if row_data.get("max_active_orders") else None,
     }
 
 
@@ -1126,29 +1270,42 @@ def beverage_availability(
     inventory_by_name: dict[str, sqlite3.Row],
     beverages_by_id: dict[int, sqlite3.Row],
     combo_components_map: dict[int, list[dict]],
-) -> tuple[bool, str | None]:
+    *,
+    requested_quantity: int = 1,
+    active_counts: dict[int, int] | None = None,
+    preorder_settings: dict | None = None,
+) -> tuple[bool, str | None, str]:
     if not beverage_row["is_active"]:
-        return False, "Item inativo no cardapio."
+        return False, "Item inativo no cardapio.", "unavailable_now"
+
+    preorder_allowed, preorder_state, preorder_note = preorder_availability(
+        beverage_row,
+        requested_quantity=requested_quantity,
+        active_counts=active_counts,
+        preorder_settings=preorder_settings,
+    )
+    if not preorder_allowed:
+        return False, preorder_note or "Pre-order indisponivel no momento.", preorder_state
 
     required, error = build_item_requirements(
         beverage_row,
-        1,
+        requested_quantity,
         beverages_by_id,
         combo_components_map,
     )
     if error:
-        return False, f"Indisponivel: {error}"
+        return False, f"Indisponivel: {error}", "unavailable_now"
     if not required:
-        return True, None
+        return True, preorder_note, preorder_state
 
     for ingredient_name, amount in required.items():
         inventory_item = inventory_by_name.get(ingredient_name)
         if not inventory_item:
-            return False, f"Indisponivel: {ingredient_name} nao cadastrado."
+            return False, f"Indisponivel: {ingredient_name} nao cadastrado.", "unavailable_now"
         if inventory_item["stock_level"] < amount:
-            return False, f"Indisponivel por estoque de {ingredient_name}."
+            return False, f"Indisponivel por estoque de {ingredient_name}.", "unavailable_now"
 
-    return True, None
+    return True, preorder_note, preorder_state
 
 
 def build_required_ingredients(
@@ -1260,19 +1417,30 @@ def fetch_menu() -> list[dict]:
     rows = fetch_beverage_rows(include_inactive=False)
     beverages_by_id = fetch_beverage_map(include_inactive=True)
     combo_components_map = fetch_combo_components_map([row["id"] for row in rows if row["is_combo"]])
+    preorder_settings = fetch_preorder_settings()
+    active_counts = fetch_active_preorder_counts()
     menu = []
     for row in rows:
         menu_item = get_beverage_display_data(row)
-        is_available, availability_note = beverage_availability(
+        is_available, availability_note, availability_state = beverage_availability(
             row,
             inventory_by_name,
             beverages_by_id,
             combo_components_map,
+            requested_quantity=1,
+            active_counts=active_counts,
+            preorder_settings=preorder_settings,
         )
         menu_item.update(
             {
                 "is_available": is_available,
                 "availability_note": availability_note,
+                "availability_state": availability_state,
+                "availability_state_label": {
+                    "available": "Disponivel",
+                    "available_soon": "Disponivel em breve",
+                    "unavailable_now": "Indisponivel no momento",
+                }.get(availability_state, "Disponivel"),
             }
         )
         menu.append(menu_item)
@@ -1321,6 +1489,7 @@ def refresh_combo_costs_for_component(component_beverage_id: int) -> None:
 def fetch_products_management_snapshot() -> dict:
     rows = fetch_beverage_rows(include_inactive=True)
     combo_components_map = fetch_combo_components_map([row["id"] for row in rows if row["is_combo"]])
+    active_counts = fetch_active_preorder_counts()
     products = []
     combos = []
     base_products = []
@@ -1329,6 +1498,8 @@ def fetch_products_management_snapshot() -> dict:
         product = get_beverage_display_data(row)
         product["raw_description"] = row["descricao"] or ""
         product["raw_image_url"] = row["imagem_url"] or ""
+        product["raw_max_active_orders"] = row["max_active_orders"] or ""
+        product["active_order_count"] = int(active_counts.get(row["id"], 0))
         product["component_count"] = 0
         product["components"] = []
         if row["is_combo"]:
@@ -1354,6 +1525,64 @@ def build_products_redirect(message: str | None = None, error: str | None = None
     if error:
         params["error"] = error
     return redirect(url_for("products_page", **params))
+
+
+def build_preorder_redirect(message: str | None = None, error: str | None = None):
+    params = {}
+    if message:
+        params["message"] = message
+    if error:
+        params["error"] = error
+    return redirect(url_for("preorder_page", **params))
+
+
+def fetch_preorder_dashboard_snapshot() -> dict:
+    settings = fetch_preorder_settings()
+    active_counts = fetch_active_preorder_counts()
+    rows = fetch_beverage_rows(include_inactive=True)
+    tracked_products = []
+    for row in rows:
+        product = get_beverage_display_data(row)
+        product["active_order_count"] = int(active_counts.get(row["id"], 0))
+        if product["max_active_orders"] or product["active_order_count"]:
+            tracked_products.append(product)
+
+    tracked_products.sort(
+        key=lambda item: (
+            0 if item["max_active_orders"] else 1,
+            item["name"].lower(),
+        )
+    )
+
+    return {
+        "settings": settings,
+        "tracked_products": tracked_products,
+        "active_total": sum(active_counts.values()),
+    }
+
+
+def save_preorder_settings_from_form() -> str:
+    db = get_db()
+    start_time = parse_preorder_time_value(request.form.get("preorder_start_time"))
+    end_time = parse_preorder_time_value(request.form.get("preorder_end_time"))
+
+    if bool(start_time) != bool(end_time):
+        raise ValueError("Preencha inicio e fim do pre-order para ativar a janela.")
+    if start_time and end_time and start_time >= end_time:
+        raise ValueError("O horario final precisa ser depois do horario inicial.")
+
+    db.execute(
+        """
+        INSERT INTO preorder_settings (id, preorder_start_time, preorder_end_time, updated_at)
+        VALUES (1, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            preorder_start_time = excluded.preorder_start_time,
+            preorder_end_time = excluded.preorder_end_time,
+            updated_at = excluded.updated_at
+        """,
+        (start_time, end_time, utc_now_iso()),
+    )
+    return "Configuracao de pre-order salva com sucesso."
 
 
 def parse_combo_components_from_form(selected_ids: list[str]) -> list[dict]:
@@ -2486,6 +2715,11 @@ def upsert_product_from_form(product_id: int | None = None) -> str:
     description = sanitize_optional_text(request.form.get("description"), limit=280)
     image_url = normalize_product_image(request.form.get("image_url"))
     is_active = 1 if checkbox_to_bool(request.form.get("is_active")) else 0
+    max_active_orders = parse_optional_integer_input(
+        request.form.get("max_active_orders"),
+        "Capacidade maxima",
+        minimum=1,
+    )
 
     if product_id:
         row = db.execute(
@@ -2501,10 +2735,10 @@ def upsert_product_from_form(product_id: int | None = None) -> str:
         db.execute(
             """
             UPDATE bebidas
-            SET nome = ?, preco_venda = ?, custo_estimado = ?, descricao = ?, imagem_url = ?, is_active = ?
+            SET nome = ?, preco_venda = ?, custo_estimado = ?, descricao = ?, imagem_url = ?, is_active = ?, max_active_orders = ?
             WHERE id = ?
             """,
-            (name, price, cost, description, image_url, is_active, product_id),
+            (name, price, cost, description, image_url, is_active, max_active_orders, product_id),
         )
         refresh_combo_costs_for_component(product_id)
         return "Produto atualizado com sucesso."
@@ -2520,11 +2754,12 @@ def upsert_product_from_form(product_id: int | None = None) -> str:
             tempo_preparo,
             imagem_url,
             is_active,
-            is_combo
+            is_combo,
+            max_active_orders
         )
-        VALUES (?, ?, ?, 'Bebida', ?, '3 min', ?, ?, 0)
+        VALUES (?, ?, ?, 'Bebida', ?, '3 min', ?, ?, 0, ?)
         """,
-        (name, price, cost, description, image_url, is_active),
+        (name, price, cost, description, image_url, is_active, max_active_orders),
     )
     return "Produto criado com sucesso."
 
@@ -2539,6 +2774,11 @@ def upsert_combo_from_form(combo_id: int | None = None) -> str:
     description = sanitize_optional_text(request.form.get("description"), limit=280)
     image_url = normalize_product_image(request.form.get("image_url"))
     is_active = 1 if checkbox_to_bool(request.form.get("is_active")) else 0
+    max_active_orders = parse_optional_integer_input(
+        request.form.get("max_active_orders"),
+        "Capacidade maxima",
+        minimum=1,
+    )
     components = parse_combo_components_from_form(request.form.getlist("component_ids"))
     catalog = fetch_beverage_map(include_inactive=True)
     for component in components:
@@ -2558,10 +2798,10 @@ def upsert_combo_from_form(combo_id: int | None = None) -> str:
         db.execute(
             """
             UPDATE bebidas
-            SET nome = ?, preco_venda = ?, custo_estimado = ?, descricao = ?, imagem_url = ?, is_active = ?
+            SET nome = ?, preco_venda = ?, custo_estimado = ?, descricao = ?, imagem_url = ?, is_active = ?, max_active_orders = ?
             WHERE id = ?
             """,
-            (name, price, estimated_cost, description, image_url, is_active, combo_id),
+            (name, price, estimated_cost, description, image_url, is_active, max_active_orders, combo_id),
         )
         db.execute("DELETE FROM combo_items WHERE combo_beverage_id = ?", (combo_id,))
         target_combo_id = combo_id
@@ -2578,11 +2818,12 @@ def upsert_combo_from_form(combo_id: int | None = None) -> str:
                 tempo_preparo,
                 imagem_url,
                 is_active,
-                is_combo
+                is_combo,
+                max_active_orders
             )
-            VALUES (?, ?, ?, 'Combo', ?, '4 min', ?, ?, 1)
+            VALUES (?, ?, ?, 'Combo', ?, '4 min', ?, ?, 1, ?)
             """,
-            (name, price, estimated_cost, description, image_url, is_active),
+            (name, price, estimated_cost, description, image_url, is_active, max_active_orders),
         )
         target_combo_id = cursor.lastrowid
         success_message = "Combo criado com sucesso."
@@ -2669,6 +2910,7 @@ def dashboard():
         summary=build_order_summary(),
         logistics=fetch_logistics_snapshot(),
         shifts=fetch_shift_history(limit=5),
+        preorder=fetch_preorder_settings(),
         current_user=get_current_user(),
     )
 
@@ -2683,6 +2925,22 @@ def products_page():
         products=snapshot["products"],
         combos=snapshot["combos"],
         component_options=snapshot["component_options"],
+        current_user=get_current_user(),
+        message=request.args.get("message"),
+        error=request.args.get("error"),
+    )
+
+
+@app.get("/painel/pre-order")
+@login_required
+@role_required("admin")
+def preorder_page():
+    snapshot = fetch_preorder_dashboard_snapshot()
+    return render_template(
+        "preorder.html",
+        preorder=snapshot["settings"],
+        tracked_products=snapshot["tracked_products"],
+        active_total=snapshot["active_total"],
         current_user=get_current_user(),
         message=request.args.get("message"),
         error=request.args.get("error"),
@@ -2723,6 +2981,19 @@ def save_combo():
     except ValueError as error:
         get_db().rollback()
         return build_products_redirect(error=str(error))
+
+
+@app.post("/painel/pre-order/salvar")
+@login_required
+@role_required("admin")
+def save_preorder():
+    try:
+        message = save_preorder_settings_from_form()
+        get_db().commit()
+        return build_preorder_redirect(message=message)
+    except ValueError as error:
+        get_db().rollback()
+        return build_preorder_redirect(error=str(error))
 
 
 @app.get("/historico-turnos")
@@ -2869,6 +3140,8 @@ def create_order():
     table_label = sanitize_text(payload.get("table_label"), "Retirada", limit=32)
     source = sanitize_text(payload.get("source"), DEFAULT_ORDER_SOURCE, limit=24)
     payment_method = normalize_payment_method(payload.get("payment_method"))
+    if not payment_method:
+        return jsonify({"error": "Escolha uma forma de pagamento valida antes de enviar o pedido."}), 400
     payment_status = "pending"
     payment_provider = sanitize_optional_text(payload.get("payment_provider"), limit=64) or None
     payment_provider_id = sanitize_optional_text(payload.get("payment_provider_id"), limit=128) or None
@@ -2882,6 +3155,8 @@ def create_order():
     bebidas_por_id = fetch_beverage_map(include_inactive=True)
     combo_components_map = fetch_combo_components_map()
     inventory_by_name = get_inventory_by_name()
+    preorder_settings = fetch_preorder_settings()
+    active_preorder_counts = fetch_active_preorder_counts()
 
     itens = []
     valor_total = 0.0
@@ -2891,11 +3166,14 @@ def create_order():
         bebida = bebidas_por_id.get(bebida_id)
         if not bebida or quantidade <= 0 or not bebida["is_active"]:
             continue
-        is_available, availability_note = beverage_availability(
+        is_available, availability_note, _ = beverage_availability(
             bebida,
             inventory_by_name,
             bebidas_por_id,
             combo_components_map,
+            requested_quantity=quantidade,
+            active_counts=active_preorder_counts,
+            preorder_settings=preorder_settings,
         )
         if not is_available:
             return jsonify({"error": availability_note or f"{bebida['nome']} indisponivel."}), 400
