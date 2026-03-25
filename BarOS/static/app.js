@@ -41,6 +41,8 @@ const closePixModalTopButton = document.getElementById("close-pix-modal-top");
 
 let checkoutCollapsed = false;
 let currentPixOrder = null;
+let checkoutPanelWasCollapsedBeforeModal = false;
+let checkoutPanelSuspended = false;
 
 const paymentMethodLabels = {
   counter: "Pagar no balcao",
@@ -98,6 +100,30 @@ function updateCheckoutToggle(collapsed) {
   checkoutPanel.classList.toggle("is-collapsed", collapsed);
   toggleCheckoutButton.textContent = collapsed ? "Expandir" : "Minimizar";
   toggleCheckoutButton.setAttribute("aria-expanded", collapsed ? "false" : "true");
+}
+
+function suspendCheckoutPanel() {
+  if (!checkoutPanel || checkoutPanelSuspended) {
+    return;
+  }
+  checkoutPanelWasCollapsedBeforeModal = checkoutCollapsed;
+  checkoutPanelSuspended = true;
+  checkoutPanel.classList.add("is-suspended");
+  logCheckoutFlow("suspend_checkout_panel", {
+    wasCollapsed: checkoutPanelWasCollapsedBeforeModal,
+  });
+}
+
+function resumeCheckoutPanel() {
+  if (!checkoutPanel || !checkoutPanelSuspended) {
+    return;
+  }
+  checkoutPanelSuspended = false;
+  checkoutPanel.classList.remove("is-suspended");
+  updateCheckoutToggle(checkoutPanelWasCollapsedBeforeModal);
+  logCheckoutFlow("resume_checkout_panel", {
+    restoredCollapsed: checkoutPanelWasCollapsedBeforeModal,
+  });
 }
 
 function renderSummaryRows(selected) {
@@ -203,25 +229,33 @@ function openCheckoutModal() {
   });
   syncCheckoutReview();
   updateCheckoutInstruction();
+  suspendCheckoutPanel();
   checkoutModal?.classList.remove("hidden");
   checkoutModal?.setAttribute("aria-hidden", "false");
 }
 
-function closeCheckoutModal() {
+function closeCheckoutModal({ restorePanel = true } = {}) {
   checkoutModal?.classList.add("hidden");
   checkoutModal?.setAttribute("aria-hidden", "true");
   setCheckoutError("");
+  if (restorePanel) {
+    resumeCheckoutPanel();
+  }
 }
 
 function closeConfirmationModal() {
   confirmationModal?.classList.add("hidden");
   confirmationModal?.setAttribute("aria-hidden", "true");
+  resumeCheckoutPanel();
 }
 
-function closePixModal() {
+function closePixModal({ restorePanel = true } = {}) {
   pixModal?.classList.add("hidden");
   pixModal?.setAttribute("aria-hidden", "true");
   setPixError("");
+  if (restorePanel) {
+    resumeCheckoutPanel();
+  }
 }
 
 function resetCart() {
@@ -326,7 +360,7 @@ async function submitOrder() {
     return;
   }
 
-  closeCheckoutModal();
+  closeCheckoutModal({ restorePanel: false });
   resetCart();
 
   if (paymentMethod === "pix") {
@@ -373,7 +407,7 @@ async function simulatePixPayment() {
   }
 
   currentPixOrder = data.order;
-  closePixModal();
+  closePixModal({ restorePanel: false });
   showConfirmation(
     data.order,
     "Seu pedido foi enviado. O pagamento via Pix foi confirmado e o bar ja pode seguir com a liberacao."

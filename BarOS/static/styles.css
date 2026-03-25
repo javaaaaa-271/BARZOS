@@ -442,6 +442,12 @@ input {
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
 }
 
+.checkout-panel.is-suspended {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-50%) translateY(20px);
+}
+
 .checkout-panel::before {
   content: "";
   position: absolute;
@@ -579,6 +585,7 @@ input {
   place-items: center;
   background: rgba(2, 4, 8, 0.68);
   padding: 24px;
+  z-index: 120;
 }
 
 .modal.hidden {
@@ -599,6 +606,8 @@ input {
   max-height: calc(100vh - 48px);
   display: flex;
   flex-direction: column;
+  position: relative;
+  z-index: 121;
 }
 
 .report-modal {
