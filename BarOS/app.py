@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import csv
 import json
@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 from html import escape
 from pathlib import Path
+from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from flask import Flask, Response, g, jsonify, redirect, render_template, request, session, url_for
@@ -738,8 +739,10 @@ def init_db() -> None:
     db.execute(
         """
         UPDATE pedidos
-        SET order_number = printf('%02d-%04d', COALESCE(turno_id, 0), id)
-        WHERE order_number IS NULL OR TRIM(order_number) = ''
+        SET order_number = codigo_retirada
+        WHERE order_number IS NULL
+           OR TRIM(order_number) = ''
+           OR order_number != codigo_retirada
         """
     )
     db.execute(
@@ -848,7 +851,7 @@ def generate_order_code() -> str:
     alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
     db = get_db()
     while True:
-        code = "".join(secrets.choice(alphabet) for _ in range(4))
+        code = "".join(secrets.choice(alphabet) for _ in range(5))
         exists = db.execute(
             "SELECT 1 FROM pedidos WHERE codigo_retirada = ?",
             (code,),
@@ -857,8 +860,41 @@ def generate_order_code() -> str:
             return code
 
 
-def generate_order_number(order_id: int, shift_id: int) -> str:
-    return f"{shift_id:02d}-{order_id:04d}"
+def generate_order_number(code: str) -> str:
+    return code
+
+
+def build_fake_pix_payload(order_code: str, total: float) -> dict:
+    provider_id = f"PIX-{secrets.token_hex(4).upper()}"
+    amount = f"{float(total or 0):.2f}"
+    copy_paste = (
+        f"00020126580014BR.GOV.BCB.PIX0136BAROS-SIMULADO-{order_code}"
+        f"520400005303986540{amount}5802BR5913BAROS6009SAO PAULO62070503***6304{order_code}"
+    )
+    qr_svg = f"""
+    <svg xmlns="http://www.w3.org/2000/svg" width="280" height="280" viewBox="0 0 280 280">
+      <rect width="280" height="280" rx="24" fill="#ffffff"/>
+      <rect x="18" y="18" width="244" height="244" rx="18" fill="#101722" stroke="#f2b35d" stroke-width="6"/>
+      <rect x="38" y="38" width="58" height="58" fill="#f2b35d"/>
+      <rect x="184" y="38" width="58" height="58" fill="#f2b35d"/>
+      <rect x="38" y="184" width="58" height="58" fill="#f2b35d"/>
+      <rect x="118" y="58" width="18" height="18" fill="#f5f7fb"/>
+      <rect x="154" y="58" width="18" height="18" fill="#f5f7fb"/>
+      <rect x="118" y="94" width="18" height="18" fill="#f5f7fb"/>
+      <rect x="154" y="94" width="18" height="18" fill="#f5f7fb"/>
+      <rect x="118" y="130" width="18" height="18" fill="#f5f7fb"/>
+      <rect x="154" y="130" width="18" height="18" fill="#f5f7fb"/>
+      <rect x="94" y="154" width="92" height="18" fill="#6ad7a0"/>
+      <text x="140" y="214" text-anchor="middle" fill="#f5f7fb" font-size="28" font-family="Arial, sans-serif" font-weight="700">PIX</text>
+      <text x="140" y="242" text-anchor="middle" fill="#9ca8bb" font-size="14" font-family="Arial, sans-serif">{order_code}</text>
+    </svg>
+    """.strip()
+    return {
+        "payment_provider": "baros-pix-simulado",
+        "payment_provider_id": provider_id,
+        "pix_copy_paste": copy_paste,
+        "pix_qr_code": f"data:image/svg+xml;charset=utf-8,{quote(qr_svg)}",
+    }
 
 
 def normalize_payment_method(raw_value: str | None) -> str | None:
@@ -886,6 +922,7 @@ def fetch_order_row_by_code(code: str, shift_id: int | None = None) -> sqlite3.R
         SELECT
             id,
             codigo_retirada,
+            turno_id,
             horario_pedido,
             status,
             valor_total,
@@ -2352,74 +2389,6 @@ def fetch_shift_history(limit: int = 10) -> list[dict]:
     return shifts
 
 
-def fetch_order_row_by_code(code: str, shift_id: int | None = None) -> sqlite3.Row | None:
-    query = """
-        SELECT
-            id,
-            codigo_retirada,
-            order_number,
-            horario_pedido,
-            status,
-            valor_total,
-            customer_name,
-            table_label,
-            source,
-            completed_at,
-            payment_method,
-            payment_status,
-            payment_provider,
-            payment_provider_id,
-            paid_at,
-            pix_qr_code,
-            pix_copy_paste
-        FROM pedidos
-        WHERE codigo_retirada = ?
-    """
-    params: list = [code]
-    if shift_id is not None:
-        query += " AND turno_id = ?"
-        params.append(shift_id)
-    return get_db().execute(query, params).fetchone()
-
-
-def mark_as_paid(code: str, shift_id: int | None = None) -> dict:
-    db = get_db()
-    order_row = fetch_order_row_by_code(code, shift_id)
-    if not order_row:
-        raise LookupError("Pedido nao encontrado.")
-
-    if order_row["payment_status"] != "paid":
-        db.execute(
-            """
-            UPDATE pedidos
-            SET payment_status = 'paid', paid_at = ?
-            WHERE codigo_retirada = ?
-            """,
-            (utc_now_iso(), code),
-        )
-        db.commit()
-        order_row = fetch_order_row_by_code(code, shift_id)
-
-    return serialize_order(order_row)
-
-
-def build_ticket(order: dict) -> dict:
-    return {
-        "order_number": order["order_number"],
-        "pickup_code": order["code"],
-        "created_at": order["created_at"],
-        "customer_name": order["customer_name"],
-        "table_label": order["table_label"],
-        "payment_method": order["payment_method"],
-        "payment_method_label": order["payment_method_label"],
-        "payment_status": order["payment_status"],
-        "payment_status_label": order["payment_status_label"],
-        "paid_at": order["paid_at"],
-        "items": order["items"],
-        "total": order["total"],
-    }
-
-
 def fetch_shift_details(
     shift_id: int,
     comparison_shift_id: int | None = None,
@@ -3140,6 +3109,7 @@ def create_order():
     table_label = sanitize_text(payload.get("table_label"), "Retirada", limit=32)
     source = sanitize_text(payload.get("source"), DEFAULT_ORDER_SOURCE, limit=24)
     payment_method = normalize_payment_method(payload.get("payment_method"))
+    app.logger.info("create_order requested payment_method=%s source=%s customer=%s", payment_method, source, customer_name)
     if not payment_method:
         return jsonify({"error": "Escolha uma forma de pagamento valida antes de enviar o pedido."}), 400
     payment_status = "pending"
@@ -3208,12 +3178,20 @@ def create_order():
         ), 400
 
     codigo = generate_order_code()
+    order_number = generate_order_number(codigo)
+    if payment_method == "pix":
+        pix_payload = build_fake_pix_payload(codigo, valor_total)
+        payment_provider = pix_payload["payment_provider"]
+        payment_provider_id = pix_payload["payment_provider_id"]
+        pix_qr_code = pix_payload["pix_qr_code"]
+        pix_copy_paste = pix_payload["pix_copy_paste"]
     horario = utc_now_iso()
     turno_id = get_current_shift_id()
     cursor = db.execute(
         """
         INSERT INTO pedidos (
             codigo_retirada,
+            order_number,
             horario_pedido,
             status,
             valor_total,
@@ -3228,10 +3206,11 @@ def create_order():
             pix_qr_code,
             pix_copy_paste
         )
-        VALUES (?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             codigo,
+            order_number,
             horario,
             round(valor_total, 2),
             turno_id,
@@ -3247,11 +3226,6 @@ def create_order():
         ),
     )
     pedido_id = cursor.lastrowid
-    order_number = generate_order_number(pedido_id, turno_id)
-    db.execute(
-        "UPDATE pedidos SET order_number = ? WHERE id = ?",
-        (order_number, pedido_id),
-    )
 
     db.executemany(
         """
@@ -3310,6 +3284,22 @@ def create_order():
         (pedido_id,),
     ).fetchone()
     return jsonify({"order": serialize_order(row), "summary": build_order_summary()}), 201
+
+
+@app.post("/api/orders/<code>/pix/simulate")
+def simulate_pix_payment(code: str):
+    order_row = fetch_order_row_by_code(code)
+    if not order_row:
+        return jsonify({"error": "Pedido nao encontrado."}), 404
+    if normalize_payment_method(order_row["payment_method"]) != "pix":
+        return jsonify({"error": "Esse pedido nao usa Pix."}), 400
+
+    app.logger.info("simulate_pix_payment code=%s current_status=%s", code, order_row["payment_status"])
+    try:
+        order = mark_as_paid(code, shift_id=order_row["turno_id"] if "turno_id" in order_row.keys() else None)
+    except LookupError:
+        return jsonify({"error": "Pedido nao encontrado."}), 404
+    return jsonify({"order": order})
 
 
 @app.post("/api/orders/<code>/pay")
@@ -3449,3 +3439,4 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", os.getenv("BAROS_PORT", "5000")))
     debug = os.getenv("BAROS_DEBUG", "true").lower() == "true"
     app.run(debug=debug, host=host, port=port)
+
