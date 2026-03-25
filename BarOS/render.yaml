@@ -12,7 +12,13 @@ services:
         value: admin
       - key: BAROS_PASSWORD
         sync: false
+      - key: BAROS_OPERATOR_USERNAME
+        value: operacao
+      - key: BAROS_OPERATOR_PASSWORD
+        sync: false
+      - key: BAROS_INTERNAL_ACCESS_PATH
+        value: backstage
       - key: BAROS_DEBUG
         value: "false"
-      - key: BAROS_DB_PATH
+      - key: DATABASE_PATH
         value: /var/data/baros.db

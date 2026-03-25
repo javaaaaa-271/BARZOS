@@ -25,7 +25,20 @@ BASE_DIR = Path(__file__).resolve().parent
 INSTANCE_DIR = BASE_DIR / "instance"
 INSTANCE_DIR.mkdir(exist_ok=True)
 
-DATABASE_PATH = Path(os.getenv("BAROS_DB_PATH", INSTANCE_DIR / "baros.db"))
+# Render so preserva arquivos locais dentro do mount path de um Persistent Disk.
+# Em servicos free do Render, o filesystem local e efemero: um SQLite salvo fora
+# de um disco persistente pode sumir em restart ou redeploy.
+# Para persistencia real, configure DATABASE_PATH apontando para um arquivo dentro
+# do mount path do Persistent Disk do seu servico pago, por exemplo /var/data/baros.db.
+#
+# Compatibilidade: DATABASE_PATH tem prioridade. BAROS_DB_PATH continua aceito
+# como fallback legado para nao quebrar ambientes ja configurados.
+DATABASE_PATH = Path(
+    os.getenv(
+        "DATABASE_PATH",
+        os.getenv("BAROS_DB_PATH", str(INSTANCE_DIR / "baros.db")),
+    )
+).expanduser()
 BAR_USERNAME = os.getenv("BAROS_USERNAME", "admin")
 BAR_PASSWORD = os.getenv("BAROS_PASSWORD", "bar123")
 BAR_OPERATOR_USERNAME = os.getenv("BAROS_OPERATOR_USERNAME", "operacao")
@@ -261,6 +274,8 @@ SHIFT_NOTES_SEED = [
     },
 ]
 
+ENABLE_BOOTSTRAP_SEED = os.getenv("BAROS_ENABLE_BOOTSTRAP_SEED", "true").lower() == "true"
+
 
 def normalize_internal_access_path(raw_value: str) -> str:
     cleaned = re.sub(r"[^a-z0-9-]+", "-", (raw_value or "").strip().lower()).strip("-")
@@ -380,12 +395,23 @@ def load_summary_payload(raw_value: str | None) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def ensure_database_parent() -> None:
+    database_parent = DATABASE_PATH.parent
+    if database_parent and str(database_parent) not in {"", "."}:
+        database_parent.mkdir(parents=True, exist_ok=True)
+
+
+def open_db_connection() -> sqlite3.Connection:
+    ensure_database_parent()
+    connection = sqlite3.connect(DATABASE_PATH)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
+    return connection
+
+
 def get_db() -> sqlite3.Connection:
     if "db" not in g:
-        connection = sqlite3.connect(DATABASE_PATH)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        g.db = connection
+        g.db = open_db_connection()
     return g.db
 
 
@@ -410,22 +436,14 @@ def seed_user(db: sqlite3.Connection, username: str, password: str, role: str, d
     if not username or not password:
         return
 
-    password_hash = generate_password_hash(password)
     existing = db.execute(
         "SELECT id FROM staff_users WHERE username = ?",
         (username,),
     ).fetchone()
     if existing:
-        db.execute(
-            """
-            UPDATE staff_users
-            SET password_hash = ?, role = ?, display_name = ?, is_active = 1, updated_at = ?
-            WHERE id = ?
-            """,
-            (password_hash, role, display_name, utc_now_iso(), existing["id"]),
-        )
         return
 
+    password_hash = generate_password_hash(password)
     db.execute(
         """
         INSERT INTO staff_users (username, password_hash, role, display_name, is_active, created_at, updated_at)
@@ -436,9 +454,7 @@ def seed_user(db: sqlite3.Connection, username: str, password: str, role: str, d
 
 
 def init_db() -> None:
-    db = sqlite3.connect(DATABASE_PATH)
-    db.row_factory = sqlite3.Row
-    db.execute("PRAGMA foreign_keys = ON")
+    db = open_db_connection()
     db.executescript(
         """
         CREATE TABLE IF NOT EXISTS bebidas (
@@ -571,12 +587,14 @@ def init_db() -> None:
     if "unit_cost_snapshot" not in order_item_columns:
         db.execute("ALTER TABLE itens_pedido ADD COLUMN unit_cost_snapshot REAL")
 
-    for beverage in BEVERAGE_SEED:
-        exists = db.execute(
-            "SELECT id, categoria, descricao, tempo_preparo, is_active, is_combo FROM bebidas WHERE nome = ?",
-            (beverage["nome"],),
-        ).fetchone()
-        if not exists:
+    beverages_total = db.execute("SELECT COUNT(*) AS total FROM bebidas").fetchone()["total"]
+    inventory_total = db.execute("SELECT COUNT(*) AS total FROM inventory_items").fetchone()["total"]
+    notes_total = db.execute("SELECT COUNT(*) AS total FROM shift_notes").fetchone()["total"]
+
+    # Dados bootstrap so entram em banco vazio. Isso evita reintroduzir
+    # dados de exemplo sobre uma base de producao ja operando.
+    if ENABLE_BOOTSTRAP_SEED and beverages_total == 0:
+        for beverage in BEVERAGE_SEED:
             db.execute(
                 """
                 INSERT INTO bebidas (
@@ -604,6 +622,13 @@ def init_db() -> None:
                 """,
                 {**beverage, "image_url": ""},
             )
+
+    for beverage in BEVERAGE_SEED:
+        exists = db.execute(
+            "SELECT id, categoria, descricao, tempo_preparo, is_active, is_combo FROM bebidas WHERE nome = ?",
+            (beverage["nome"],),
+        ).fetchone()
+        if not exists:
             continue
         db.execute(
             """
@@ -624,9 +649,8 @@ def init_db() -> None:
             ),
         )
 
-    for item in LOGISTICS_SEED:
-        exists = db.execute("SELECT 1 FROM inventory_items WHERE name = ?", (item["name"],)).fetchone()
-        if not exists:
+    if ENABLE_BOOTSTRAP_SEED and inventory_total == 0:
+        for item in LOGISTICS_SEED:
             db.execute(
                 """
                 INSERT INTO inventory_items (name, category, unit, stock_level, par_level, status, updated_at)
@@ -635,9 +659,8 @@ def init_db() -> None:
                 {**item, "updated_at": utc_now_iso()},
             )
 
-    for note in SHIFT_NOTES_SEED:
-        exists = db.execute("SELECT 1 FROM shift_notes WHERE title = ? AND body = ?", (note["title"], note["body"])).fetchone()
-        if not exists:
+    if ENABLE_BOOTSTRAP_SEED and notes_total == 0:
+        for note in SHIFT_NOTES_SEED:
             db.execute(
                 """
                 INSERT INTO shift_notes (title, body, priority, status, created_at)
