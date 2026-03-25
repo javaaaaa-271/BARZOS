@@ -688,6 +688,72 @@ input {
   line-height: 1.5;
 }
 
+.pix-modal-card {
+  width: min(760px, 100%);
+}
+
+.pix-payment-shell {
+  display: grid;
+  gap: 18px;
+}
+
+.pix-preview-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 220px;
+  gap: 18px;
+  align-items: center;
+  padding: 18px;
+  border-radius: 20px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.pix-preview-copy {
+  display: grid;
+  gap: 10px;
+}
+
+.pix-qr-wrapper {
+  display: grid;
+  place-items: center;
+}
+
+.pix-qr-image,
+.pix-qr-placeholder {
+  width: 220px;
+  height: 220px;
+  border-radius: 20px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.pix-qr-image {
+  object-fit: cover;
+}
+
+.pix-qr-placeholder {
+  display: grid;
+  place-items: center;
+  color: var(--text);
+  font-family: "IBM Plex Mono", monospace;
+  letter-spacing: 0.16em;
+}
+
+.pix-copy-block {
+  display: grid;
+  gap: 10px;
+}
+
+.pix-copy-text {
+  width: 100%;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: rgba(6, 10, 16, 0.72);
+  color: var(--text);
+  padding: 14px 16px;
+  resize: vertical;
+}
+
 .modal-actions {
   margin-top: 16px;
   padding-top: 16px;
@@ -1399,6 +1465,10 @@ input {
   }
 
   .managed-product-preview {
+    grid-template-columns: 1fr;
+  }
+
+  .pix-preview-card {
     grid-template-columns: 1fr;
   }
 }
