@@ -52,6 +52,10 @@ const paymentMethodInstructions = {
   pix: "O pedido sera criado agora e fica aguardando a confirmacao do pagamento Pix.",
 };
 
+function logCheckoutFlow(step, details = {}) {
+  console.info("[BarOS checkout]", step, details);
+}
+
 function getSelectedItems() {
   return menuItems
     .map((item) => {
@@ -189,6 +193,10 @@ function openCheckoutModal() {
   if (!selected.length) {
     return;
   }
+  logCheckoutFlow("open_checkout_modal", {
+    itemCount: selected.reduce((sum, item) => sum + item.quantity, 0),
+    total: selected.reduce((sum, item) => sum + item.price * item.quantity, 0),
+  });
   setCheckoutError("");
   checkoutPaymentInputs.forEach((input) => {
     input.checked = false;
@@ -223,6 +231,12 @@ function resetCart() {
 }
 
 function showConfirmation(order, nextStepText) {
+  logCheckoutFlow("show_confirmation", {
+    code: order.code,
+    orderNumber: order.order_number,
+    paymentMethod: order.payment_method,
+    paymentStatus: order.payment_status,
+  });
   confirmationCode.textContent = order.order_number || order.code;
   confirmationText.innerHTML = `
     <strong>${nextStepText}</strong><br>
@@ -235,6 +249,13 @@ function showConfirmation(order, nextStepText) {
 }
 
 function populatePixModal(order) {
+  logCheckoutFlow("open_pix_modal", {
+    code: order.code,
+    paymentMethod: order.payment_method,
+    paymentStatus: order.payment_status,
+    hasQr: Boolean(order.pix_qr_code),
+    hasCopyPaste: Boolean(order.pix_copy_paste),
+  });
   currentPixOrder = order;
   pixOrderCode.textContent = order.order_number || order.code;
   pixPaymentStatus.textContent = order.payment_status_label;
@@ -263,6 +284,7 @@ async function submitOrder() {
   }
 
   const paymentMethod = getSelectedPaymentMethod();
+  logCheckoutFlow("selected_payment_method", { paymentMethod });
   if (!paymentMethod) {
     setCheckoutError("Escolha como voce vai pagar antes de enviar o pedido.");
     return;
@@ -275,19 +297,27 @@ async function submitOrder() {
   checkoutSubmitButton.textContent = "Enviando...";
   setCheckoutError("");
 
+  const payload = {
+    customer_name: customerName,
+    table_label: tableLabel,
+    source: "menu-digital",
+    payment_method: paymentMethod,
+    items: selectedItems,
+  };
+  logCheckoutFlow("submit_order_payload", payload);
+
   const response = await fetch("/api/orders", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      customer_name: customerName,
-      table_label: tableLabel,
-      source: "menu-digital",
-      payment_method: paymentMethod,
-      items: selectedItems,
-    }),
+    body: JSON.stringify(payload),
   });
 
   const data = await response.json().catch(() => ({}));
+  logCheckoutFlow("submit_order_response", {
+    ok: response.ok,
+    status: response.status,
+    data,
+  });
   checkoutSubmitButton.disabled = false;
   checkoutSubmitButton.textContent = "Enviar pedido";
 
@@ -300,10 +330,12 @@ async function submitOrder() {
   resetCart();
 
   if (paymentMethod === "pix") {
+    logCheckoutFlow("submit_order_branch", { branch: "pix", code: data.order?.code });
     populatePixModal(data.order);
     return;
   }
 
+  logCheckoutFlow("submit_order_branch", { branch: "counter", code: data.order?.code });
   showConfirmation(data.order, "Seu pedido foi enviado. Pagamento sera feito no balcao.");
 }
 
@@ -316,6 +348,10 @@ async function simulatePixPayment() {
   simulatePixPaymentButton.disabled = true;
   simulatePixPaymentButton.textContent = "Confirmando...";
   setPixError("");
+  logCheckoutFlow("simulate_pix_payment_request", {
+    code: currentPixOrder.code,
+    paymentStatus: currentPixOrder.payment_status,
+  });
 
   const response = await fetch(`/api/orders/${currentPixOrder.code}/pix/simulate`, {
     method: "POST",
@@ -323,6 +359,11 @@ async function simulatePixPayment() {
   });
 
   const data = await response.json().catch(() => ({}));
+  logCheckoutFlow("simulate_pix_payment_response", {
+    ok: response.ok,
+    status: response.status,
+    data,
+  });
   simulatePixPaymentButton.disabled = false;
   simulatePixPaymentButton.textContent = "Simular pagamento";
 
