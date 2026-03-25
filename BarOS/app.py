@@ -3108,8 +3108,15 @@ def create_order():
     customer_name = sanitize_text(payload.get("customer_name"), "Cliente", limit=48)
     table_label = sanitize_text(payload.get("table_label"), "Retirada", limit=32)
     source = sanitize_text(payload.get("source"), DEFAULT_ORDER_SOURCE, limit=24)
-    payment_method = normalize_payment_method(payload.get("payment_method"))
-    app.logger.info("create_order requested payment_method=%s source=%s customer=%s", payment_method, source, customer_name)
+    raw_payment_method = payload.get("payment_method")
+    payment_method = normalize_payment_method(raw_payment_method)
+    app.logger.info(
+        "create_order raw_payment_method=%s normalized_payment_method=%s source=%s customer=%s",
+        raw_payment_method,
+        payment_method,
+        source,
+        customer_name,
+    )
     if not payment_method:
         return jsonify({"error": "Escolha uma forma de pagamento valida antes de enviar o pedido."}), 400
     payment_status = "pending"
@@ -3185,6 +3192,16 @@ def create_order():
         payment_provider_id = pix_payload["payment_provider_id"]
         pix_qr_code = pix_payload["pix_qr_code"]
         pix_copy_paste = pix_payload["pix_copy_paste"]
+        app.logger.info(
+            "create_order pix_branch code=%s provider=%s provider_id=%s copy_len=%s has_qr=%s",
+            codigo,
+            payment_provider,
+            payment_provider_id,
+            len(pix_copy_paste or ""),
+            bool(pix_qr_code),
+        )
+    else:
+        app.logger.info("create_order counter_branch code=%s", codigo)
     horario = utc_now_iso()
     turno_id = get_current_shift_id()
     cursor = db.execute(
@@ -3294,11 +3311,17 @@ def simulate_pix_payment(code: str):
     if normalize_payment_method(order_row["payment_method"]) != "pix":
         return jsonify({"error": "Esse pedido nao usa Pix."}), 400
 
-    app.logger.info("simulate_pix_payment code=%s current_status=%s", code, order_row["payment_status"])
+    app.logger.info(
+        "simulate_pix_payment code=%s current_status=%s provider=%s",
+        code,
+        order_row["payment_status"],
+        order_row["payment_provider"],
+    )
     try:
         order = mark_as_paid(code, shift_id=order_row["turno_id"] if "turno_id" in order_row.keys() else None)
     except LookupError:
         return jsonify({"error": "Pedido nao encontrado."}), 404
+    app.logger.info("simulate_pix_payment completed code=%s updated_status=%s", code, order["payment_status"])
     return jsonify({"order": order})
 
 
