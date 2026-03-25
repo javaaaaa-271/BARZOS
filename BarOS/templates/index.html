@@ -43,14 +43,6 @@
           <span>Mesa</span>
           <input type="text" id="table-label" value="Mesa 07">
         </label>
-        <label>
-          <span>Pagamento</span>
-          <select id="payment-method">
-            {% for method in payment_methods %}
-            <option value="{{ method.value }}">{{ method.label }}</option>
-            {% endfor %}
-          </select>
-        </label>
       </form>
     </div>
 
@@ -71,7 +63,12 @@
         </div>
         <div class="menu-card-top menu-card-meta-row">
           <span class="tag">{{ item.category }}</span>
-          <span class="prep">{{ item.prep_time }}</span>
+          <div class="menu-card-statuses">
+            <span class="status-pill {% if item.availability_state == 'available' %}ok{% elif item.availability_state == 'available_soon' %}neutral{% else %}critical{% endif %}">
+              {{ item.availability_state_label }}
+            </span>
+            <span class="prep">{{ item.prep_time }}</span>
+          </div>
         </div>
         <div class="menu-card-content">
           <h3>{{ item.name }}</h3>
@@ -109,7 +106,7 @@
     <div class="checkout-body">
       <div class="checkout-inline-meta">
         <span id="order-count-badge" class="pill">0 itens</span>
-        <span id="payment-method-badge" class="pill subtle-pill">Pagar no balcao</span>
+        <span class="pill subtle-pill">Etapa 1 / monte seu pedido</span>
       </div>
       <div id="order-summary" class="summary-list empty-state">
         Selecione itens do cardapio para montar o pedido.
@@ -121,7 +118,7 @@
         <strong id="order-total">R$ 0,00</strong>
       </div>
       <button id="submit-order" class="primary-button" type="button" disabled>Confirmar pedido</button>
-      <p class="muted-note">Os pedidos enviados aparecem automaticamente no painel do bar.</p>
+      <p class="muted-note">Esse botao abre a etapa final de checkout antes do envio real.</p>
     </div>
   </aside>
 
@@ -129,6 +126,64 @@
     <a class="subtle-entry-link" href="{{ staff_access_url }}">Area da equipe</a>
   </div>
 </main>
+
+<section id="checkout-modal" class="modal hidden" aria-hidden="true">
+  <div class="modal-card checkout-modal-card">
+    <div class="modal-header">
+      <div>
+        <p class="eyebrow">Checkout</p>
+        <h2>Confirme o pedido antes de enviar</h2>
+      </div>
+      <button class="ghost-button small-button modal-close-button" type="button" id="close-checkout-modal-top" aria-label="Fechar checkout">
+        Fechar
+      </button>
+    </div>
+
+    <div class="modal-scroll-area checkout-review-shell">
+      <div class="checkout-stage-note">
+        <span class="pill subtle-pill">Etapa 2 / escolha como pagar</span>
+      </div>
+
+      <div id="checkout-review-summary" class="summary-list"></div>
+
+      <div class="checkout-review-total">
+        <span>Total do pedido</span>
+        <strong id="checkout-review-total">R$ 0,00</strong>
+      </div>
+
+      <section class="checkout-payment-section">
+        <p class="mini-label">Forma de pagamento</p>
+        <div class="checkout-payment-options">
+          {% for method in payment_methods %}
+          <label class="checkout-payment-option">
+            <input type="radio" name="checkout-payment-method" value="{{ method.value }}">
+            <div>
+              <strong>{{ method.label }}</strong>
+              <p>
+                {% if method.value == 'counter' %}
+                Pagamento sera feito presencialmente no balcao ou na retirada.
+                {% else %}
+                Pedido segue para o fluxo de Pix preparado pelo sistema.
+                {% endif %}
+              </p>
+            </div>
+          </label>
+          {% endfor %}
+        </div>
+      </section>
+
+      <p id="checkout-instruction" class="checkout-instruction">
+        Escolha uma forma de pagamento para liberar o envio do pedido.
+      </p>
+      <p id="checkout-error" class="alert hidden"></p>
+    </div>
+
+    <div class="modal-actions">
+      <button class="secondary-button full-width" type="button" id="close-checkout-modal">Voltar ao pedido</button>
+      <button class="primary-button full-width" type="button" id="confirm-checkout-submit">Enviar pedido</button>
+    </div>
+  </div>
+</section>
 
 <section id="confirmation-modal" class="modal hidden" aria-hidden="true">
   <div class="modal-card">

@@ -13,6 +13,7 @@
     </div>
     <div class="dashboard-actions">
       <a class="secondary-button" href="{{ url_for('dashboard') }}">Voltar ao painel</a>
+      <a class="secondary-button" href="{{ url_for('preorder_page') }}">Pre-Order</a>
       <a class="secondary-button" href="{{ url_for('index') }}">Ver menu</a>
     </div>
   </header>
@@ -56,6 +57,10 @@
             <span>Imagem</span>
             <input type="text" name="image_url" placeholder="https://... ou /static/imagens/item.jpg">
           </label>
+          <label>
+            <span>Capacidade de pre-order</span>
+            <input type="number" min="1" step="1" name="max_active_orders" placeholder="Vazio = sem limite">
+          </label>
           <label class="checkbox-row">
             <input type="checkbox" name="is_active" checked>
             <span>Produto ativo no cardapio</span>
@@ -87,6 +92,10 @@
           <label>
             <span>Imagem</span>
             <input type="text" name="image_url" placeholder="https://... ou /static/imagens/combo.jpg">
+          </label>
+          <label>
+            <span>Capacidade de pre-order</span>
+            <input type="number" min="1" step="1" name="max_active_orders" placeholder="Vazio = sem limite">
           </label>
           <label class="checkbox-row">
             <input type="checkbox" name="is_active" checked>
@@ -135,6 +144,13 @@
                   <div class="hero-meta compact-meta">
                     <span>{{ product.category }}</span>
                     <span>{{ 'Ativo' if product.is_active else 'Inativo' }}</span>
+                    <span>
+                      {% if product.max_active_orders %}
+                      {{ product.active_order_count }}/{{ product.max_active_orders }} ativos
+                      {% else %}
+                      Sem limite
+                      {% endif %}
+                    </span>
                   </div>
                 </div>
               </div>
@@ -160,6 +176,10 @@
                     <input type="text" name="image_url" value="{{ product.raw_image_url }}">
                   </label>
                 </div>
+                <label>
+                  <span>Capacidade de pre-order</span>
+                  <input type="number" min="1" step="1" name="max_active_orders" value="{{ product.raw_max_active_orders }}" placeholder="Vazio = sem limite">
+                </label>
                 <label>
                   <span>Descricao</span>
                   <textarea name="description" rows="2">{{ product.raw_description }}</textarea>
@@ -201,6 +221,13 @@
                   <div class="hero-meta compact-meta">
                     <span>{{ combo.component_count }} itens</span>
                     <span>{{ 'Ativo' if combo.is_active else 'Inativo' }}</span>
+                    <span>
+                      {% if combo.max_active_orders %}
+                      {{ combo.active_order_count }}/{{ combo.max_active_orders }} ativos
+                      {% else %}
+                      Sem limite
+                      {% endif %}
+                    </span>
                   </div>
                   <div class="combo-component-chips">
                     {% for component in combo.components %}
@@ -224,6 +251,10 @@
                 <label>
                   <span>Imagem</span>
                   <input type="text" name="image_url" value="{{ combo.raw_image_url }}">
+                </label>
+                <label>
+                  <span>Capacidade de pre-order</span>
+                  <input type="number" min="1" step="1" name="max_active_orders" value="{{ combo.raw_max_active_orders }}" placeholder="Vazio = sem limite">
                 </label>
                 <label>
                   <span>Descricao</span>

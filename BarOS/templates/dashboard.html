@@ -15,6 +15,7 @@
       <a class="secondary-button" href="{{ url_for('index') }}">Ver menu</a>
       <a class="secondary-button" href="{{ url_for('shift_history_page') }}">Historico de turnos</a>
       {% if current_user.can_manage_bar %}
+      <a class="secondary-button" href="{{ url_for('preorder_page') }}">Pre-Order</a>
       <a class="secondary-button" href="{{ url_for('products_page') }}">Produtos</a>
       <button class="primary-button" type="button" id="close-bar-button">Fechar bar</button>
       <button class="ghost-button" type="button" id="reset-data-button">Resetar dados</button>
@@ -150,6 +151,33 @@
       {% if not current_user.can_manage_bar %}
       <p class="muted-note">Seu perfil pode acompanhar o estoque, mas os ajustes ficam restritos ao administrador.</p>
       {% endif %}
+    </article>
+
+    <article class="panel-card panel-card-premium">
+      <div class="panel-head">
+        <div>
+          <p class="mini-label">Pre-Order</p>
+          <h2>Janela e capacidade</h2>
+        </div>
+        {% if current_user.can_manage_bar %}
+        <a class="secondary-button small-button" href="{{ url_for('preorder_page') }}">Configurar</a>
+        {% endif %}
+      </div>
+      <div class="logistics-summary">
+        <div class="summary-chip {% if preorder.status == 'open' %}attention{% elif preorder.status == 'closed' %}critical{% endif %}">
+          Status
+          <strong>{{ preorder.status_label }}</strong>
+        </div>
+        <div class="summary-chip">
+          Inicio
+          <strong>{{ preorder.start_time or '--:--' }}</strong>
+        </div>
+        <div class="summary-chip">
+          Fim
+          <strong>{{ preorder.end_time or '--:--' }}</strong>
+        </div>
+      </div>
+      <p class="muted-note">{{ preorder.status_note }}</p>
     </article>
 
     <article class="panel-card panel-card-premium wide-card">

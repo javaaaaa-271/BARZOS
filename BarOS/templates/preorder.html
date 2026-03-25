@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+
+{% block title %}BarOS | Pre-Order{% endblock %}
+{% block body_class %}dashboard-body{% endblock %}
+
+{% block content %}
+<main class="dashboard-shell products-shell products-shell-premium">
+  <header class="dashboard-header">
+    <div>
+      <p class="eyebrow">Pre-Order</p>
+      <h1>Controle de janela e capacidade</h1>
+      <p class="dashboard-user-meta">Defina quando o pre-order abre e acompanhe quantos itens estao ativos.</p>
+    </div>
+    <div class="dashboard-actions">
+      <a class="secondary-button" href="{{ url_for('dashboard') }}">Voltar ao painel</a>
+      <a class="secondary-button" href="{{ url_for('products_page') }}">Produtos</a>
+      <a class="secondary-button" href="{{ url_for('index') }}">Ver menu</a>
+    </div>
+  </header>
+
+  {% if message %}
+  <div class="alert alert-success">{{ message }}</div>
+  {% endif %}
+  {% if error %}
+  <div class="alert">{{ error }}</div>
+  {% endif %}
+
+  <section class="products-layout">
+    <div class="products-sidebar">
+      <article class="panel-card panel-card-premium sticky-form-card">
+        <div class="panel-head">
+          <div>
+            <p class="mini-label">Janela global</p>
+            <h2>Horario do pre-order</h2>
+          </div>
+        </div>
+        <form class="product-form" method="post" action="{{ url_for('save_preorder') }}">
+          <div class="form-grid-two">
+            <label>
+              <span>Inicio</span>
+              <input type="time" name="preorder_start_time" value="{{ preorder.start_time }}">
+            </label>
+            <label>
+              <span>Fim</span>
+              <input type="time" name="preorder_end_time" value="{{ preorder.end_time }}">
+            </label>
+          </div>
+          <p class="muted-note">Se os dois campos ficarem vazios, o pre-order nao limita o horario do cardapio.</p>
+          <button class="primary-button" type="submit">Salvar configuracao</button>
+        </form>
+      </article>
+    </div>
+
+    <div class="products-content">
+      <section class="panel-card panel-card-premium">
+        <div class="panel-head">
+          <div>
+            <p class="mini-label">Status atual</p>
+            <h2>{{ preorder.status_label }}</h2>
+          </div>
+          <span class="status-pill {% if preorder.status == 'open' %}attention{% elif preorder.status == 'closed' %}critical{% else %}neutral{% endif %}">
+            {{ preorder.status_label }}
+          </span>
+        </div>
+        <div class="logistics-summary">
+          <div class="summary-chip {% if preorder.status == 'open' %}attention{% elif preorder.status == 'closed' %}critical{% endif %}">
+            Janela
+            <strong>{{ preorder.start_time or '--:--' }} / {{ preorder.end_time or '--:--' }}</strong>
+          </div>
+          <div class="summary-chip">
+            Ativos
+            <strong>{{ active_total }}</strong>
+          </div>
+          <div class="summary-chip">
+            Atualizado
+            <strong>{{ preorder.updated_at }}</strong>
+          </div>
+        </div>
+        <p class="muted-note">{{ preorder.status_note }}</p>
+      </section>
+
+      <section class="panel-card panel-card-premium">
+        <div class="panel-head">
+          <div>
+            <p class="mini-label">Capacidade por produto</p>
+            <h2>Itens acompanhados no pre-order</h2>
+          </div>
+        </div>
+        <div class="managed-product-list">
+          {% if tracked_products %}
+            {% for product in tracked_products %}
+            <article class="managed-product-card compact-product-card">
+              <div class="managed-product-preview">
+                {% if product.image_src %}
+                <img class="managed-product-thumb" src="{{ product.image_src }}" alt="{{ product.name }}">
+                {% else %}
+                <div class="managed-product-placeholder">{{ product.placeholder }}</div>
+                {% endif %}
+                <div>
+                  <strong>{{ product.name }}</strong>
+                  <p>{{ product.description }}</p>
+                  <div class="hero-meta compact-meta">
+                    <span>{{ product.category }}</span>
+                    <span>{{ product.active_order_count }} ativos</span>
+                    <span>
+                      {% if product.max_active_orders %}
+                      Limite {{ product.max_active_orders }}
+                      {% else %}
+                      Sem limite
+                      {% endif %}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </article>
+            {% endfor %}
+          {% else %}
+          <p class="empty-inline">Nenhum item com capacidade configurada ou pedido ativo no momento.</p>
+          {% endif %}
+        </div>
+      </section>
+    </div>
+  </section>
+</main>
+{% endblock %}
