@@ -604,6 +604,9 @@ def init_db() -> None:
         db.execute("ALTER TABLE pedidos ADD COLUMN pix_qr_code TEXT")
     if "pix_copy_paste" not in pedido_columns:
         db.execute("ALTER TABLE pedidos ADD COLUMN pix_copy_paste TEXT")
+    if "request_id" not in pedido_columns:
+        db.execute("ALTER TABLE pedidos ADD COLUMN request_id TEXT")
+    db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_pedidos_request_id ON pedidos(request_id)")
 
     order_item_columns = [row["name"] for row in db.execute("PRAGMA table_info(itens_pedido)").fetchall()]
     if "item_name_snapshot" not in order_item_columns:
@@ -917,6 +920,11 @@ def get_payment_status_label(status: str | None) -> str:
     return PAYMENT_STATUS_LABELS.get(status or "", "Pendente")
 
 
+def normalize_request_id(raw_value: str | None) -> str | None:
+    value = sanitize_optional_text(raw_value, limit=128)
+    return value or None
+
+
 def fetch_order_row_by_code(code: str, shift_id: int | None = None) -> sqlite3.Row | None:
     query = """
         SELECT
@@ -946,6 +954,35 @@ def fetch_order_row_by_code(code: str, shift_id: int | None = None) -> sqlite3.R
         query += " AND turno_id = ?"
         params.append(shift_id)
     return get_db().execute(query, params).fetchone()
+
+
+def fetch_order_row_by_request_id(request_id: str) -> sqlite3.Row | None:
+    return get_db().execute(
+        """
+        SELECT
+            id,
+            codigo_retirada,
+            turno_id,
+            horario_pedido,
+            status,
+            valor_total,
+            customer_name,
+            table_label,
+            source,
+            completed_at,
+            order_number,
+            payment_method,
+            payment_status,
+            payment_provider,
+            payment_provider_id,
+            paid_at,
+            pix_qr_code,
+            pix_copy_paste
+        FROM pedidos
+        WHERE request_id = ?
+        """,
+        (request_id,),
+    ).fetchone()
 
 
 def mark_as_paid(code: str, shift_id: int | None = None) -> dict:
@@ -1017,7 +1054,7 @@ def get_current_shift_id() -> int:
     return cursor.lastrowid
 
 
-def open_new_shift() -> int:
+def open_new_shift(*, commit: bool = True) -> int:
     db = get_db()
     cursor = db.execute(
         """
@@ -1027,7 +1064,8 @@ def open_new_shift() -> int:
         (utc_now_iso(),),
     )
     db.execute("UPDATE shift_notes SET status = 'open'")
-    db.commit()
+    if commit:
+        db.commit()
     return cursor.lastrowid
 
 
@@ -1447,6 +1485,82 @@ def check_stock_availability(
             )
 
     return shortages
+
+
+def reserve_stock_deductions(
+    items: list[dict],
+    beverages_by_id: dict[int, sqlite3.Row] | None = None,
+    combo_components_map: dict[int, list[dict]] | None = None,
+) -> list[dict]:
+    db = get_db()
+    required, error = build_required_ingredients(items, beverages_by_id, combo_components_map)
+    if error:
+        return [{"item": error, "needed": 0, "available": 0, "unit": ""}]
+    if not required:
+        return []
+
+    rows = db.execute(
+        "SELECT id, name, stock_level, par_level, unit FROM inventory_items WHERE name IN ({})".format(
+            ",".join("?" for _ in required)
+        ),
+        list(required.keys()),
+    ).fetchall()
+    by_name = {row["name"]: row for row in rows}
+
+    shortages = []
+    for ingredient_name, needed in required.items():
+        row = by_name.get(ingredient_name)
+        if not row:
+            shortages.append(
+                {
+                    "item": ingredient_name,
+                    "needed": needed,
+                    "available": 0,
+                    "unit": "",
+                }
+            )
+            continue
+        if float(row["stock_level"] or 0) < needed:
+            shortages.append(
+                {
+                    "item": ingredient_name,
+                    "needed": needed,
+                    "available": row["stock_level"],
+                    "unit": row["unit"],
+                }
+            )
+
+    if shortages:
+        return shortages
+
+    updated_at = utc_now_iso()
+    for ingredient_name, needed in required.items():
+        row = by_name[ingredient_name]
+        next_stock = round(float(row["stock_level"] or 0) - needed, 4)
+        next_status = calculate_inventory_status(next_stock, row["par_level"])
+        result = db.execute(
+            """
+            UPDATE inventory_items
+            SET stock_level = ?, status = ?, updated_at = ?
+            WHERE id = ? AND stock_level >= ?
+            """,
+            (next_stock, next_status, updated_at, row["id"], needed),
+        )
+        if result.rowcount != 1:
+            current_row = db.execute(
+                "SELECT stock_level, unit FROM inventory_items WHERE id = ?",
+                (row["id"],),
+            ).fetchone()
+            return [
+                {
+                    "item": ingredient_name,
+                    "needed": needed,
+                    "available": current_row["stock_level"] if current_row else 0,
+                    "unit": current_row["unit"] if current_row else row["unit"],
+                }
+            ]
+
+    return []
 
 
 def fetch_menu() -> list[dict]:
@@ -1909,7 +2023,8 @@ def build_peak_window_metrics(order_rows: list[sqlite3.Row]) -> dict | None:
         bucket_start = local_dt.replace(minute=0, second=0, microsecond=0)
         bucket = buckets.setdefault(bucket_start, {"orders": 0, "revenue": 0.0})
         bucket["orders"] += 1
-        bucket["revenue"] += float(row["valor_total"] or 0)
+        if normalize_payment_status(row["payment_status"], "pending") == "paid":
+            bucket["revenue"] += float(row["valor_total"] or 0)
 
     peak_start, peak_data = sorted(
         buckets.items(),
@@ -1986,7 +2101,8 @@ def build_shift_metrics(shift_id: int) -> dict:
         """
         SELECT
             COUNT(*) AS total_pedidos,
-            COALESCE(SUM(valor_total), 0) AS total_vendido
+            COALESCE(SUM(CASE WHEN payment_status = 'paid' THEN valor_total ELSE 0 END), 0) AS total_recebido,
+            COALESCE(SUM(CASE WHEN payment_status = 'paid' THEN 1 ELSE 0 END), 0) AS total_pedidos_pagos
         FROM pedidos
         WHERE turno_id = ?
         """,
@@ -1999,8 +2115,16 @@ def build_shift_metrics(shift_id: int) -> dict:
             b.id AS beverage_id,
             COALESCE(ip.item_name_snapshot, b.nome) AS nome,
             SUM(ip.quantidade) AS quantidade,
-            COALESCE(SUM(ip.subtotal), 0) AS total_vendido,
-            COALESCE(SUM(COALESCE(ip.unit_cost_snapshot, b.custo_estimado) * ip.quantidade), 0) AS custo_estimado
+            COALESCE(SUM(CASE WHEN p.payment_status = 'paid' THEN ip.subtotal ELSE 0 END), 0) AS total_recebido,
+            COALESCE(
+                SUM(
+                    CASE
+                        WHEN p.payment_status = 'paid' THEN COALESCE(ip.unit_cost_snapshot, b.custo_estimado) * ip.quantidade
+                        ELSE 0
+                    END
+                ),
+                0
+            ) AS custo_estimado
         FROM itens_pedido ip
         JOIN bebidas b ON b.id = ip.bebida_id
         JOIN pedidos p ON p.id = ip.pedido_id
@@ -2024,20 +2148,21 @@ def build_shift_metrics(shift_id: int) -> dict:
     order_rows = fetch_shift_orders_rows(shift_id)
     peak_window = build_peak_window_metrics(order_rows)
 
-    total_vendido = round(float(totals["total_vendido"] or 0), 2)
+    total_recebido = round(float(totals["total_recebido"] or 0), 2)
     total_pedidos = int(totals["total_pedidos"] or 0)
+    total_pedidos_pagos = int(totals["total_pedidos_pagos"] or 0)
     custo_estimado = round(
         sum(float(row["custo_estimado"] or 0) for row in ranking_rows),
         2,
     )
-    ticket_medio = round(total_vendido / total_pedidos, 2) if total_pedidos else 0.0
+    ticket_medio = round(total_recebido / total_pedidos_pagos, 2) if total_pedidos_pagos else 0.0
 
     ranking_bebidas = [
         {
             "id": row["beverage_id"],
             "name": row["nome"],
             "quantity": int(row["quantidade"] or 0),
-            "revenue": round(float(row["total_vendido"] or 0), 2),
+            "revenue": round(float(row["total_recebido"] or 0), 2),
             "cost": round(float(row["custo_estimado"] or 0), 2),
         }
         for row in ranking_rows
@@ -2045,8 +2170,10 @@ def build_shift_metrics(shift_id: int) -> dict:
     bebida_mais_vendida = ranking_bebidas[0] if ranking_bebidas else None
 
     return {
-        "total_vendido": total_vendido,
+        "total_vendido": total_recebido,
+        "total_recebido": total_recebido,
         "total_pedidos": total_pedidos,
+        "total_pedidos_pagos": total_pedidos_pagos,
         "ticket_medio": ticket_medio,
         "total_itens_vendidos": sum(item["quantity"] for item in ranking_bebidas),
         "bebida_mais_vendida": bebida_mais_vendida,
@@ -2063,8 +2190,35 @@ def build_shift_metrics(shift_id: int) -> dict:
         "valor_vendido_pico": peak_window["revenue"] if peak_window else 0.0,
         "custo_estimado": custo_estimado,
         "custo_total": custo_estimado,
-        "lucro_estimado": round(total_vendido - custo_estimado, 2),
+        "lucro_estimado": round(total_recebido - custo_estimado, 2),
         "observacoes": parse_shift_observations(stored_summary),
+    }
+
+
+def get_shift_closeout_blockers(shift_id: int) -> dict:
+    row = get_db().execute(
+        """
+        SELECT
+            COALESCE(SUM(CASE WHEN status IN (?, ?) THEN 1 ELSE 0 END), 0) AS pending_orders,
+            COALESCE(SUM(CASE WHEN COALESCE(payment_status, 'pending') != 'paid' THEN 1 ELSE 0 END), 0) AS unpaid_orders,
+            COALESCE(
+                SUM(
+                    CASE
+                        WHEN payment_method = 'pix' AND COALESCE(payment_status, 'pending') != 'paid' THEN 1
+                        ELSE 0
+                    END
+                ),
+                0
+            ) AS unpaid_pix_orders
+        FROM pedidos
+        WHERE turno_id = ?
+        """,
+        (*ACTIVE_ORDER_STATUSES, shift_id),
+    ).fetchone()
+    return {
+        "pending_orders": int(row["pending_orders"] or 0),
+        "unpaid_orders": int(row["unpaid_orders"] or 0),
+        "unpaid_pix_orders": int(row["unpaid_pix_orders"] or 0),
     }
 
 
@@ -2125,12 +2279,12 @@ def summarize_shift_comparison(
     revenue_pct = revenue_comparison["delta_percentage"]
     if revenue_pct is None:
         revenue_part = (
-            "Este turno manteve o mesmo faturamento do comparado."
+            "Este turno manteve o mesmo total recebido do comparado."
             if revenue_comparison["indicator"] == "sem mudanca relevante"
-            else f'Este turno {revenue_comparison["indicator"]} no faturamento em relacao ao comparado.'
+            else f'Este turno {revenue_comparison["indicator"]} no total recebido em relacao ao comparado.'
         )
     else:
-        revenue_part = f'Este turno faturou {abs(revenue_pct):.1f}% {"a mais" if revenue_pct > 0 else "a menos"} que o comparado.'
+        revenue_part = f'Este turno recebeu {abs(revenue_pct):.1f}% {"a mais" if revenue_pct > 0 else "a menos"} que o comparado.'
 
     current_peak = current_metrics.get("horario_pico") or {}
     compared_peak = compared_metrics.get("horario_pico") or {}
@@ -2173,7 +2327,7 @@ def build_shift_comparison(current_shift_id: int, comparison_shift_id: int | Non
     compared_shift = fetch_shift_details(selected_shift_id, include_comparison=False)
 
     revenue_comparison = build_numeric_metric_comparison(
-        "Total vendido",
+        "Total recebido",
         current_metrics["total_vendido"],
         compared_metrics["total_vendido"],
         value_type="currency",
@@ -2211,7 +2365,7 @@ def build_shift_comparison(current_shift_id: int, comparison_shift_id: int | Non
         tolerance=0.5,
     )
     peak_revenue_comparison = build_numeric_metric_comparison(
-        "Valor vendido no pico",
+        "Valor recebido no pico",
         current_metrics["valor_vendido_pico"],
         compared_metrics["valor_vendido_pico"],
         value_type="currency",
@@ -2281,7 +2435,9 @@ def build_sales_report(shift_id: int | None = None) -> dict:
     metrics = build_shift_metrics(current_shift_id)
     return {
         "total_vendido": metrics["total_vendido"],
+        "total_recebido": metrics["total_recebido"],
         "total_pedidos": metrics["total_pedidos"],
+        "total_pedidos_pagos": metrics["total_pedidos_pagos"],
         "quantidade_por_bebida": metrics["quantidade_por_bebida"],
         "bebida_mais_pedida": metrics["bebida_mais_pedida"],
         "pico_atendimento": metrics["pico_atendimento"],
@@ -2313,13 +2469,13 @@ def build_order_summary(shift_id: int | None = None) -> dict:
         (current_shift_id,),
     ).fetchone()["total"]
     average_ticket = 0.0
-    if report["total_pedidos"]:
-        average_ticket = round(report["total_vendido"] / report["total_pedidos"], 2)
+    if report["total_pedidos_pagos"]:
+        average_ticket = round(report["total_recebido"] / report["total_pedidos_pagos"], 2)
     return {
         "pending_count": pending or 0,
         "completed_count": completed or 0,
         "total_count": report["total_pedidos"],
-        "revenue": report["total_vendido"],
+        "revenue": report["total_recebido"],
         "average_ticket": average_ticket,
         "top_items": report["quantidade_por_bebida"][:4],
         "top_tables": [
@@ -2335,23 +2491,56 @@ def build_closeout_report(shift_id: int | None = None) -> dict:
     return metrics
 
 
-def archive_current_shift_and_open_next() -> dict:
+def archive_current_shift_and_open_next(expected_shift_id: int | None = None) -> dict:
     db = get_db()
-    current_shift_id = get_current_shift_id()
-    report = build_closeout_report(current_shift_id)
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        current_shift_id = get_current_shift_id()
+        if expected_shift_id is not None and expected_shift_id != current_shift_id:
+            db.rollback()
+            raise ValueError("O turno ativo mudou. Atualize o painel antes de tentar fechar novamente.")
 
-    db.execute(
-        """
-        UPDATE turnos
-        SET status = 'closed', fechado_em = ?, resumo_fechamento = ?
-        WHERE id = ?
-        """,
-        (utc_now_iso(), json.dumps(report), current_shift_id),
-    )
-    new_shift_id = open_new_shift()
+        blockers = get_shift_closeout_blockers(current_shift_id)
+        if blockers["pending_orders"]:
+            db.rollback()
+            raise ValueError(
+                f"Nao e possivel fechar o turno: existem {blockers['pending_orders']} pedidos pendentes."
+            )
+        if blockers["unpaid_orders"]:
+            db.rollback()
+            if blockers["unpaid_pix_orders"]:
+                raise ValueError(
+                    f"Nao e possivel fechar o turno: existem {blockers['unpaid_pix_orders']} pedidos Pix sem confirmacao."
+                )
+            raise ValueError(
+                f"Nao e possivel fechar o turno: existem {blockers['unpaid_orders']} pedidos sem pagamento confirmado."
+            )
+
+        report = build_closeout_report(current_shift_id)
+        closed_at = utc_now_iso()
+        result = db.execute(
+            """
+            UPDATE turnos
+            SET status = 'closed', fechado_em = ?, resumo_fechamento = ?
+            WHERE id = ? AND status = 'open'
+            """,
+            (closed_at, json.dumps(report), current_shift_id),
+        )
+        if result.rowcount != 1:
+            db.rollback()
+            raise ValueError("O turno nao pode ser fechado novamente. Atualize o painel.")
+
+        new_shift_id = open_new_shift(commit=False)
+        db.commit()
+    except Exception:
+        if db.in_transaction:
+            db.rollback()
+        raise
+
     return {
         "closed_shift_id": current_shift_id,
         "new_shift_id": new_shift_id,
+        "current_shift_id": new_shift_id,
         "report": report,
         "summary": build_order_summary(new_shift_id),
         "pending": fetch_orders(status="pending", shift_id=new_shift_id),
@@ -2459,7 +2648,7 @@ def build_shift_export_csv(shift_id: int) -> str:
     writer.writerow(["Duracao", duration_label(shift_row["aberto_em"], shift_row["fechado_em"])])
     writer.writerow([])
     writer.writerow(["Resumo", "Valor"])
-    writer.writerow(["Total vendido", summary.get("total_vendido", 0)])
+    writer.writerow(["Total recebido", summary.get("total_recebido", summary.get("total_vendido", 0))])
     writer.writerow(["Total de pedidos", summary.get("total_pedidos", 0)])
     writer.writerow(["Ticket medio", summary.get("ticket_medio", 0)])
     writer.writerow(["Itens vendidos", summary.get("total_itens_vendidos", 0)])
@@ -2479,7 +2668,7 @@ def build_shift_export_csv(shift_id: int) -> str:
                 f'{summary["pico_atendimento"]["hour"]} ({summary["pico_atendimento"]["orders"]} pedidos)',
             ]
         )
-        writer.writerow(["Valor vendido no pico", summary["pico_atendimento"].get("revenue", 0)])
+        writer.writerow(["Valor recebido no pico", summary["pico_atendimento"].get("revenue", 0)])
 
     writer.writerow([])
     writer.writerow(["Bebida", "Quantidade"])
@@ -2569,11 +2758,11 @@ def build_shift_export_pdf(shift_id: int) -> bytes:
     ]
 
     summary_table_data = [
-        ["Total vendido", currency_brl(summary["total_vendido"]), "Total de pedidos", str(summary["total_pedidos"])],
+        ["Total recebido", currency_brl(summary.get("total_recebido", summary["total_vendido"])), "Total de pedidos", str(summary["total_pedidos"])],
         ["Ticket medio", currency_brl(summary["ticket_medio"]), "Custo estimado", currency_brl(summary["custo_estimado"])],
         ["Lucro estimado", currency_brl(summary["lucro_estimado"]), "Bebida mais vendida", escape((summary.get("bebida_mais_vendida") or {}).get("name", "Sem dados"))],
         ["Horario de pico", escape((summary.get("horario_pico") or {}).get("label", "Sem dados")), "Pedidos no pico", str(summary.get("quantidade_pedidos_pico", 0))],
-        ["Valor vendido no pico", currency_brl(summary.get("valor_vendido_pico", 0)), "Itens vendidos", str(summary.get("total_itens_vendidos", 0))],
+        ["Valor recebido no pico", currency_brl(summary.get("valor_vendido_pico", 0)), "Itens vendidos", str(summary.get("total_itens_vendidos", 0))],
     ]
     summary_table = Table(summary_table_data, colWidths=[38 * mm, 42 * mm, 38 * mm, 52 * mm])
     summary_table.setStyle(
@@ -2594,7 +2783,7 @@ def build_shift_export_pdf(shift_id: int) -> bytes:
 
     top_items = summary.get("top_5_bebidas") or []
     if top_items:
-        top_items_data = [["Bebida", "Quantidade", "Faturamento", "Custo"]]
+        top_items_data = [["Bebida", "Quantidade", "Total recebido", "Custo"]]
         for item in top_items:
             top_items_data.append(
                 [
@@ -2605,7 +2794,7 @@ def build_shift_export_pdf(shift_id: int) -> bytes:
                 ]
             )
     else:
-        top_items_data = [["Bebida", "Quantidade", "Faturamento", "Custo"], ["Sem vendas registradas", "-", "-", "-"]]
+        top_items_data = [["Bebida", "Quantidade", "Total recebido", "Custo"], ["Sem vendas registradas", "-", "-", "-"]]
     top_items_table = Table(top_items_data, colWidths=[78 * mm, 26 * mm, 34 * mm, 34 * mm])
     top_items_table.setStyle(
         TableStyle(
@@ -2880,6 +3069,7 @@ def dashboard():
         logistics=fetch_logistics_snapshot(),
         shifts=fetch_shift_history(limit=5),
         preorder=fetch_preorder_settings(),
+        current_shift_id=get_current_shift_id(),
         current_user=get_current_user(),
     )
 
@@ -3000,6 +3190,7 @@ def shift_detail_page(shift_id: int):
 def get_orders():
     return jsonify(
         {
+            "current_shift_id": get_current_shift_id(),
             "summary": build_order_summary(),
             "pending": fetch_orders(status="pending"),
             "completed": fetch_orders(status="completed", limit=20),
@@ -3100,6 +3291,10 @@ def export_shift_pdf(shift_id: int):
 @app.post("/api/orders")
 def create_order():
     payload = request.get_json(silent=True) or {}
+    request_id = normalize_request_id(request.headers.get("Idempotency-Key") or payload.get("request_id"))
+    if not request_id:
+        return jsonify({"error": "request_id obrigatorio para criar o pedido."}), 400
+
     selected_items, validation_error = validate_order_payload(payload.get("items") or [])
     if validation_error:
         return jsonify({"error": validation_error}), 400
@@ -3129,151 +3324,188 @@ def create_order():
         payment_provider_id = None
         pix_qr_code = None
         pix_copy_paste = None
-    bebidas_por_id = fetch_beverage_map(include_inactive=True)
-    combo_components_map = fetch_combo_components_map()
-    inventory_by_name = get_inventory_by_name()
-    preorder_settings = fetch_preorder_settings()
-    active_preorder_counts = fetch_active_preorder_counts()
-
-    itens = []
-    valor_total = 0.0
-    for entry in selected_items:
-        bebida_id = entry["id"]
-        quantidade = entry["quantity"]
-        bebida = bebidas_por_id.get(bebida_id)
-        if not bebida or quantidade <= 0 or not bebida["is_active"]:
-            continue
-        is_available, availability_note, _ = beverage_availability(
-            bebida,
-            inventory_by_name,
-            bebidas_por_id,
-            combo_components_map,
-            requested_quantity=quantidade,
-            active_counts=active_preorder_counts,
-            preorder_settings=preorder_settings,
-        )
-        if not is_available:
-            return jsonify({"error": availability_note or f"{bebida['nome']} indisponivel."}), 400
-        subtotal = round(bebida["preco_venda"] * quantidade, 2)
-        valor_total += subtotal
-        itens.append(
-            {
-                "bebida_id": bebida_id,
-                "name": bebida["nome"],
-                "quantity": quantidade,
-                "price": bebida["preco_venda"],
-                "cost": bebida["custo_estimado"],
-                "subtotal": subtotal,
-                "item_type": "combo" if bebida["is_combo"] else "product",
-            }
-        )
-
-    if not itens:
-        return jsonify({"error": "Itens invalidos."}), 400
-
-    shortages = check_stock_availability(itens, bebidas_por_id, combo_components_map)
-    if shortages:
-        readable = ", ".join(
-            f'{entry["item"]} ({entry["available"]}/{entry["needed"]} {entry["unit"]})'.strip()
-            for entry in shortages
-        )
-        return jsonify(
-            {
-                "error": f"Estoque insuficiente para concluir o pedido: {readable}",
-                "shortages": shortages,
-            }
-        ), 400
-
-    codigo = generate_order_code()
-    order_number = generate_order_number(codigo)
-    if payment_method == "pix":
-        pix_payload = build_fake_pix_payload(codigo, valor_total)
-        payment_provider = pix_payload["payment_provider"]
-        payment_provider_id = pix_payload["payment_provider_id"]
-        pix_qr_code = pix_payload["pix_qr_code"]
-        pix_copy_paste = pix_payload["pix_copy_paste"]
-        app.logger.info(
-            "create_order pix_branch code=%s provider=%s provider_id=%s copy_len=%s has_qr=%s",
-            codigo,
-            payment_provider,
-            payment_provider_id,
-            len(pix_copy_paste or ""),
-            bool(pix_qr_code),
-        )
-    else:
-        app.logger.info("create_order counter_branch code=%s", codigo)
-    horario = utc_now_iso()
-    turno_id = get_current_shift_id()
-    cursor = db.execute(
-        """
-        INSERT INTO pedidos (
-            codigo_retirada,
-            order_number,
-            horario_pedido,
-            status,
-            valor_total,
-            turno_id,
-            customer_name,
-            table_label,
-            source,
-            payment_method,
-            payment_status,
-            payment_provider,
-            payment_provider_id,
-            pix_qr_code,
-            pix_copy_paste
-        )
-        VALUES (?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            codigo,
-            order_number,
-            horario,
-            round(valor_total, 2),
-            turno_id,
-            customer_name,
-            table_label,
-            source,
-            payment_method,
-            payment_status,
-            payment_provider,
-            payment_provider_id,
-            pix_qr_code,
-            pix_copy_paste,
-        ),
-    )
-    pedido_id = cursor.lastrowid
-
-    db.executemany(
-        """
-        INSERT INTO itens_pedido (
-            pedido_id,
-            bebida_id,
-            quantidade,
-            subtotal,
-            item_name_snapshot,
-            item_type_snapshot,
-            unit_price_snapshot,
-            unit_cost_snapshot
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        [
-            (
-                pedido_id,
-                item["bebida_id"],
-                item["quantity"],
-                item["subtotal"],
-                item["name"],
-                item["item_type"],
-                item["price"],
-                item["cost"],
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        existing_order = fetch_order_row_by_request_id(request_id)
+        if existing_order:
+            db.rollback()
+            return (
+                jsonify(
+                    {
+                        "order": serialize_order(existing_order),
+                        "summary": build_order_summary(existing_order["turno_id"]),
+                    }
+                ),
+                200,
             )
-            for item in itens
-        ],
-    )
-    apply_stock_deductions(itens, bebidas_por_id, combo_components_map)
-    db.commit()
+
+        bebidas_por_id = fetch_beverage_map(include_inactive=True)
+        combo_components_map = fetch_combo_components_map()
+        inventory_by_name = get_inventory_by_name()
+        preorder_settings = fetch_preorder_settings()
+        active_preorder_counts = fetch_active_preorder_counts()
+
+        itens = []
+        valor_total = 0.0
+        for entry in selected_items:
+            bebida_id = entry["id"]
+            quantidade = entry["quantity"]
+            bebida = bebidas_por_id.get(bebida_id)
+            if not bebida or quantidade <= 0 or not bebida["is_active"]:
+                continue
+            is_available, availability_note, _ = beverage_availability(
+                bebida,
+                inventory_by_name,
+                bebidas_por_id,
+                combo_components_map,
+                requested_quantity=quantidade,
+                active_counts=active_preorder_counts,
+                preorder_settings=preorder_settings,
+            )
+            if not is_available:
+                db.rollback()
+                return jsonify({"error": availability_note or f"{bebida['nome']} indisponivel."}), 400
+            subtotal = round(bebida["preco_venda"] * quantidade, 2)
+            valor_total += subtotal
+            itens.append(
+                {
+                    "bebida_id": bebida_id,
+                    "name": bebida["nome"],
+                    "quantity": quantidade,
+                    "price": bebida["preco_venda"],
+                    "cost": bebida["custo_estimado"],
+                    "subtotal": subtotal,
+                    "item_type": "combo" if bebida["is_combo"] else "product",
+                }
+            )
+
+        if not itens:
+            db.rollback()
+            return jsonify({"error": "Itens invalidos."}), 400
+
+        shortages = reserve_stock_deductions(itens, bebidas_por_id, combo_components_map)
+        if shortages:
+            readable = ", ".join(
+                f'{entry["item"]} ({entry["available"]}/{entry["needed"]} {entry["unit"]})'.strip()
+                for entry in shortages
+            )
+            db.rollback()
+            return jsonify(
+                {
+                    "error": f"Estoque insuficiente para concluir o pedido: {readable}",
+                    "shortages": shortages,
+                }
+            ), 400
+
+        codigo = generate_order_code()
+        order_number = generate_order_number(codigo)
+        if payment_method == "pix":
+            pix_payload = build_fake_pix_payload(codigo, valor_total)
+            payment_provider = pix_payload["payment_provider"]
+            payment_provider_id = pix_payload["payment_provider_id"]
+            pix_qr_code = pix_payload["pix_qr_code"]
+            pix_copy_paste = pix_payload["pix_copy_paste"]
+            app.logger.info(
+                "create_order pix_branch code=%s provider=%s provider_id=%s copy_len=%s has_qr=%s",
+                codigo,
+                payment_provider,
+                payment_provider_id,
+                len(pix_copy_paste or ""),
+                bool(pix_qr_code),
+            )
+        else:
+            app.logger.info("create_order counter_branch code=%s", codigo)
+        horario = utc_now_iso()
+        turno_id = get_current_shift_id()
+
+        cursor = db.execute(
+            """
+            INSERT INTO pedidos (
+                codigo_retirada,
+                order_number,
+                horario_pedido,
+                status,
+                valor_total,
+                turno_id,
+                customer_name,
+                table_label,
+                source,
+                payment_method,
+                payment_status,
+                payment_provider,
+                payment_provider_id,
+                pix_qr_code,
+                pix_copy_paste,
+                request_id
+            )
+            VALUES (?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                codigo,
+                order_number,
+                horario,
+                round(valor_total, 2),
+                turno_id,
+                customer_name,
+                table_label,
+                source,
+                payment_method,
+                payment_status,
+                payment_provider,
+                payment_provider_id,
+                pix_qr_code,
+                pix_copy_paste,
+                request_id,
+            ),
+        )
+        pedido_id = cursor.lastrowid
+
+        db.executemany(
+            """
+            INSERT INTO itens_pedido (
+                pedido_id,
+                bebida_id,
+                quantidade,
+                subtotal,
+                item_name_snapshot,
+                item_type_snapshot,
+                unit_price_snapshot,
+                unit_cost_snapshot
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    pedido_id,
+                    item["bebida_id"],
+                    item["quantity"],
+                    item["subtotal"],
+                    item["name"],
+                    item["item_type"],
+                    item["price"],
+                    item["cost"],
+                )
+                for item in itens
+            ],
+        )
+        db.commit()
+    except sqlite3.IntegrityError:
+        db.rollback()
+        existing_order = fetch_order_row_by_request_id(request_id)
+        if existing_order:
+            return (
+                jsonify(
+                    {
+                        "order": serialize_order(existing_order),
+                        "summary": build_order_summary(existing_order["turno_id"]),
+                    }
+                ),
+                200,
+            )
+        raise
+    except Exception:
+        db.rollback()
+        raise
 
     row = db.execute(
         """
@@ -3301,28 +3533,6 @@ def create_order():
         (pedido_id,),
     ).fetchone()
     return jsonify({"order": serialize_order(row), "summary": build_order_summary()}), 201
-
-
-@app.post("/api/orders/<code>/pix/simulate")
-def simulate_pix_payment(code: str):
-    order_row = fetch_order_row_by_code(code)
-    if not order_row:
-        return jsonify({"error": "Pedido nao encontrado."}), 404
-    if normalize_payment_method(order_row["payment_method"]) != "pix":
-        return jsonify({"error": "Esse pedido nao usa Pix."}), 400
-
-    app.logger.info(
-        "simulate_pix_payment code=%s current_status=%s provider=%s",
-        code,
-        order_row["payment_status"],
-        order_row["payment_provider"],
-    )
-    try:
-        order = mark_as_paid(code, shift_id=order_row["turno_id"] if "turno_id" in order_row.keys() else None)
-    except LookupError:
-        return jsonify({"error": "Pedido nao encontrado."}), 404
-    app.logger.info("simulate_pix_payment completed code=%s updated_status=%s", code, order["payment_status"])
-    return jsonify({"order": order})
 
 
 @app.post("/api/orders/<code>/pay")
@@ -3367,14 +3577,36 @@ def complete_order(code: str):
 @login_required
 @role_required("admin")
 def closeout_report():
-    return jsonify(archive_current_shift_and_open_next())
+    payload = request.get_json(silent=True) or {}
+    raw_expected_shift_id = payload.get("expected_shift_id")
+    expected_shift_id = None
+    if raw_expected_shift_id not in (None, ""):
+        try:
+            expected_shift_id = int(raw_expected_shift_id)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Turno esperado invalido."}), 400
+    try:
+        return jsonify(archive_current_shift_and_open_next(expected_shift_id))
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 409
 
 
 @app.post("/api/reports/reset")
 @login_required
 @role_required("admin")
 def reset_data():
-    archived = archive_current_shift_and_open_next()
+    payload = request.get_json(silent=True) or {}
+    raw_expected_shift_id = payload.get("expected_shift_id")
+    expected_shift_id = None
+    if raw_expected_shift_id not in (None, ""):
+        try:
+            expected_shift_id = int(raw_expected_shift_id)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Turno esperado invalido."}), 400
+    try:
+        archived = archive_current_shift_and_open_next(expected_shift_id)
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 409
     archived["ok"] = True
     return jsonify(archived)
 
