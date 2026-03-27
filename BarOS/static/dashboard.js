@@ -19,6 +19,9 @@ const closeCloseoutModalButton = document.getElementById("close-closeout-modal")
 const closeCloseoutModalTopButton = document.getElementById("close-closeout-modal-top");
 
 let latestClosedShiftId = null;
+let currentShiftId = dashboardConfig.currentShiftId || null;
+let closeoutRequestInFlight = false;
+let resetRequestInFlight = false;
 
 const brl = new Intl.NumberFormat("pt-BR", {
   style: "currency",
@@ -244,7 +247,7 @@ function renderShiftHistory(shifts) {
           </div>
           <div class="shift-stats">
             <div class="summary-item">
-              <div><strong>Faturamento</strong></div>
+              <div><strong>Total recebido</strong></div>
               <strong>${brl.format(totalVendido)}</strong>
             </div>
             <div class="summary-item">
@@ -319,6 +322,14 @@ function setCloseoutExportLink(shiftId) {
   }
 }
 
+function setButtonBusy(button, busy, busyLabel, idleLabel) {
+  if (!button) {
+    return;
+  }
+  button.disabled = busy;
+  button.textContent = busy ? busyLabel : idleLabel;
+}
+
 async function refreshDashboard() {
   const response = await fetch("/api/orders");
   if (!response.ok) {
@@ -327,14 +338,7 @@ async function refreshDashboard() {
   }
 
   const data = await response.json();
-  refreshStatus.textContent = `Atualizado ${data.generated_at}`;
-  updateSummary(data.summary);
-  renderPending(data.pending);
-  renderCompleted(data.completed);
-  renderTopItems(data.summary.top_items);
-  renderTopTables(data.summary.top_tables);
-  updateLogistics(data.logistics);
-  renderShiftHistory(data.shifts || []);
+  applyDashboardSnapshot(data);
 }
 
 async function completeOrder(code) {
@@ -391,7 +395,7 @@ function renderCloseoutReport(report) {
     : "Sem dados";
 
   closeoutContent.innerHTML = [
-    ["Total vendido", brl.format(report.total_vendido)],
+    ["Total recebido", brl.format(report.total_recebido ?? report.total_vendido)],
     ["Total de pedidos", String(report.total_pedidos)],
     ["Itens vendidos", String(report.total_itens_vendidos)],
     ["Bebida mais pedida", mostOrdered],
@@ -427,6 +431,9 @@ function renderCloseoutReport(report) {
 }
 
 function applyDashboardSnapshot(data) {
+  if (Number.isInteger(Number(data.current_shift_id))) {
+    currentShiftId = Number(data.current_shift_id);
+  }
   refreshStatus.textContent = `Atualizado ${data.generated_at}`;
   updateSummary(data.summary);
   renderPending(data.pending);
@@ -438,16 +445,30 @@ function applyDashboardSnapshot(data) {
 }
 
 async function closeBar() {
-  const response = await fetch("/api/reports/closeout", { method: "POST" });
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    refreshStatus.textContent = data.error || "Falha ao fechar bar";
+  if (closeoutRequestInFlight) {
     return;
   }
-  const data = await response.json();
-  setCloseoutExportLink(data.closed_shift_id);
-  renderCloseoutReport(data.report);
-  await refreshDashboard();
+  closeoutRequestInFlight = true;
+  setButtonBusy(closeBarButton, true, "Fechando...", "Fechar bar");
+  try {
+    const response = await fetch("/api/reports/closeout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expected_shift_id: currentShiftId }),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      refreshStatus.textContent = data.error || "Falha ao fechar bar";
+      return;
+    }
+    const data = await response.json();
+    setCloseoutExportLink(data.closed_shift_id);
+    renderCloseoutReport(data.report);
+    applyDashboardSnapshot(data);
+  } finally {
+    closeoutRequestInFlight = false;
+    setButtonBusy(closeBarButton, false, "Fechando...", "Fechar bar");
+  }
 }
 
 async function resetData() {
@@ -455,19 +476,33 @@ async function resetData() {
   if (!confirmed) {
     return;
   }
-  const response = await fetch("/api/reports/reset", { method: "POST" });
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    refreshStatus.textContent = data.error || "Falha ao resetar";
+  if (resetRequestInFlight) {
     return;
   }
-  if (!closeoutModal.classList.contains("hidden")) {
-    closeoutModal.classList.add("hidden");
-    closeoutModal.setAttribute("aria-hidden", "true");
+  resetRequestInFlight = true;
+  setButtonBusy(resetDataButton, true, "Resetando...", "Resetar dados");
+  try {
+    const response = await fetch("/api/reports/reset", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expected_shift_id: currentShiftId }),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      refreshStatus.textContent = data.error || "Falha ao resetar";
+      return;
+    }
+    if (!closeoutModal.classList.contains("hidden")) {
+      closeoutModal.classList.add("hidden");
+      closeoutModal.setAttribute("aria-hidden", "true");
+    }
+    const data = await response.json();
+    setCloseoutExportLink(data.closed_shift_id);
+    applyDashboardSnapshot(data);
+  } finally {
+    resetRequestInFlight = false;
+    setButtonBusy(resetDataButton, false, "Resetando...", "Resetar dados");
   }
-  const data = await response.json();
-  setCloseoutExportLink(data.closed_shift_id);
-  applyDashboardSnapshot(data);
 }
 
 pendingContainer?.addEventListener("click", (event) => {

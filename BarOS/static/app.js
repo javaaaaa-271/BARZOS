@@ -12,6 +12,10 @@ const orderCountBadge = document.getElementById("order-count-badge");
 const submitOrderButton = document.getElementById("submit-order");
 const checkoutPanel = document.querySelector(".checkout-panel");
 const toggleCheckoutButton = document.getElementById("toggle-checkout");
+const openCheckoutQuickButton = document.getElementById("open-checkout-quick");
+const customerNameInput = document.getElementById("customer-name");
+const tableLabelInput = document.getElementById("table-label");
+const checkoutFooterCount = document.getElementById("checkout-footer-count");
 
 const checkoutModal = document.getElementById("checkout-modal");
 const checkoutReviewSummary = document.getElementById("checkout-review-summary");
@@ -36,13 +40,13 @@ const pixQrPlaceholder = document.getElementById("pix-qr-placeholder");
 const pixCopyPaste = document.getElementById("pix-copy-paste");
 const pixError = document.getElementById("pix-error");
 const copyPixCodeButton = document.getElementById("copy-pix-code");
-const simulatePixPaymentButton = document.getElementById("simulate-pix-payment");
 const closePixModalTopButton = document.getElementById("close-pix-modal-top");
 
 let checkoutCollapsed = false;
 let currentPixOrder = null;
 let checkoutPanelWasCollapsedBeforeModal = false;
 let checkoutPanelHiddenForFlow = false;
+let lastResponsiveMobileState = null;
 
 const paymentMethodLabels = {
   counter: "Pagar no balcao",
@@ -50,12 +54,124 @@ const paymentMethodLabels = {
 };
 
 const paymentMethodInstructions = {
-  counter: "Pagamento sera feito no balcao ou no momento da retirada.",
-  pix: "O pedido sera criado agora e fica aguardando a confirmacao do pagamento Pix.",
+  counter: "Voce paga no balcao ou no momento da retirada.",
+  pix: "Pague no Pix e aguarde a confirmacao do bar.",
 };
+const PENDING_ORDER_STORAGE_KEY = "baros_pending_order_v1";
+const PENDING_ORDER_MAX_AGE_MS = 30 * 60 * 1000;
 
 function logCheckoutFlow(step, details = {}) {
   console.info("[BarOS checkout]", step, details);
+}
+
+function isMobileViewport() {
+  return window.matchMedia("(max-width: 640px)").matches;
+}
+
+function createRequestId() {
+  if (window.crypto?.randomUUID) {
+    return window.crypto.randomUUID();
+  }
+  return `baros-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+}
+
+function normalizeItemsForIdempotency(items) {
+  return [...(items || [])]
+    .map((item) => ({
+      id: Number(item.id),
+      quantity: Number(item.quantity),
+    }))
+    .filter((item) => item.id > 0 && item.quantity > 0)
+    .sort((left, right) => left.id - right.id);
+}
+
+function buildOrderFingerprint(payload) {
+  return JSON.stringify({
+    customer_name: (payload.customer_name || "").trim(),
+    table_label: (payload.table_label || "").trim(),
+    source: payload.source || "",
+    payment_method: payload.payment_method || "",
+    items: normalizeItemsForIdempotency(payload.items),
+  });
+}
+
+function readPendingOrderDraft() {
+  try {
+    const raw = window.sessionStorage?.getItem(PENDING_ORDER_STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+    const draft = JSON.parse(raw);
+    if (!draft?.request_id || !draft?.payload || !draft?.created_at) {
+      window.sessionStorage.removeItem(PENDING_ORDER_STORAGE_KEY);
+      return null;
+    }
+    if (Date.now() - Number(draft.created_at) > PENDING_ORDER_MAX_AGE_MS) {
+      window.sessionStorage.removeItem(PENDING_ORDER_STORAGE_KEY);
+      return null;
+    }
+    return draft;
+  } catch (error) {
+    console.error(error);
+    return null;
+  }
+}
+
+function writePendingOrderDraft(draft) {
+  try {
+    window.sessionStorage?.setItem(PENDING_ORDER_STORAGE_KEY, JSON.stringify(draft));
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+function clearPendingOrderDraft() {
+  try {
+    window.sessionStorage?.removeItem(PENDING_ORDER_STORAGE_KEY);
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+function getOrCreateRequestId(payload) {
+  const fingerprint = buildOrderFingerprint(payload);
+  const existingDraft = readPendingOrderDraft();
+  if (existingDraft?.fingerprint === fingerprint && existingDraft?.request_id) {
+    return {
+      requestId: existingDraft.request_id,
+      fingerprint,
+    };
+  }
+  return {
+    requestId: createRequestId(),
+    fingerprint,
+  };
+}
+
+function restorePendingOrderDraft() {
+  const draft = readPendingOrderDraft();
+  if (!draft?.payload) {
+    return;
+  }
+
+  cart.clear();
+  normalizeItemsForIdempotency(draft.payload.items).forEach((item) => {
+    cart.set(String(item.id), item.quantity);
+  });
+
+  document.querySelectorAll(".menu-card").forEach((card) => {
+    updateCardQuantity(card, cart.get(card.dataset.menuId) || 0);
+  });
+
+  if (customerNameInput) {
+    customerNameInput.value = draft.payload.customer_name || "";
+  }
+  if (tableLabelInput) {
+    tableLabelInput.value = draft.payload.table_label || "";
+  }
+  checkoutPaymentInputs.forEach((input) => {
+    input.checked = input.value === draft.payload.payment_method;
+  });
 }
 
 function getSelectedItems() {
@@ -98,8 +214,22 @@ function updateCheckoutToggle(collapsed) {
   }
   checkoutCollapsed = collapsed;
   checkoutPanel.classList.toggle("is-collapsed", collapsed);
-  toggleCheckoutButton.textContent = collapsed ? "Expandir" : "Minimizar";
+  toggleCheckoutButton.textContent = isMobileViewport()
+    ? (collapsed ? "Ver itens" : "Ocultar itens")
+    : (collapsed ? "Expandir" : "Minimizar");
   toggleCheckoutButton.setAttribute("aria-expanded", collapsed ? "false" : "true");
+}
+
+function applyResponsiveCheckoutMode() {
+  const isMobile = isMobileViewport();
+  if (lastResponsiveMobileState === isMobile) {
+    return;
+  }
+  lastResponsiveMobileState = isMobile;
+  if (checkoutPanelHiddenForFlow) {
+    return;
+  }
+  updateCheckoutToggle(isMobile);
 }
 
 function hideCheckoutPanelForFlow() {
@@ -146,10 +276,10 @@ function renderSummaryRows(selected) {
 function updateCheckoutInstruction() {
   const paymentMethod = getSelectedPaymentMethod();
   if (!paymentMethod) {
-    checkoutInstruction.textContent = "Escolha uma forma de pagamento para liberar o envio do pedido.";
+    checkoutInstruction.textContent = "Escolha como pagar para liberar o envio.";
     return;
   }
-  checkoutInstruction.textContent = paymentMethodInstructions[paymentMethod] || "Confirme o pagamento para seguir.";
+  checkoutInstruction.textContent = paymentMethodInstructions[paymentMethod] || "Confirme como vai pagar para seguir.";
 }
 
 function syncCheckoutReview() {
@@ -162,7 +292,7 @@ function syncCheckoutReview() {
 
   if (!selected.length) {
     checkoutReviewSummary.className = "summary-list empty-state";
-    checkoutReviewSummary.textContent = "Nenhum item selecionado.";
+    checkoutReviewSummary.textContent = "Seu carrinho esta vazio.";
     checkoutReviewTotal.textContent = "R$ 0,00";
     return;
   }
@@ -177,14 +307,21 @@ function buildSummary() {
   const totalItems = selected.reduce((sum, item) => sum + item.quantity, 0);
 
   orderCountBadge.textContent = `${totalItems} ${totalItems === 1 ? "item" : "itens"}`;
+  if (checkoutFooterCount) {
+    checkoutFooterCount.textContent = totalItems
+      ? `${totalItems} ${totalItems === 1 ? "item" : "itens"}`
+      : "Carrinho vazio";
+  }
   checkoutPanel?.classList.toggle("has-items", totalItems > 0);
 
   if (!selected.length) {
     orderSummary.className = "summary-list empty-state";
-    orderSummary.textContent = "Selecione itens do cardapio para montar o pedido.";
+    orderSummary.textContent = "Toque em + para adicionar bebidas ao carrinho.";
     orderTotal.textContent = "R$ 0,00";
     submitOrderButton.disabled = true;
-    updateCheckoutToggle(false);
+    if (!isMobileViewport()) {
+      updateCheckoutToggle(false);
+    }
     syncCheckoutReview();
     return;
   }
@@ -293,7 +430,7 @@ function populatePixModal(order) {
   currentPixOrder = order;
   pixOrderCode.textContent = order.order_number || order.code;
   pixPaymentStatus.textContent = order.payment_status_label;
-  pixPaymentInstruction.textContent = "Escaneie o QR code ou use o Pix copia e cola abaixo. Se precisar testar o fluxo, use o botao de simulacao.";
+  pixPaymentInstruction.textContent = "Escaneie o QR code ou copie a chave Pix abaixo. Depois do pagamento, o bar confirma internamente.";
   pixCopyPaste.value = order.pix_copy_paste || "";
 
   if (order.pix_qr_code) {
@@ -324,8 +461,8 @@ async function submitOrder() {
     return;
   }
 
-  const customerName = document.getElementById("customer-name").value.trim();
-  const tableLabel = document.getElementById("table-label").value.trim();
+  const customerName = customerNameInput?.value.trim() || "";
+  const tableLabel = tableLabelInput?.value.trim() || "";
 
   checkoutSubmitButton.disabled = true;
   checkoutSubmitButton.textContent = "Enviando...";
@@ -338,13 +475,33 @@ async function submitOrder() {
     payment_method: paymentMethod,
     items: selectedItems,
   };
+  const { requestId, fingerprint } = getOrCreateRequestId(payload);
+  payload.request_id = requestId;
+  writePendingOrderDraft({
+    request_id: requestId,
+    fingerprint,
+    payload,
+    created_at: Date.now(),
+  });
   logCheckoutFlow("submit_order_payload", payload);
 
-  const response = await fetch("/api/orders", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
+  let response;
+  try {
+    response = await fetch("/api/orders", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": requestId,
+      },
+      body: JSON.stringify(payload),
+    });
+  } catch (error) {
+    console.error(error);
+    checkoutSubmitButton.disabled = false;
+    checkoutSubmitButton.textContent = "Enviar pedido";
+    setCheckoutError("Nao foi possivel enviar agora. Tente novamente que o sistema reaproveita a mesma tentativa com seguranca.");
+    return;
+  }
 
   const data = await response.json().catch(() => ({}));
   logCheckoutFlow("submit_order_response", {
@@ -360,6 +517,7 @@ async function submitOrder() {
     return;
   }
 
+  clearPendingOrderDraft();
   closeCheckoutModal({ restorePanel: false });
   resetCart();
 
@@ -373,47 +531,6 @@ async function submitOrder() {
   showConfirmation(data.order, "Seu pedido foi enviado. Pagamento sera feito no balcao.");
 }
 
-async function simulatePixPayment() {
-  if (!currentPixOrder?.code) {
-    setPixError("Pedido Pix nao encontrado.");
-    return;
-  }
-
-  simulatePixPaymentButton.disabled = true;
-  simulatePixPaymentButton.textContent = "Confirmando...";
-  setPixError("");
-  logCheckoutFlow("simulate_pix_payment_request", {
-    code: currentPixOrder.code,
-    paymentStatus: currentPixOrder.payment_status,
-  });
-
-  const response = await fetch(`/api/orders/${currentPixOrder.code}/pix/simulate`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-  });
-
-  const data = await response.json().catch(() => ({}));
-  logCheckoutFlow("simulate_pix_payment_response", {
-    ok: response.ok,
-    status: response.status,
-    data,
-  });
-  simulatePixPaymentButton.disabled = false;
-  simulatePixPaymentButton.textContent = "Simular pagamento";
-
-  if (!response.ok) {
-    setPixError(data.error || "Nao foi possivel confirmar o pagamento Pix.");
-    return;
-  }
-
-  currentPixOrder = data.order;
-  closePixModal({ restorePanel: false });
-  showConfirmation(
-    data.order,
-    "Seu pedido foi enviado. O pagamento via Pix foi confirmado e o bar ja pode seguir com a liberacao."
-  );
-}
-
 async function copyPixCode() {
   if (!pixCopyPaste?.value) {
     setPixError("Nao ha Pix copia e cola disponivel para este pedido.");
@@ -422,7 +539,7 @@ async function copyPixCode() {
   try {
     if (navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(pixCopyPaste.value);
-      pixPaymentInstruction.textContent = "Pix copia e cola copiado. Voce pode pagar e depois confirmar a simulacao.";
+      pixPaymentInstruction.textContent = "Pix copia e cola copiado. Depois do pagamento, o bar confirma internamente.";
       return;
     }
   } catch (error) {
@@ -448,6 +565,11 @@ toggleCheckoutButton?.addEventListener("click", () => {
   updateCheckoutToggle(!checkoutCollapsed);
 });
 
+openCheckoutQuickButton?.addEventListener("click", () => {
+  updateCheckoutToggle(false);
+  checkoutPanel?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+});
+
 submitOrderButton?.addEventListener("click", openCheckoutModal);
 checkoutSubmitButton?.addEventListener("click", submitOrder);
 closeCheckoutModalButton?.addEventListener("click", closeCheckoutModal);
@@ -466,7 +588,6 @@ checkoutPaymentInputs.forEach((input) => {
 });
 
 document.getElementById("close-confirmation")?.addEventListener("click", closeConfirmationModal);
-simulatePixPaymentButton?.addEventListener("click", simulatePixPayment);
 copyPixCodeButton?.addEventListener("click", copyPixCode);
 closePixModalTopButton?.addEventListener("click", closePixModal);
 pixModal?.addEventListener("click", (event) => {
@@ -491,4 +612,8 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
+restorePendingOrderDraft();
+applyResponsiveCheckoutMode();
 buildSummary();
+updateCheckoutInstruction();
+window.addEventListener("resize", applyResponsiveCheckoutMode);
