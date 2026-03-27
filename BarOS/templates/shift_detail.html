@@ -22,7 +22,7 @@
 
   <section class="stats-grid detail-stats-grid">
     <article class="stat-card">
-      <span>Total vendido</span>
+      <span>Total recebido</span>
       <strong>R$ {{ "%.2f"|format(shift.summary.total_vendido or 0) }}</strong>
     </article>
     <article class="stat-card">
@@ -196,7 +196,7 @@
           <strong>{{ shift.summary.quantidade_pedidos_pico or 0 }}</strong>
         </div>
         <div class="summary-item">
-          <div><strong>Valor vendido no pico</strong></div>
+          <div><strong>Valor recebido no pico</strong></div>
           <strong>R$ {{ "%.2f"|format(shift.summary.valor_vendido_pico or 0) }}</strong>
         </div>
         <div class="summary-item">

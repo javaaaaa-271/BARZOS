@@ -7,11 +7,15 @@
 <main class="customer-shell customer-shell-premium">
   <section class="hero-panel hero-panel-premium">
     <div class="hero-copy">
-      <p class="eyebrow">BarOS Experience</p>
-      <h1>Menu digital com cara de casa premium.</h1>
+      <p class="eyebrow">BarOS Menu</p>
+      <h1>Peça rapido, direto do celular.</h1>
       <p class="hero-text">
-        Inspirado na referencia, mas com layout mais profissional, pedido rapido e uma entrada separada para o time do bar.
+        Escolha sua bebida, revise o carrinho e finalize em poucos toques. Ideal para pedir em pe, com pressa e sem fila.
       </p>
+      <div class="customer-hero-actions">
+        <a class="primary-button hero-cta" href="#menu-grid">Ver cardapio</a>
+        <button class="secondary-button hero-cta" type="button" id="open-checkout-quick">Ver carrinho</button>
+      </div>
       <div class="hero-meta">
         <span>{{ current_time }}</span>
         <span>Atendimento em fluxo continuo</span>
@@ -19,8 +23,8 @@
     </div>
     <div class="hero-card service-card">
       <p class="mini-label">Servico da casa</p>
-      <h2>Pedidos rapidos, fila organizada e operacao protegida.</h2>
-      <p>O cliente monta a comanda aqui e a equipe acompanha tudo em uma rota separada, sem misturar atendimento com operacao.</p>
+      <h2>Pedido simples para o cliente e organizado para o bar.</h2>
+      <p>Voce faz o pedido aqui e a equipe recebe no painel interno, sem misturar atendimento com operacao.</p>
       <div class="hero-meta compact-meta">
         <span>Fluxo por turno</span>
         <span>Baixa automatica</span>
@@ -32,21 +36,22 @@
     <div class="section-heading">
       <div>
         <p class="eyebrow">Cardapio</p>
-        <h2>Escolha a bebida da rodada</h2>
+        <h2>Escolha sua bebida</h2>
       </div>
       <form id="customer-form" class="customer-meta">
         <label>
-          <span>Nome</span>
-          <input type="text" id="customer-name" placeholder="Ex.: Rafael">
+          <span>Seu nome</span>
+          <input type="text" id="customer-name" placeholder="Ex.: Rafael" autocomplete="name" enterkeyhint="next">
         </label>
         <label>
-          <span>Mesa</span>
-          <input type="text" id="table-label" value="Mesa 07">
+          <span>Mesa ou retirada</span>
+          <input type="text" id="table-label" placeholder="Ex.: Mesa 7 ou retirada" autocapitalize="words" enterkeyhint="done">
         </label>
+        <p class="customer-meta-help">Nome e mesa ajudam a equipe a localizar seu pedido mais rapido.</p>
       </form>
     </div>
 
-    <div class="menu-grid premium-product-grid">
+    <div id="menu-grid" class="menu-grid premium-product-grid">
       {% for item in menu %}
       <article class="menu-card premium-product-card {% if item.is_combo %}menu-card-combo{% endif %} {% if not item.is_available %}menu-card-disabled{% endif %}" data-menu-id="{{ item.id }}" data-available="{{ 'true' if item.is_available else 'false' }}">
         <div class="menu-card-media">
@@ -83,9 +88,9 @@
         <div class="menu-card-bottom">
           <strong class="menu-price">R$ {{ "%.2f"|format(item.price) }}</strong>
           <div class="qty-picker">
-            <button type="button" class="qty-btn" data-action="decrease" {% if not item.is_available %}disabled{% endif %}>-</button>
+            <button type="button" class="qty-btn" data-action="decrease" aria-label="Remover uma unidade de {{ item.name }}" {% if not item.is_available %}disabled{% endif %}>-</button>
             <span class="qty-value">0</span>
-            <button type="button" class="qty-btn" data-action="increase" {% if not item.is_available %}disabled{% endif %}>+</button>
+            <button type="button" class="qty-btn" data-action="increase" aria-label="Adicionar uma unidade de {{ item.name }}" {% if not item.is_available %}disabled{% endif %}>+</button>
           </div>
         </div>
       </article>
@@ -96,29 +101,30 @@
   <aside class="checkout-panel checkout-panel-premium">
     <div class="checkout-header">
       <div>
-        <p class="eyebrow">Resumo do pedido</p>
-        <h2>Feche a comanda em segundos</h2>
+        <p class="eyebrow">Seu carrinho</p>
+        <h2>Revise e finalize rapido</h2>
       </div>
       <button id="toggle-checkout" class="ghost-button small-button" type="button" aria-expanded="true">
-        Minimizar
+        Ocultar itens
       </button>
     </div>
     <div class="checkout-body">
       <div class="checkout-inline-meta">
         <span id="order-count-badge" class="pill">0 itens</span>
-        <span class="pill subtle-pill">Etapa 1 / monte seu pedido</span>
+        <span class="pill subtle-pill">Toque em + para adicionar</span>
       </div>
       <div id="order-summary" class="summary-list empty-state">
-        Selecione itens do cardapio para montar o pedido.
+        Toque em + para adicionar bebidas ao carrinho.
       </div>
     </div>
     <div class="checkout-footer">
+      <span id="checkout-footer-count" class="pill subtle-pill checkout-footer-count">Carrinho vazio</span>
       <div class="total-line">
         <span>Total</span>
         <strong id="order-total">R$ 0,00</strong>
       </div>
-      <button id="submit-order" class="primary-button" type="button" disabled>Confirmar pedido</button>
-      <p class="muted-note">Esse botao abre a etapa final de checkout antes do envio real.</p>
+      <button id="submit-order" class="primary-button" type="button" disabled>Finalizar pedido</button>
+      <p class="muted-note">Na proxima etapa voce revisa o pedido e escolhe como pagar.</p>
     </div>
   </aside>
 
@@ -132,7 +138,7 @@
     <div class="modal-header">
       <div>
         <p class="eyebrow">Checkout</p>
-        <h2>Confirme o pedido antes de enviar</h2>
+        <h2>Escolha como pagar</h2>
       </div>
       <button class="ghost-button small-button modal-close-button" type="button" id="close-checkout-modal-top" aria-label="Fechar checkout">
         Fechar
@@ -141,7 +147,7 @@
 
     <div class="modal-scroll-area checkout-review-shell">
       <div class="checkout-stage-note">
-        <span class="pill subtle-pill">Etapa 2 / escolha como pagar</span>
+        <span class="pill subtle-pill">Ultima etapa antes do envio</span>
       </div>
 
       <div id="checkout-review-summary" class="summary-list"></div>
@@ -161,9 +167,9 @@
               <strong>{{ method.label }}</strong>
               <p>
                 {% if method.value == 'counter' %}
-                Pagamento sera feito presencialmente no balcao ou na retirada.
+                Voce paga no balcao ou no momento da retirada.
                 {% else %}
-                Pedido segue para o fluxo de Pix preparado pelo sistema.
+                O pedido vai para o fluxo Pix e fica aguardando confirmacao.
                 {% endif %}
               </p>
             </div>
@@ -173,7 +179,7 @@
       </section>
 
       <p id="checkout-instruction" class="checkout-instruction">
-        Escolha uma forma de pagamento para liberar o envio do pedido.
+        Escolha como pagar para liberar o envio do pedido.
       </p>
       <p id="checkout-error" class="alert hidden"></p>
     </div>
@@ -229,7 +235,6 @@
 
     <div class="modal-actions">
       <button class="secondary-button full-width" type="button" id="copy-pix-code">Copiar chave</button>
-      <button class="primary-button full-width" type="button" id="simulate-pix-payment">Simular pagamento</button>
     </div>
   </div>
 </section>

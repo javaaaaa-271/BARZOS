@@ -40,7 +40,7 @@
       <strong id="total-count">{{ summary.total_count }}</strong>
     </article>
     <article class="stat-card stat-card-highlight stat-card-accent">
-      <span>Faturamento</span>
+      <span>Total recebido</span>
       <strong id="revenue-total">R$ {{ "%.2f"|format(summary.revenue) }}</strong>
     </article>
     <article class="stat-card stat-card-highlight">
@@ -211,7 +211,7 @@
             </div>
             <div class="shift-stats">
               <div class="summary-item">
-                <div><strong>Faturamento</strong></div>
+                <div><strong>Total recebido</strong></div>
                 <strong>R$ {{ "%.2f"|format(shift.summary.total_vendido or 0) }}</strong>
               </div>
               <div class="summary-item">
@@ -311,7 +311,8 @@
 {% block scripts %}
 <script>
   window.BAROS_DASHBOARD = {
-    canManageBar: {{ 'true' if current_user.can_manage_bar else 'false' }}
+    canManageBar: {{ 'true' if current_user.can_manage_bar else 'false' }},
+    currentShiftId: {{ current_shift_id }}
   };
 </script>
 <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
