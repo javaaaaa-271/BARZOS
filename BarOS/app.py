@@ -41,11 +41,18 @@ DATABASE_PATH = Path(
         os.getenv("BAROS_DB_PATH", str(INSTANCE_DIR / "baros.db")),
     )
 ).expanduser()
-BAR_USERNAME = os.getenv("BAROS_USERNAME", "admin")
-BAR_PASSWORD = os.getenv("BAROS_PASSWORD", "bar123")
-BAR_OPERATOR_USERNAME = os.getenv("BAROS_OPERATOR_USERNAME", "operacao")
-BAR_OPERATOR_PASSWORD = os.getenv("BAROS_OPERATOR_PASSWORD", BAR_PASSWORD)
-DEFAULT_SECRET = "troque-esta-chave-em-producao"
+BAROS_ENV = (os.getenv("BAROS_ENV") or os.getenv("FLASK_ENV") or "development").strip().lower()
+IS_PRODUCTION = BAROS_ENV in {"production", "staging"}
+BAROS_SECRET_KEY = (os.getenv("BAROS_SECRET_KEY") or "").strip()
+BAROS_COOKIE_SECURE = os.getenv("BAROS_COOKIE_SECURE")
+ALLOW_DEFAULT_SEED_USERS = (
+    os.getenv("BAROS_ALLOW_DEFAULT_SEED_USERS", "false" if IS_PRODUCTION else "true").strip().lower()
+    == "true"
+)
+LEGACY_SEED_ADMIN_USERNAME = (os.getenv("BAROS_USERNAME") or "").strip()
+LEGACY_SEED_ADMIN_PASSWORD = os.getenv("BAROS_PASSWORD") or ""
+LEGACY_SEED_OPERATOR_USERNAME = (os.getenv("BAROS_OPERATOR_USERNAME") or "").strip()
+LEGACY_SEED_OPERATOR_PASSWORD = os.getenv("BAROS_OPERATOR_PASSWORD") or ""
 DEFAULT_ORDER_SOURCE = "menu-digital"
 ROLE_LABELS = {
     "admin": "Administrador",
@@ -309,12 +316,33 @@ def normalize_internal_access_path(raw_value: str) -> str:
 INTERNAL_ACCESS_PATH = normalize_internal_access_path(os.getenv("BAROS_INTERNAL_ACCESS_PATH", "backstage"))
 
 
+def build_runtime_secret_key() -> str:
+    if BAROS_SECRET_KEY:
+        return BAROS_SECRET_KEY
+    if IS_PRODUCTION:
+        raise RuntimeError("BAROS_SECRET_KEY obrigatorio quando BAROS_ENV=production.")
+    return secrets.token_hex(32)
+
+
+def validate_runtime_security() -> None:
+    if IS_PRODUCTION and len(BAROS_SECRET_KEY) < 32:
+        raise RuntimeError("BAROS_SECRET_KEY precisa ter pelo menos 32 caracteres em producao.")
+    if IS_PRODUCTION and ALLOW_DEFAULT_SEED_USERS:
+        raise RuntimeError("BAROS_ALLOW_DEFAULT_SEED_USERS deve ficar desativado em producao.")
+
+
 app = Flask(__name__)
-app.config["SECRET_KEY"] = os.getenv("BAROS_SECRET_KEY", DEFAULT_SECRET)
+app.config["SECRET_KEY"] = build_runtime_secret_key()
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
-app.config["SESSION_COOKIE_SECURE"] = os.getenv("BAROS_COOKIE_SECURE", "false").lower() == "true"
+app.config["SESSION_COOKIE_SECURE"] = (
+    BAROS_COOKIE_SECURE.strip().lower() == "true"
+    if BAROS_COOKIE_SECURE is not None
+    else IS_PRODUCTION
+)
+
+validate_runtime_security()
 
 
 def utc_now_iso() -> str:
@@ -472,7 +500,56 @@ def apply_response_headers(response):
     return response
 
 
-def seed_user(db: sqlite3.Connection, username: str, password: str, role: str, display_name: str) -> None:
+def build_seed_staff_accounts() -> list[dict]:
+    accounts = []
+
+    admin_username = (os.getenv("BAROS_SEED_ADMIN_USERNAME") or LEGACY_SEED_ADMIN_USERNAME).strip()
+    admin_password = os.getenv("BAROS_SEED_ADMIN_PASSWORD") or LEGACY_SEED_ADMIN_PASSWORD
+    if admin_username and admin_password:
+        accounts.append(
+            {
+                "username": admin_username,
+                "password": admin_password,
+                "role": "admin",
+                "display_name": "Administrador",
+            }
+        )
+
+    operator_username = (os.getenv("BAROS_SEED_OPERATOR_USERNAME") or LEGACY_SEED_OPERATOR_USERNAME).strip()
+    operator_password = os.getenv("BAROS_SEED_OPERATOR_PASSWORD") or LEGACY_SEED_OPERATOR_PASSWORD
+    if operator_username and operator_password:
+        accounts.append(
+            {
+                "username": operator_username,
+                "password": operator_password,
+                "role": "operator",
+                "display_name": "Operacao",
+            }
+        )
+
+    if accounts:
+        return accounts
+
+    if not ALLOW_DEFAULT_SEED_USERS or IS_PRODUCTION:
+        return []
+
+    return [
+        {
+            "username": "admin",
+            "password": "bar123",
+            "role": "admin",
+            "display_name": "Administrador",
+        },
+        {
+            "username": "operacao",
+            "password": "bar123",
+            "role": "operator",
+            "display_name": "Operacao",
+        },
+    ]
+
+
+def seed_staff_user_if_missing(db: sqlite3.Connection, username: str, password: str, role: str, display_name: str) -> None:
     if not username or not password:
         return
 
@@ -483,14 +560,24 @@ def seed_user(db: sqlite3.Connection, username: str, password: str, role: str, d
     if existing:
         return
 
-    password_hash = generate_password_hash(password)
     db.execute(
         """
         INSERT INTO staff_users (username, password_hash, role, display_name, is_active, created_at, updated_at)
         VALUES (?, ?, ?, ?, 1, ?, ?)
         """,
-        (username, password_hash, role, display_name, utc_now_iso(), utc_now_iso()),
+        (username, generate_password_hash(password), role, display_name, utc_now_iso(), utc_now_iso()),
     )
+
+
+def validate_staff_bootstrap(db: sqlite3.Connection) -> None:
+    admin_total = db.execute(
+        "SELECT COUNT(*) AS total FROM staff_users WHERE role = 'admin' AND is_active = 1"
+    ).fetchone()["total"]
+    if IS_PRODUCTION and not admin_total:
+        raise RuntimeError(
+            "Nenhum usuario admin ativo foi encontrado. Configure BAROS_SEED_ADMIN_USERNAME e "
+            "BAROS_SEED_ADMIN_PASSWORD no primeiro deploy ou cadastre um admin no banco."
+        )
 
 
 def init_db() -> None:
@@ -723,8 +810,14 @@ def init_db() -> None:
                 {**note, "created_at": utc_now_iso()},
             )
 
-    seed_user(db, BAR_USERNAME, BAR_PASSWORD, "admin", "Administrador")
-    seed_user(db, BAR_OPERATOR_USERNAME, BAR_OPERATOR_PASSWORD, "operator", "Operacao")
+    for account in build_seed_staff_accounts():
+        seed_staff_user_if_missing(
+            db,
+            account["username"],
+            account["password"],
+            account["role"],
+            account["display_name"],
+        )
 
     open_shift = db.execute("SELECT id FROM turnos WHERE status = 'open' ORDER BY id DESC LIMIT 1").fetchone()
     if not open_shift:
@@ -834,15 +927,83 @@ def init_db() -> None:
         """
     )
 
+    validate_staff_bootstrap(db)
     db.commit()
     db.close()
+
+
+def is_api_request() -> bool:
+    return request.path.startswith("/api/")
+
+
+def is_staff_authenticated() -> bool:
+    return bool(session.get("bar_authenticated") and session.get("bar_user_id"))
+
+
+def authentication_required_response():
+    if is_api_request():
+        return jsonify({"error": "Faca login para continuar."}), 401
+    return redirect(url_for("staff_access"))
+
+
+def permission_denied_response():
+    if is_api_request():
+        return jsonify({"error": "Voce nao tem permissao para esta acao."}), 403
+    return redirect(url_for("dashboard"))
+
+
+def fetch_staff_user_by_id(user_id: int | None, db: sqlite3.Connection | None = None) -> sqlite3.Row | None:
+    if not user_id:
+        return None
+    connection = db or get_db()
+    return connection.execute(
+        """
+        SELECT id, username, password_hash, role, display_name, is_active, created_at, updated_at
+        FROM staff_users
+        WHERE id = ?
+        """,
+        (user_id,),
+    ).fetchone()
+
+
+def fetch_staff_user_by_username(username: str, db: sqlite3.Connection | None = None) -> sqlite3.Row | None:
+    normalized_username = (username or "").strip()
+    if not normalized_username:
+        return None
+    connection = db or get_db()
+    return connection.execute(
+        """
+        SELECT id, username, password_hash, role, display_name, is_active, created_at, updated_at
+        FROM staff_users
+        WHERE username = ?
+        """,
+        (normalized_username,),
+    ).fetchone()
+
+
+def authenticate_staff_user(username: str, password: str) -> sqlite3.Row | None:
+    user = fetch_staff_user_by_username(username)
+    if not user or not user["is_active"]:
+        return None
+    if not check_password_hash(user["password_hash"], password):
+        return None
+    return user
+
+
+def begin_staff_session(user: sqlite3.Row) -> None:
+    session.clear()
+    session["bar_authenticated"] = True
+    session["bar_user_id"] = user["id"]
+    session["bar_role"] = user["role"]
+    session["bar_display_name"] = user["display_name"]
+    session["bar_username"] = user["username"]
 
 
 def login_required(view):
     @wraps(view)
     def wrapped_view(*args, **kwargs):
-        if not session.get("bar_authenticated"):
-            return redirect(url_for("staff_access"))
+        if not is_staff_authenticated():
+            return authentication_required_response()
         return view(*args, **kwargs)
 
     return wrapped_view
@@ -852,12 +1013,10 @@ def role_required(*allowed_roles: str):
     def decorator(view):
         @wraps(view)
         def wrapped_view(*args, **kwargs):
-            if not session.get("bar_authenticated"):
-                return redirect(url_for("staff_access"))
+            if not is_staff_authenticated():
+                return authentication_required_response()
             if session.get("bar_role") not in allowed_roles:
-                if request.path.startswith("/api/"):
-                    return jsonify({"error": "Voce nao tem permissao para esta acao."}), 403
-                return redirect(url_for("dashboard"))
+                return permission_denied_response()
             return view(*args, **kwargs)
 
         return wrapped_view
@@ -869,11 +1028,164 @@ def get_current_user() -> dict:
     role = session.get("bar_role", "operator")
     return {
         "id": session.get("bar_user_id"),
+        "username": session.get("bar_username"),
         "display_name": session.get("bar_display_name", "Equipe"),
         "role": role,
         "role_label": ROLE_LABELS.get(role, role.title()),
         "can_manage_bar": role == "admin",
     }
+
+
+def validate_staff_username(username: str, label: str = "Usuario") -> str:
+    normalized = (username or "").strip()
+    if len(normalized) < 3:
+        raise ValueError(f"{label} precisa ter pelo menos 3 caracteres.")
+    if len(normalized) > 40:
+        raise ValueError(f"{label} nao pode passar de 40 caracteres.")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", normalized):
+        raise ValueError(f"{label} so pode usar letras, numeros, ponto, traco e underscore.")
+    return normalized
+
+
+def validate_staff_password(password: str, *, required: bool = True, label: str = "Senha") -> str:
+    normalized = password or ""
+    if not normalized:
+        if required:
+            raise ValueError(f"{label} e obrigatoria.")
+        return ""
+    if len(normalized) < 8:
+        raise ValueError(f"{label} precisa ter pelo menos 8 caracteres.")
+    return normalized
+
+
+def fetch_staff_settings_snapshot() -> dict:
+    db = get_db()
+    current_admin = fetch_staff_user_by_id(session.get("bar_user_id"), db=db)
+    operator_user = db.execute(
+        """
+        SELECT id, username, role, display_name, is_active
+        FROM staff_users
+        WHERE role = 'operator'
+        ORDER BY id ASC
+        LIMIT 1
+        """
+    ).fetchone()
+    return {
+        "admin": {
+            "id": current_admin["id"] if current_admin else None,
+            "username": current_admin["username"] if current_admin else "",
+            "display_name": current_admin["display_name"] if current_admin else "Administrador",
+        },
+        "operator": {
+            "id": operator_user["id"] if operator_user else None,
+            "username": operator_user["username"] if operator_user else "",
+            "display_name": operator_user["display_name"] if operator_user else "Operacao",
+            "is_active": bool(operator_user["is_active"]) if operator_user else True,
+        },
+    }
+
+
+def update_admin_credentials(user_id: int, form_data) -> str:
+    db = get_db()
+    current_user = fetch_staff_user_by_id(user_id, db=db)
+    if not current_user:
+        raise ValueError("Usuario admin nao encontrado.")
+
+    next_username = validate_staff_username(form_data.get("username", ""), "Usuario admin")
+    next_password = validate_staff_password(
+        form_data.get("new_password", ""),
+        required=False,
+        label="Nova senha do admin",
+    )
+    password_confirmation = form_data.get("confirm_password", "")
+    if next_password and next_password != password_confirmation:
+        raise ValueError("A confirmacao da nova senha do admin nao confere.")
+
+    duplicate = db.execute(
+        "SELECT id FROM staff_users WHERE username = ? AND id != ?",
+        (next_username, user_id),
+    ).fetchone()
+    if duplicate:
+        raise ValueError("Esse usuario admin ja esta em uso.")
+
+    db.execute(
+        """
+        UPDATE staff_users
+        SET username = ?, password_hash = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            next_username,
+            generate_password_hash(next_password) if next_password else current_user["password_hash"],
+            utc_now_iso(),
+            user_id,
+        ),
+    )
+
+    refreshed_user = fetch_staff_user_by_id(user_id, db=db)
+    if refreshed_user:
+        begin_staff_session(refreshed_user)
+    return "Credenciais do admin atualizadas com sucesso."
+
+
+def upsert_operator_account(form_data) -> str:
+    db = get_db()
+    username = validate_staff_username(form_data.get("operator_username", ""), "Usuario do operador")
+    display_name = sanitize_text(form_data.get("operator_display_name"), "Operacao", limit=48)
+    password = validate_staff_password(
+        form_data.get("operator_password", ""),
+        required=False,
+        label="Senha do operador",
+    )
+    is_active = 1 if checkbox_to_bool(form_data.get("operator_is_active")) else 0
+
+    operator_user = db.execute(
+        """
+        SELECT id, password_hash
+        FROM staff_users
+        WHERE role = 'operator'
+        ORDER BY id ASC
+        LIMIT 1
+        """
+    ).fetchone()
+    duplicate = db.execute(
+        """
+        SELECT id
+        FROM staff_users
+        WHERE username = ?
+          AND (? IS NULL OR id != ?)
+        """,
+        (username, operator_user["id"] if operator_user else None, operator_user["id"] if operator_user else None),
+    ).fetchone()
+    if duplicate:
+        raise ValueError("Esse usuario ja esta em uso por outro membro da equipe.")
+
+    if operator_user:
+        if not password:
+            password_hash = operator_user["password_hash"]
+        else:
+            password_hash = generate_password_hash(password)
+        db.execute(
+            """
+            UPDATE staff_users
+            SET username = ?, display_name = ?, password_hash = ?, is_active = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (username, display_name, password_hash, is_active, utc_now_iso(), operator_user["id"]),
+        )
+        return "Conta do operador atualizada com sucesso."
+
+    if not password:
+        raise ValueError("Informe uma senha para criar a conta do operador.")
+
+    db.execute(
+        """
+        INSERT INTO staff_users (username, password_hash, role, display_name, is_active, created_at, updated_at)
+        VALUES (?, ?, 'operator', ?, ?, ?, ?)
+        """,
+        (username, generate_password_hash(password), display_name, is_active, utc_now_iso(), utc_now_iso()),
+    )
+    return "Conta do operador criada com sucesso."
 
 
 def generate_order_code() -> str:
@@ -3064,24 +3376,26 @@ def index():
     )
 
 
+def build_dashboard_redirect(message: str | None = None, error: str | None = None):
+    params = {}
+    if message:
+        params["auth_message"] = message
+    if error:
+        params["auth_error"] = error
+    return redirect(url_for("dashboard", **params))
+
+
 def handle_staff_login():
+    if request.method == "GET" and is_staff_authenticated():
+        return redirect(url_for("dashboard"))
+
     error = None
     if request.method == "POST":
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
-        user = get_db().execute(
-            """
-            SELECT id, username, password_hash, role, display_name, is_active
-            FROM staff_users
-            WHERE username = ?
-            """,
-            (username,),
-        ).fetchone()
-        if user and user["is_active"] and check_password_hash(user["password_hash"], password):
-            session["bar_authenticated"] = True
-            session["bar_user_id"] = user["id"]
-            session["bar_role"] = user["role"]
-            session["bar_display_name"] = user["display_name"]
+        user = authenticate_staff_user(username, password)
+        if user:
+            begin_staff_session(user)
             return redirect(url_for("dashboard"))
         error = "Usuario ou senha invalidos."
     return render_template(
@@ -3114,6 +3428,7 @@ def logout():
 @app.get("/painel")
 @login_required
 def dashboard():
+    current_user = get_current_user()
     return render_template(
         "dashboard.html",
         summary=build_order_summary(),
@@ -3121,8 +3436,30 @@ def dashboard():
         shifts=fetch_shift_history(limit=5),
         preorder=fetch_preorder_settings(),
         current_shift_id=get_current_shift_id(),
-        current_user=get_current_user(),
+        current_user=current_user,
+        staff_settings=fetch_staff_settings_snapshot() if current_user["can_manage_bar"] else None,
+        auth_message=request.args.get("auth_message"),
+        auth_error=request.args.get("auth_error"),
     )
+
+
+@app.post("/painel/equipe/credenciais")
+@login_required
+@role_required("admin")
+def save_staff_credentials():
+    action = request.form.get("account_action", "").strip()
+    try:
+        if action == "admin_credentials":
+            message = update_admin_credentials(session.get("bar_user_id"), request.form)
+        elif action == "operator_account":
+            message = upsert_operator_account(request.form)
+        else:
+            raise ValueError("Acao de credenciais invalida.")
+        get_db().commit()
+        return build_dashboard_redirect(message=message)
+    except ValueError as error:
+        get_db().rollback()
+        return build_dashboard_redirect(error=str(error))
 
 
 @app.get("/painel/produtos")
