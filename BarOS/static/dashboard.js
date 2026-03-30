@@ -29,9 +29,16 @@ const brl = new Intl.NumberFormat("pt-BR", {
   currency: "BRL",
 });
 
+function setCloseoutModalState(isOpen) {
+  if (!closeoutModal) {
+    return;
+  }
+  closeoutModal.classList.toggle("hidden", !isOpen);
+  closeoutModal.setAttribute("aria-hidden", isOpen ? "false" : "true");
+}
+
 function closeCloseoutModal() {
-  closeoutModal?.classList.add("hidden");
-  closeoutModal?.setAttribute("aria-hidden", "true");
+  setCloseoutModalState(false);
 }
 
 function renderOrderItems(items) {
@@ -470,8 +477,7 @@ function renderCloseoutReport(report) {
         .join("")
     : '<p class="empty-inline">Nenhuma bebida vendida ainda.</p>';
 
-  closeoutModal.classList.remove("hidden");
-  closeoutModal.setAttribute("aria-hidden", "false");
+  setCloseoutModalState(true);
 }
 
 function applyDashboardSnapshot(data) {
@@ -538,8 +544,7 @@ async function resetData() {
       return;
     }
     if (!closeoutModal.classList.contains("hidden")) {
-      closeoutModal.classList.add("hidden");
-      closeoutModal.setAttribute("aria-hidden", "true");
+      setCloseoutModalState(false);
     }
     const data = await response.json();
     setCloseoutExportLink(data.closed_shift_id);

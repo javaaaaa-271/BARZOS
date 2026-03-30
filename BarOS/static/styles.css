@@ -899,6 +899,11 @@ img {
   align-items: center;
 }
 
+.dashboard-body {
+  display: block;
+  min-height: 100vh;
+}
+
 .auth-shell {
   padding: 42px 0;
   display: grid;
@@ -944,6 +949,11 @@ img {
 .dashboard-shell-premium .dashboard-header,
 .products-shell-premium .dashboard-header {
   margin-bottom: 8px;
+}
+
+.dashboard-shell-premium {
+  position: relative;
+  z-index: 1;
 }
 
 .stats-grid,
@@ -1003,6 +1013,7 @@ img {
 
 .dashboard-grid {
   grid-template-columns: 1.3fr 0.7fr;
+  align-items: start;
 }
 
 .panel-card-premium {
@@ -1014,6 +1025,12 @@ img {
 
 .wide-card {
   grid-column: 1 / -1;
+}
+
+.dashboard-shell-premium .panel-card {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .subpanel {
@@ -1112,6 +1129,7 @@ img {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
   gap: 16px;
   padding: 16px;
   border-radius: 18px;
@@ -1127,16 +1145,19 @@ img {
 }
 
 .inventory-copy {
+  flex: 1 1 220px;
   min-width: 220px;
 }
 
 .inventory-actions,
 .note-actions {
   display: flex;
+  flex: 1 1 260px;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
   justify-content: flex-end;
+  min-width: 0;
 }
 
 .inventory-input-group {
@@ -1237,6 +1258,11 @@ img {
 
 .hidden-link {
   display: none;
+}
+
+.modal.hidden,
+.modal[aria-hidden="true"] {
+  pointer-events: none;
 }
 
 .history-shell {
