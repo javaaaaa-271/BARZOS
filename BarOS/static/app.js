@@ -53,13 +53,12 @@ const paymentMethodLabels = {
 };
 const orderTypeLabels = {
   pista: "Pista",
-  bistro: "Bistrô",
   camarote: "Camarote",
 };
 
 const paymentMethodInstructions = {
   counter: "Voce paga no balcao ou no momento da retirada.",
-  pix: "Pague no Pix e aguarde a confirmacao do bar.",
+  pix: "Pague no Pix e aguarde a confirmacao. O pedido so sera liberado ao bar depois do pagamento.",
 };
 const PENDING_ORDER_STORAGE_KEY = "baros_pending_order_v1";
 const PENDING_ORDER_MAX_AGE_MS = 30 * 60 * 1000;
@@ -417,7 +416,7 @@ function resetCart() {
   buildSummary();
 }
 
-function showConfirmation(order, nextStepText) {
+function showConfirmation(order, nextStepText, { releasedToBar = true } = {}) {
   logCheckoutFlow("show_confirmation", {
     code: order.code,
     orderNumber: order.order_number,
@@ -427,12 +426,13 @@ function showConfirmation(order, nextStepText) {
   });
   confirmationCode.textContent = order.order_number || order.code;
   confirmationText.innerHTML = `
-    <strong>Order successfully sent to the bar</strong><br>
+    <strong>${releasedToBar ? "Order successfully sent to the bar" : "Pedido aguardando confirmacao do Pix"}</strong><br>
     ${nextStepText}<br>
     Tipo do pedido: ${order.order_type_label}.<br>
+    Status operacional: ${order.status_label}.<br>
     Forma de pagamento: ${order.payment_method_label}.<br>
     Status do pagamento: ${order.payment_status_label}.<br>
-    Proximo passo: acompanhe o preparo e siga a instrucao indicada.
+    Proximo passo: ${releasedToBar ? "acompanhe o preparo e siga a instrucao indicada." : "conclua o Pix e aguarde a confirmacao para liberar o pedido ao bar."}
   `;
   confirmationModal.classList.remove("hidden");
   confirmationModal.setAttribute("aria-hidden", "false");
@@ -554,13 +554,17 @@ async function submitOrder() {
   if (paymentMethod === "pix") {
     logCheckoutFlow("submit_order_branch", { branch: "pix", code: data.order?.code });
     populatePixConfirmation(data.order);
-    showConfirmation(data.order, "Pagamento iniciado por Pix. Use os dados abaixo para concluir.");
+    showConfirmation(
+      data.order,
+      "Seu pedido foi registrado, mas ainda nao foi liberado para o bar. Use os dados abaixo para concluir o Pix e aguarde a confirmacao.",
+      { releasedToBar: false },
+    );
     return;
   }
 
   logCheckoutFlow("submit_order_branch", { branch: "counter", code: data.order?.code });
   toggleConfirmationPayment(false);
-  showConfirmation(data.order, "Seu pedido foi enviado. Pagamento sera feito no balcao.");
+  showConfirmation(data.order, "Seu pedido foi enviado. Pagamento sera feito no balcao.", { releasedToBar: true });
 }
 
 async function copyPixCode() {

@@ -2,6 +2,7 @@ const dashboardConfig = window.BAROS_DASHBOARD || {};
 const canManageBar = Boolean(dashboardConfig.canManageBar);
 
 const pendingContainer = document.getElementById("pending-orders");
+const awaitingPaymentContainer = document.getElementById("awaiting-payment-orders");
 const completedContainer = document.getElementById("completed-orders");
 const topItemsContainer = document.getElementById("top-items");
 const topTablesContainer = document.getElementById("top-tables");
@@ -42,6 +43,7 @@ function renderOrderItems(items) {
 function renderOrderBadges(order) {
   return `
     <div class="order-badges">
+      <span class="status-pill neutral">${order.status_label}</span>
       <span class="status-pill neutral">${order.order_type_label}</span>
       <span class="status-pill neutral">${order.payment_method_label}</span>
       <span class="status-pill ${order.payment_status === "paid" ? "ok" : order.payment_status === "failed" ? "critical" : "attention"}">${order.payment_status_label}</span>
@@ -112,6 +114,39 @@ function renderCompleted(orders) {
                 : ""
             }
             <a class="ghost-button small-button" href="/pedidos/${order.code}/imprimir" target="_blank" rel="noopener">Imprimir</a>
+          </div>
+        </div>
+      </article>
+    `
+    )
+    .join("");
+}
+
+function renderAwaitingPayment(orders) {
+  if (!awaitingPaymentContainer) {
+    return;
+  }
+  if (!orders.length) {
+    awaitingPaymentContainer.innerHTML = '<p class="empty-inline">Nenhum pedido aguardando Pix no momento.</p>';
+    return;
+  }
+
+  awaitingPaymentContainer.innerHTML = orders
+    .map(
+      (order) => `
+      <article class="order-card">
+        <div class="order-meta">
+          <strong>Pedido ${order.order_number || order.code}</strong>
+          <span class="pill">${order.created_at}</span>
+        </div>
+        <h3>${order.customer_name}</h3>
+        <p>${order.table_label}</p>
+        ${renderOrderBadges(order)}
+        <ul>${renderOrderItems(order.items)}</ul>
+        <div class="order-actions">
+          <span class="muted-note">Aguardando confirmacao do Pix para liberar ao bar.</span>
+          <div class="order-actions-group">
+            <button class="ghost-button small-button" data-pay="${order.code}" type="button">Confirmar pagamento</button>
           </div>
         </div>
       </article>
@@ -298,6 +333,7 @@ function renderShiftHistory(shifts) {
 function updateSummary(summary) {
   document.getElementById("pending-count").textContent = summary.pending_count;
   document.getElementById("completed-count").textContent = summary.completed_count;
+  document.getElementById("awaiting-payment-count").textContent = summary.awaiting_payment_count || 0;
   document.getElementById("total-count").textContent = summary.total_count;
   document.getElementById("revenue-total").textContent = brl.format(summary.revenue);
   document.getElementById("average-ticket").textContent = brl.format(summary.average_ticket);
@@ -444,6 +480,7 @@ function applyDashboardSnapshot(data) {
   }
   refreshStatus.textContent = `Atualizado ${data.generated_at}`;
   updateSummary(data.summary);
+  renderAwaitingPayment(data.awaiting_payment || []);
   renderPending(data.pending);
   renderCompleted(data.completed);
   renderTopItems(data.summary.top_items);
@@ -522,6 +559,13 @@ pendingContainer?.addEventListener("click", (event) => {
   const button = event.target.closest("[data-complete]");
   if (button) {
     completeOrder(button.dataset.complete);
+  }
+});
+
+awaitingPaymentContainer?.addEventListener("click", (event) => {
+  const payButton = event.target.closest("[data-pay]");
+  if (payButton) {
+    payOrder(payButton.dataset.pay);
   }
 });
 
