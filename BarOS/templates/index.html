@@ -173,8 +173,6 @@
               <p>
                 {% if order_type.value == 'pista' %}
                 Pedido para atendimento direto no fluxo principal do bar.
-                {% elif order_type.value == 'bistro' %}
-                Pedido para area de bistro com identificacao separada no painel.
                 {% else %}
                 Pedido para camarote com destaque para a equipe.
                 {% endif %}
@@ -197,7 +195,7 @@
                 {% if method.value == 'counter' %}
                 Voce paga no balcao ou no momento da retirada.
                 {% else %}
-                O pedido vai para o fluxo Pix e fica aguardando confirmacao.
+                O pedido fica aguardando confirmacao do Pix e so e liberado ao bar depois do pagamento.
                 {% endif %}
               </p>
             </div>

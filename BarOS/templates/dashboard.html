@@ -43,6 +43,10 @@
       <strong id="completed-count">{{ summary.completed_count }}</strong>
     </article>
     <article class="stat-card stat-card-highlight">
+      <span>Aguardando Pix</span>
+      <strong id="awaiting-payment-count">{{ summary.awaiting_payment_count }}</strong>
+    </article>
+    <article class="stat-card stat-card-highlight">
       <span>Total de pedidos</span>
       <strong id="total-count">{{ summary.total_count }}</strong>
     </article>
@@ -128,6 +132,16 @@
         <span class="pill" id="refresh-status">Atualizando...</span>
       </div>
       <div id="pending-orders" class="order-list"></div>
+    </article>
+
+    <article class="panel-card panel-card-premium">
+      <div class="panel-head">
+        <div>
+          <p class="mini-label">Pix</p>
+          <h2>Aguardando confirmacao</h2>
+        </div>
+      </div>
+      <div id="awaiting-payment-orders" class="order-list"></div>
     </article>
 
     <article class="panel-card panel-card-premium">
