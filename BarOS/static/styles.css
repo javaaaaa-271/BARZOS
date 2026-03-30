@@ -17,6 +17,12 @@
   box-sizing: border-box;
 }
 
+html,
+body {
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
 body {
   margin: 0;
   color: var(--text);
@@ -48,6 +54,10 @@ input {
   font: inherit;
 }
 
+img {
+  max-width: 100%;
+}
+
 .eyebrow,
 .mini-label,
 .tag,
@@ -63,6 +73,7 @@ input {
 .auth-shell {
   width: min(1180px, calc(100% - 32px));
   margin: 0 auto;
+  min-width: 0;
 }
 
 .customer-shell,
@@ -116,6 +127,17 @@ input {
   margin: 10px 0 14px;
   font-size: clamp(2.3rem, 5vw, 4.4rem);
   line-height: 0.98;
+}
+
+.hero-copy,
+.hero-card,
+.menu-card,
+.panel-card,
+.summary-item > div,
+.order-card,
+.inventory-copy,
+.note-row > div:first-child {
+  min-width: 0;
 }
 
 .hero-text,
@@ -386,6 +408,10 @@ input {
   gap: 8px;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.dashboard-actions {
+  flex-wrap: wrap;
 }
 
 .menu-card-meta-row {
@@ -703,6 +729,27 @@ input {
   justify-content: flex-start;
 }
 
+.checkout-flow-steps {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.flow-step {
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-family: "IBM Plex Mono", monospace;
+}
+
+.flow-step.is-active {
+  color: var(--text);
+  border-color: rgba(242, 179, 93, 0.35);
+}
+
 .checkout-review-total {
   display: flex;
   justify-content: space-between;
@@ -827,6 +874,12 @@ input {
   padding-top: 16px;
   border-top: 1px solid var(--line);
   flex-wrap: wrap;
+  position: sticky;
+  bottom: 0;
+  background:
+    linear-gradient(180deg, rgba(21, 32, 45, 0), rgba(21, 32, 45, 0.96) 24%),
+    var(--panel-strong);
+  z-index: 2;
 }
 
 .modal-close-button {
@@ -900,7 +953,7 @@ input {
 }
 
 .stats-grid {
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   margin: 26px 0 18px;
 }
 
@@ -1542,6 +1595,10 @@ input {
 }
 
 @media (max-width: 640px) {
+  body {
+    font-size: 15px;
+  }
+
   .customer-shell,
   .dashboard-shell,
   .auth-shell {
@@ -1580,7 +1637,7 @@ input {
   }
 
   .customer-shell {
-    padding-bottom: 220px;
+    padding-bottom: 260px;
   }
 
   .checkout-panel {
@@ -1602,12 +1659,12 @@ input {
   }
 
   .hero-copy h1 {
-    font-size: clamp(1.9rem, 10vw, 2.7rem);
+    font-size: clamp(1.6rem, 8vw, 2.25rem);
     line-height: 1.02;
   }
 
   .hero-text {
-    font-size: 0.95rem;
+    font-size: 0.88rem;
     line-height: 1.55;
   }
 
@@ -1646,7 +1703,7 @@ input {
   }
 
   .customer-meta-help {
-    font-size: 0.74rem;
+    font-size: 0.68rem;
   }
 
   .menu-section {
@@ -1674,12 +1731,12 @@ input {
   }
 
   .menu-card h3 {
-    font-size: 1.2rem;
+    font-size: 1.05rem;
     line-height: 1.2;
   }
 
   .menu-card p {
-    font-size: 0.95rem;
+    font-size: 0.86rem;
   }
 
   .menu-card-bottom {
@@ -1688,7 +1745,7 @@ input {
   }
 
   .menu-price {
-    font-size: 1.5rem;
+    font-size: 1.28rem;
   }
 
   .qty-picker {
@@ -1704,7 +1761,7 @@ input {
 
   .qty-value {
     flex: 1;
-    font-size: 1.15rem;
+    font-size: 1rem;
   }
 
   .checkout-panel .summary-list {
@@ -1712,7 +1769,7 @@ input {
   }
 
   .checkout-header h2 {
-    font-size: 1.1rem;
+    font-size: 1rem;
   }
 
   .checkout-panel.is-collapsed .checkout-footer {
@@ -1747,7 +1804,7 @@ input {
   }
 
   .total-line strong {
-    font-size: 1.24rem;
+    font-size: 1.12rem;
   }
 
   .primary-button,
@@ -1781,12 +1838,17 @@ input {
   }
 
   .modal-header h2 {
-    font-size: 1.3rem;
+    font-size: 1.12rem;
     line-height: 1.2;
   }
 
   .checkout-review-total {
     padding: 14px 16px;
+  }
+
+  .flow-step {
+    width: 100%;
+    text-align: center;
   }
 
   .checkout-payment-option {
@@ -1798,5 +1860,12 @@ input {
     width: 22px;
     height: 22px;
     margin-top: 2px;
+  }
+
+  .checkout-payment-option strong,
+  .summary-item strong,
+  .order-card h3,
+  .stat-card strong {
+    word-break: break-word;
   }
 }

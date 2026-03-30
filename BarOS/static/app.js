@@ -25,13 +25,13 @@ const checkoutError = document.getElementById("checkout-error");
 const checkoutSubmitButton = document.getElementById("confirm-checkout-submit");
 const closeCheckoutModalButton = document.getElementById("close-checkout-modal");
 const closeCheckoutModalTopButton = document.getElementById("close-checkout-modal-top");
+const checkoutOrderTypeInputs = Array.from(document.querySelectorAll('input[name="checkout-order-type"]'));
 const checkoutPaymentInputs = Array.from(document.querySelectorAll('input[name="checkout-payment-method"]'));
 
 const confirmationModal = document.getElementById("confirmation-modal");
 const confirmationCode = document.getElementById("confirmation-code");
 const confirmationText = document.getElementById("confirmation-text");
-
-const pixModal = document.getElementById("pix-modal");
+const confirmationPaymentSection = document.getElementById("confirmation-payment-section");
 const pixOrderCode = document.getElementById("pix-order-code");
 const pixPaymentStatus = document.getElementById("pix-payment-status");
 const pixPaymentInstruction = document.getElementById("pix-payment-instruction");
@@ -40,17 +40,21 @@ const pixQrPlaceholder = document.getElementById("pix-qr-placeholder");
 const pixCopyPaste = document.getElementById("pix-copy-paste");
 const pixError = document.getElementById("pix-error");
 const copyPixCodeButton = document.getElementById("copy-pix-code");
-const closePixModalTopButton = document.getElementById("close-pix-modal-top");
 
 let checkoutCollapsed = false;
-let currentPixOrder = null;
 let checkoutPanelWasCollapsedBeforeModal = false;
 let checkoutPanelHiddenForFlow = false;
 let lastResponsiveMobileState = null;
+let isSubmittingOrder = false;
 
 const paymentMethodLabels = {
   counter: "Pagar no balcao",
   pix: "Pix",
+};
+const orderTypeLabels = {
+  pista: "Pista",
+  bistro: "Bistrô",
+  camarote: "Camarote",
 };
 
 const paymentMethodInstructions = {
@@ -90,6 +94,7 @@ function buildOrderFingerprint(payload) {
     customer_name: (payload.customer_name || "").trim(),
     table_label: (payload.table_label || "").trim(),
     source: payload.source || "",
+    order_type: payload.order_type || "",
     payment_method: payload.payment_method || "",
     items: normalizeItemsForIdempotency(payload.items),
   });
@@ -172,6 +177,9 @@ function restorePendingOrderDraft() {
   checkoutPaymentInputs.forEach((input) => {
     input.checked = input.value === draft.payload.payment_method;
   });
+  checkoutOrderTypeInputs.forEach((input) => {
+    input.checked = input.value === (draft.payload.order_type || "pista");
+  });
 }
 
 function getSelectedItems() {
@@ -185,6 +193,11 @@ function getSelectedItems() {
 
 function getSelectedPaymentMethod() {
   const selected = checkoutPaymentInputs.find((input) => input.checked);
+  return selected ? selected.value : "";
+}
+
+function getSelectedOrderType() {
+  const selected = checkoutOrderTypeInputs.find((input) => input.checked);
   return selected ? selected.value : "";
 }
 
@@ -202,6 +215,11 @@ function setPixError(message = "") {
   }
   pixError.textContent = message;
   pixError.classList.toggle("hidden", !message);
+}
+
+function toggleConfirmationPayment(visible) {
+  confirmationPaymentSection?.classList.toggle("hidden", !visible);
+  copyPixCodeButton?.classList.toggle("hidden", !visible);
 }
 
 function updateCardQuantity(card, nextQuantity) {
@@ -274,12 +292,17 @@ function renderSummaryRows(selected) {
 }
 
 function updateCheckoutInstruction() {
+  const orderType = getSelectedOrderType();
   const paymentMethod = getSelectedPaymentMethod();
+  if (!orderType) {
+    checkoutInstruction.textContent = "Escolha o tipo do pedido para seguir.";
+    return;
+  }
   if (!paymentMethod) {
     checkoutInstruction.textContent = "Escolha como pagar para liberar o envio.";
     return;
   }
-  checkoutInstruction.textContent = paymentMethodInstructions[paymentMethod] || "Confirme como vai pagar para seguir.";
+  checkoutInstruction.textContent = `${paymentMethodInstructions[paymentMethod] || "Confirme como vai pagar para seguir."} Tipo selecionado: ${orderTypeLabels[orderType] || orderType}.`;
 }
 
 function syncCheckoutReview() {
@@ -361,9 +384,9 @@ function openCheckoutModal() {
     total: selected.reduce((sum, item) => sum + item.price * item.quantity, 0),
   });
   setCheckoutError("");
-  checkoutPaymentInputs.forEach((input) => {
-    input.checked = false;
-  });
+  if (!getSelectedOrderType() && checkoutOrderTypeInputs[0]) {
+    checkoutOrderTypeInputs[0].checked = true;
+  }
   syncCheckoutReview();
   updateCheckoutInstruction();
   hideCheckoutPanelForFlow();
@@ -383,16 +406,9 @@ function closeCheckoutModal({ restorePanel = true } = {}) {
 function closeConfirmationModal() {
   confirmationModal?.classList.add("hidden");
   confirmationModal?.setAttribute("aria-hidden", "true");
-  showCheckoutPanelAfterFlow();
-}
-
-function closePixModal({ restorePanel = true } = {}) {
-  pixModal?.classList.add("hidden");
-  pixModal?.setAttribute("aria-hidden", "true");
+  toggleConfirmationPayment(false);
   setPixError("");
-  if (restorePanel) {
-    showCheckoutPanelAfterFlow();
-  }
+  showCheckoutPanelAfterFlow();
 }
 
 function resetCart() {
@@ -405,12 +421,15 @@ function showConfirmation(order, nextStepText) {
   logCheckoutFlow("show_confirmation", {
     code: order.code,
     orderNumber: order.order_number,
+    orderType: order.order_type,
     paymentMethod: order.payment_method,
     paymentStatus: order.payment_status,
   });
   confirmationCode.textContent = order.order_number || order.code;
   confirmationText.innerHTML = `
-    <strong>${nextStepText}</strong><br>
+    <strong>Order successfully sent to the bar</strong><br>
+    ${nextStepText}<br>
+    Tipo do pedido: ${order.order_type_label}.<br>
     Forma de pagamento: ${order.payment_method_label}.<br>
     Status do pagamento: ${order.payment_status_label}.<br>
     Proximo passo: acompanhe o preparo e siga a instrucao indicada.
@@ -419,19 +438,20 @@ function showConfirmation(order, nextStepText) {
   confirmationModal.setAttribute("aria-hidden", "false");
 }
 
-function populatePixModal(order) {
-  logCheckoutFlow("open_pix_modal", {
+function populatePixConfirmation(order) {
+  logCheckoutFlow("show_pix_confirmation", {
     code: order.code,
+    orderNumber: order.order_number,
     paymentMethod: order.payment_method,
     paymentStatus: order.payment_status,
     hasQr: Boolean(order.pix_qr_code),
     hasCopyPaste: Boolean(order.pix_copy_paste),
   });
-  currentPixOrder = order;
   pixOrderCode.textContent = order.order_number || order.code;
   pixPaymentStatus.textContent = order.payment_status_label;
   pixPaymentInstruction.textContent = "Escaneie o QR code ou copie a chave Pix abaixo. Depois do pagamento, o bar confirma internamente.";
   pixCopyPaste.value = order.pix_copy_paste || "";
+  setPixError("");
 
   if (order.pix_qr_code) {
     pixQrImage.src = order.pix_qr_code;
@@ -443,19 +463,25 @@ function populatePixModal(order) {
     pixQrPlaceholder.classList.remove("hidden");
     pixQrPlaceholder.textContent = "PIX";
   }
-
-  pixModal?.classList.remove("hidden");
-  pixModal?.setAttribute("aria-hidden", "false");
+  toggleConfirmationPayment(true);
 }
 
 async function submitOrder() {
+  if (isSubmittingOrder) {
+    return;
+  }
   const selectedItems = [...cart.entries()].map(([id, quantity]) => ({ id, quantity }));
   if (!selectedItems.length) {
     return;
   }
 
+  const orderType = getSelectedOrderType();
   const paymentMethod = getSelectedPaymentMethod();
-  logCheckoutFlow("selected_payment_method", { paymentMethod });
+  logCheckoutFlow("selected_checkout_options", { orderType, paymentMethod });
+  if (!orderType) {
+    setCheckoutError("Escolha o tipo do pedido antes de enviar.");
+    return;
+  }
   if (!paymentMethod) {
     setCheckoutError("Escolha como voce vai pagar antes de enviar o pedido.");
     return;
@@ -464,6 +490,7 @@ async function submitOrder() {
   const customerName = customerNameInput?.value.trim() || "";
   const tableLabel = tableLabelInput?.value.trim() || "";
 
+  isSubmittingOrder = true;
   checkoutSubmitButton.disabled = true;
   checkoutSubmitButton.textContent = "Enviando...";
   setCheckoutError("");
@@ -472,6 +499,7 @@ async function submitOrder() {
     customer_name: customerName,
     table_label: tableLabel,
     source: "menu-digital",
+    order_type: orderType,
     payment_method: paymentMethod,
     items: selectedItems,
   };
@@ -497,6 +525,7 @@ async function submitOrder() {
     });
   } catch (error) {
     console.error(error);
+    isSubmittingOrder = false;
     checkoutSubmitButton.disabled = false;
     checkoutSubmitButton.textContent = "Enviar pedido";
     setCheckoutError("Nao foi possivel enviar agora. Tente novamente que o sistema reaproveita a mesma tentativa com seguranca.");
@@ -509,6 +538,7 @@ async function submitOrder() {
     status: response.status,
     data,
   });
+  isSubmittingOrder = false;
   checkoutSubmitButton.disabled = false;
   checkoutSubmitButton.textContent = "Enviar pedido";
 
@@ -523,11 +553,13 @@ async function submitOrder() {
 
   if (paymentMethod === "pix") {
     logCheckoutFlow("submit_order_branch", { branch: "pix", code: data.order?.code });
-    populatePixModal(data.order);
+    populatePixConfirmation(data.order);
+    showConfirmation(data.order, "Pagamento iniciado por Pix. Use os dados abaixo para concluir.");
     return;
   }
 
   logCheckoutFlow("submit_order_branch", { branch: "counter", code: data.order?.code });
+  toggleConfirmationPayment(false);
   showConfirmation(data.order, "Seu pedido foi enviado. Pagamento sera feito no balcao.");
 }
 
@@ -587,12 +619,18 @@ checkoutPaymentInputs.forEach((input) => {
   });
 });
 
+checkoutOrderTypeInputs.forEach((input) => {
+  input.addEventListener("change", () => {
+    setCheckoutError("");
+    updateCheckoutInstruction();
+  });
+});
+
 document.getElementById("close-confirmation")?.addEventListener("click", closeConfirmationModal);
 copyPixCodeButton?.addEventListener("click", copyPixCode);
-closePixModalTopButton?.addEventListener("click", closePixModal);
-pixModal?.addEventListener("click", (event) => {
-  if (event.target === pixModal) {
-    closePixModal();
+confirmationModal?.addEventListener("click", (event) => {
+  if (event.target === confirmationModal) {
+    closeConfirmationModal();
   }
 });
 
@@ -600,10 +638,6 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     if (!checkoutModal?.classList.contains("hidden")) {
       closeCheckoutModal();
-      return;
-    }
-    if (!pixModal?.classList.contains("hidden")) {
-      closePixModal();
       return;
     }
     if (!confirmationModal?.classList.contains("hidden")) {

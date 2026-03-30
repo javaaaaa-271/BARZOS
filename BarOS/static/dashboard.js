@@ -39,6 +39,16 @@ function renderOrderItems(items) {
     .join("");
 }
 
+function renderOrderBadges(order) {
+  return `
+    <div class="order-badges">
+      <span class="status-pill neutral">${order.order_type_label}</span>
+      <span class="status-pill neutral">${order.payment_method_label}</span>
+      <span class="status-pill ${order.payment_status === "paid" ? "ok" : order.payment_status === "failed" ? "critical" : "attention"}">${order.payment_status_label}</span>
+    </div>
+  `;
+}
+
 function renderPending(orders) {
   if (!orders.length) {
     pendingContainer.innerHTML = '<p class="empty-inline">Nenhum pedido aguardando preparo.</p>';
@@ -55,10 +65,7 @@ function renderPending(orders) {
         </div>
         <h3>${order.customer_name}</h3>
         <p>${order.table_label}</p>
-        <div class="order-badges">
-          <span class="status-pill neutral">${order.payment_method_label}</span>
-          <span class="status-pill ${order.payment_status === "paid" ? "ok" : order.payment_status === "failed" ? "critical" : "attention"}">${order.payment_status_label}</span>
-        </div>
+        ${renderOrderBadges(order)}
         <ul>${renderOrderItems(order.items)}</ul>
         <div class="order-actions">
           <span class="muted-note">Total ${brl.format(order.total)}</span>
@@ -94,10 +101,7 @@ function renderCompleted(orders) {
         </div>
         <h3>${order.customer_name}</h3>
         <p>${order.table_label} / concluido em ${order.completed_at || order.created_at}</p>
-        <div class="order-badges">
-          <span class="status-pill neutral">${order.payment_method_label}</span>
-          <span class="status-pill ${order.payment_status === "paid" ? "ok" : order.payment_status === "failed" ? "critical" : "attention"}">${order.payment_status_label}</span>
-        </div>
+        ${renderOrderBadges(order)}
         <ul>${renderOrderItems(order.items)}</ul>
         <div class="order-actions">
           <span class="muted-note">Total ${brl.format(order.total)}</span>
@@ -297,6 +301,10 @@ function updateSummary(summary) {
   document.getElementById("total-count").textContent = summary.total_count;
   document.getElementById("revenue-total").textContent = brl.format(summary.revenue);
   document.getElementById("average-ticket").textContent = brl.format(summary.average_ticket);
+  const peakTime = document.getElementById("peak-time");
+  if (peakTime) {
+    peakTime.textContent = summary.peak_time_label || "Sem dados";
+  }
 }
 
 function updateLogistics(logistics) {
@@ -395,11 +403,11 @@ function renderCloseoutReport(report) {
     : "Sem dados";
 
   closeoutContent.innerHTML = [
-    ["Total recebido", brl.format(report.total_recebido ?? report.total_vendido)],
-    ["Total de pedidos", String(report.total_pedidos)],
+    ["Total revenue", brl.format(report.total_recebido ?? report.total_vendido)],
+    ["Total number of orders", String(report.total_pedidos)],
+    ["Most ordered items", mostOrdered],
+    ["Peak time", peakHour],
     ["Itens vendidos", String(report.total_itens_vendidos)],
-    ["Bebida mais pedida", mostOrdered],
-    ["Pico de atendimento", peakHour],
     ["Custo total", brl.format(report.custo_total)],
     ["Lucro estimado", brl.format(report.lucro_estimado)],
   ]
@@ -449,7 +457,7 @@ async function closeBar() {
     return;
   }
   closeoutRequestInFlight = true;
-  setButtonBusy(closeBarButton, true, "Fechando...", "Fechar bar");
+  setButtonBusy(closeBarButton, true, "Closing...", "Close Bar");
   try {
     const response = await fetch("/api/reports/closeout", {
       method: "POST",
@@ -467,7 +475,7 @@ async function closeBar() {
     applyDashboardSnapshot(data);
   } finally {
     closeoutRequestInFlight = false;
-    setButtonBusy(closeBarButton, false, "Fechando...", "Fechar bar");
+    setButtonBusy(closeBarButton, false, "Closing...", "Close Bar");
   }
 }
 
