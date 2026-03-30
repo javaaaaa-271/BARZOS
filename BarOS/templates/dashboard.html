@@ -17,7 +17,7 @@
       {% if current_user.can_manage_bar %}
       <a class="secondary-button" href="{{ url_for('preorder_page') }}">Pre-Order</a>
       <a class="secondary-button" href="{{ url_for('products_page') }}">Produtos</a>
-      <button class="primary-button" type="button" id="close-bar-button">Fechar bar</button>
+      <button class="primary-button" type="button" id="close-bar-button">Close Bar</button>
       <button class="ghost-button" type="button" id="reset-data-button">Resetar dados</button>
       {% endif %}
       <form method="post" action="{{ url_for('logout') }}">
@@ -46,6 +46,10 @@
     <article class="stat-card stat-card-highlight">
       <span>Ticket medio</span>
       <strong id="average-ticket">R$ {{ "%.2f"|format(summary.average_ticket) }}</strong>
+    </article>
+    <article class="stat-card stat-card-highlight">
+      <span>Horario de pico</span>
+      <strong id="peak-time">{{ summary.peak_time_label }}</strong>
     </article>
   </section>
 

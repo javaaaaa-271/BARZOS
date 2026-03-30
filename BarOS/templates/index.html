@@ -124,7 +124,7 @@
         <strong id="order-total">R$ 0,00</strong>
       </div>
       <button id="submit-order" class="primary-button" type="button" disabled>Finalizar pedido</button>
-      <p class="muted-note">Na proxima etapa voce revisa o pedido e escolhe como pagar.</p>
+      <p class="muted-note">Fluxo rapido: menu, checkout e confirmacao.</p>
     </div>
   </aside>
 
@@ -147,7 +147,12 @@
 
     <div class="modal-scroll-area checkout-review-shell">
       <div class="checkout-stage-note">
-        <span class="pill subtle-pill">Ultima etapa antes do envio</span>
+        <span class="pill subtle-pill">Etapa 2 de 3</span>
+      </div>
+      <div class="checkout-flow-steps" aria-hidden="true">
+        <span class="flow-step">1. Menu</span>
+        <span class="flow-step is-active">2. Checkout</span>
+        <span class="flow-step">3. Confirmacao</span>
       </div>
 
       <div id="checkout-review-summary" class="summary-list"></div>
@@ -156,6 +161,29 @@
         <span>Total do pedido</span>
         <strong id="checkout-review-total">R$ 0,00</strong>
       </div>
+
+      <section class="checkout-payment-section">
+        <p class="mini-label">Tipo do pedido</p>
+        <div class="checkout-payment-options">
+          {% for order_type in order_types %}
+          <label class="checkout-payment-option">
+            <input type="radio" name="checkout-order-type" value="{{ order_type.value }}" {% if loop.first %}checked{% endif %}>
+            <div>
+              <strong>{{ order_type.label }}</strong>
+              <p>
+                {% if order_type.value == 'pista' %}
+                Pedido para atendimento direto no fluxo principal do bar.
+                {% elif order_type.value == 'bistro' %}
+                Pedido para area de bistro com identificacao separada no painel.
+                {% else %}
+                Pedido para camarote com destaque para a equipe.
+                {% endif %}
+              </p>
+            </div>
+          </label>
+          {% endfor %}
+        </div>
+      </section>
 
       <section class="checkout-payment-section">
         <p class="mini-label">Forma de pagamento</p>
@@ -193,29 +221,17 @@
 
 <section id="confirmation-modal" class="modal hidden" aria-hidden="true">
   <div class="modal-card">
+    <div class="checkout-stage-note">
+      <span class="pill subtle-pill">Etapa 3 de 3</span>
+    </div>
     <p class="eyebrow">Pedido enviado</p>
     <h2>Pedido <span id="confirmation-code">----</span></h2>
-    <p id="confirmation-text">Seu pedido foi enviado para o bar.</p>
-    <button class="secondary-button full-width" type="button" id="close-confirmation">Novo pedido</button>
-  </div>
-</section>
-
-<section id="pix-modal" class="modal hidden" aria-hidden="true">
-  <div class="modal-card pix-modal-card">
-    <div class="modal-header">
-      <div>
-        <p class="eyebrow">Pagamento Pix</p>
-        <h2>Finalize o pedido <span id="pix-order-code">-----</span></h2>
-      </div>
-      <button class="ghost-button small-button modal-close-button" type="button" id="close-pix-modal-top" aria-label="Fechar pagamento Pix">
-        Fechar
-      </button>
-    </div>
-
-    <div class="modal-scroll-area pix-payment-shell">
+    <p id="confirmation-text">Order successfully sent to the bar.</p>
+    <div id="confirmation-payment-section" class="modal-scroll-area pix-payment-shell hidden">
       <div class="pix-preview-card">
         <div class="pix-preview-copy">
-          <p class="mini-label">Status atual</p>
+          <p class="mini-label">Pagamento Pix</p>
+          <strong id="pix-order-code" class="hidden">-----</strong>
           <strong id="pix-payment-status">Pendente</strong>
           <p id="pix-payment-instruction" class="checkout-instruction">Escaneie o QR code ou use o copia e cola abaixo para pagar.</p>
         </div>
@@ -232,9 +248,9 @@
 
       <p id="pix-error" class="alert hidden"></p>
     </div>
-
     <div class="modal-actions">
-      <button class="secondary-button full-width" type="button" id="copy-pix-code">Copiar chave</button>
+      <button class="secondary-button full-width hidden" type="button" id="copy-pix-code">Copiar chave Pix</button>
+      <button class="secondary-button full-width" type="button" id="close-confirmation">Novo pedido</button>
     </div>
   </div>
 </section>

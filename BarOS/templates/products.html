@@ -40,6 +40,10 @@
             <input type="text" name="name" placeholder="Ex.: Gin Tropical" required>
           </label>
           <label>
+            <span>Tipo / categoria</span>
+            <input type="text" name="category" list="product-category-options" value="Bebida" placeholder="Ex.: Bebida, Bistrô, Fogos ou Letreiro" required>
+          </label>
+          <label>
             <span>Descricao</span>
             <textarea name="description" rows="3" placeholder="Resumo curto exibido no cardapio"></textarea>
           </label>
@@ -166,6 +170,10 @@
                     <input type="text" name="price" value="{{ '%.2f'|format(product.price) }}" required>
                   </label>
                 </div>
+                <label>
+                  <span>Tipo / categoria</span>
+                  <input type="text" name="category" list="product-category-options" value="{{ product.category }}" required>
+                </label>
                 <div class="form-grid-two">
                   <label>
                     <span>Custo estimado</span>
@@ -297,4 +305,10 @@
     </div>
   </section>
 </main>
+
+<datalist id="product-category-options">
+  {% for category in product_category_options %}
+  <option value="{{ category }}"></option>
+  {% endfor %}
+</datalist>
 {% endblock %}
