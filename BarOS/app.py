@@ -61,6 +61,23 @@ PAYMENT_STATUS_LABELS = {
     "failed": "Falhou",
     "cancelled": "Cancelado",
 }
+ORDER_TYPE_LABELS = {
+    "pista": "Pista",
+    "bistro": "Bistrô",
+    "camarote": "Camarote",
+}
+PRODUCT_CATEGORY_OPTIONS = [
+    "Bebida",
+    "Bistrô",
+    "Fogos",
+    "Letreiro",
+    "Autoral",
+    "Classico",
+    "Assinatura",
+    "Premium",
+    "Leve",
+    "Chopp",
+]
 ACTIVE_ORDER_STATUSES = ("new", "pending")
 PREORDER_ACTIVE_STATUSES = ("new", "preparing")
 try:
@@ -356,6 +373,10 @@ def sanitize_optional_text(value: str | None, limit: int = 255) -> str:
     return (value or "").strip()[:limit]
 
 
+def normalize_product_category(raw_value: str | None) -> str:
+    return sanitize_text(raw_value, "Bebida", limit=32)
+
+
 def parse_decimal_input(raw_value: str | None, label: str, minimum: float = 0.0) -> float:
     cleaned = (raw_value or "").strip().replace(",", ".")
     try:
@@ -606,6 +627,8 @@ def init_db() -> None:
         db.execute("ALTER TABLE pedidos ADD COLUMN pix_copy_paste TEXT")
     if "request_id" not in pedido_columns:
         db.execute("ALTER TABLE pedidos ADD COLUMN request_id TEXT")
+    if "order_type" not in pedido_columns:
+        db.execute("ALTER TABLE pedidos ADD COLUMN order_type TEXT")
     db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_pedidos_request_id ON pedidos(request_id)")
 
     order_item_columns = [row["name"] for row in db.execute("PRAGMA table_info(itens_pedido)").fetchall()]
@@ -738,6 +761,9 @@ def init_db() -> None:
     )
     db.execute(
         "UPDATE pedidos SET payment_status = 'pending' WHERE payment_status IS NULL OR TRIM(payment_status) = ''"
+    )
+    db.execute(
+        "UPDATE pedidos SET order_type = 'pista' WHERE order_type IS NULL OR TRIM(order_type) = ''"
     )
     db.execute(
         """
@@ -925,6 +951,17 @@ def normalize_request_id(raw_value: str | None) -> str | None:
     return value or None
 
 
+def normalize_order_type(raw_value: str | None, fallback: str = "pista") -> str | None:
+    value = sanitize_optional_text(raw_value, limit=24).lower()
+    if not value:
+        return fallback
+    return value if value in ORDER_TYPE_LABELS else None
+
+
+def get_order_type_label(order_type: str | None) -> str:
+    return ORDER_TYPE_LABELS.get(order_type or "", ORDER_TYPE_LABELS["pista"])
+
+
 def fetch_order_row_by_code(code: str, shift_id: int | None = None) -> sqlite3.Row | None:
     query = """
         SELECT
@@ -941,6 +978,7 @@ def fetch_order_row_by_code(code: str, shift_id: int | None = None) -> sqlite3.R
             order_number,
             payment_method,
             payment_status,
+            order_type,
             payment_provider,
             payment_provider_id,
             paid_at,
@@ -973,6 +1011,7 @@ def fetch_order_row_by_request_id(request_id: str) -> sqlite3.Row | None:
             order_number,
             payment_method,
             payment_status,
+            order_type,
             payment_provider,
             payment_provider_id,
             paid_at,
@@ -1810,6 +1849,10 @@ def serialize_order(row: sqlite3.Row) -> dict:
         "payment_status_label": get_payment_status_label(
             row["payment_status"] if "payment_status" in row.keys() else "pending"
         ),
+        "order_type": normalize_order_type(row["order_type"] if "order_type" in row.keys() else "pista") or "pista",
+        "order_type_label": get_order_type_label(
+            normalize_order_type(row["order_type"] if "order_type" in row.keys() else "pista") or "pista"
+        ),
         "payment_provider": row["payment_provider"] if "payment_provider" in row.keys() and row["payment_provider"] else None,
         "payment_provider_id": row["payment_provider_id"] if "payment_provider_id" in row.keys() and row["payment_provider_id"] else None,
         "pix_qr_code": row["pix_qr_code"] if "pix_qr_code" in row.keys() and row["pix_qr_code"] else None,
@@ -1844,6 +1887,7 @@ def fetch_orders(status: str | None = None, limit: int | None = None, shift_id: 
             order_number,
             payment_method,
             payment_status,
+            order_type,
             payment_provider,
             payment_provider_id,
             paid_at,
@@ -2478,6 +2522,8 @@ def build_order_summary(shift_id: int | None = None) -> dict:
         "revenue": report["total_recebido"],
         "average_ticket": average_ticket,
         "top_items": report["quantidade_por_bebida"][:4],
+        "peak_time_label": report["pico_atendimento"]["label"] if report["pico_atendimento"] else "Sem dados",
+        "peak_order_count": report["pico_atendimento"]["orders"] if report["pico_atendimento"] else 0,
         "top_tables": [
             {"table_label": row["table_label"], "total": row["total"]}
             for row in top_tables
@@ -2870,6 +2916,7 @@ def upsert_product_from_form(product_id: int | None = None) -> str:
 
     price = parse_decimal_input(request.form.get("price"), "Preco de venda", minimum=0.01)
     cost = parse_decimal_input(request.form.get("cost"), "Custo estimado", minimum=0.0)
+    category = normalize_product_category(request.form.get("category"))
     description = sanitize_optional_text(request.form.get("description"), limit=280)
     image_url = normalize_product_image(request.form.get("image_url"))
     is_active = 1 if checkbox_to_bool(request.form.get("is_active")) else 0
@@ -2893,10 +2940,10 @@ def upsert_product_from_form(product_id: int | None = None) -> str:
         db.execute(
             """
             UPDATE bebidas
-            SET nome = ?, preco_venda = ?, custo_estimado = ?, descricao = ?, imagem_url = ?, is_active = ?, max_active_orders = ?
+            SET nome = ?, preco_venda = ?, custo_estimado = ?, categoria = ?, descricao = ?, imagem_url = ?, is_active = ?, max_active_orders = ?
             WHERE id = ?
             """,
-            (name, price, cost, description, image_url, is_active, max_active_orders, product_id),
+            (name, price, cost, category, description, image_url, is_active, max_active_orders, product_id),
         )
         refresh_combo_costs_for_component(product_id)
         return "Produto atualizado com sucesso."
@@ -2915,9 +2962,9 @@ def upsert_product_from_form(product_id: int | None = None) -> str:
             is_combo,
             max_active_orders
         )
-        VALUES (?, ?, ?, 'Bebida', ?, '3 min', ?, ?, 0, ?)
+        VALUES (?, ?, ?, ?, ?, '3 min', ?, ?, 0, ?)
         """,
-        (name, price, cost, description, image_url, is_active, max_active_orders),
+        (name, price, cost, category, description, image_url, is_active, max_active_orders),
     )
     return "Produto criado com sucesso."
 
@@ -3006,6 +3053,10 @@ def index():
         menu=fetch_menu(),
         current_time=display_datetime(utc_now_iso()),
         staff_access_url=url_for("staff_access"),
+        order_types=[
+            {"value": value, "label": label}
+            for value, label in ORDER_TYPE_LABELS.items()
+        ],
         payment_methods=[
             {"value": value, "label": label}
             for value, label in PAYMENT_METHOD_LABELS.items()
@@ -3084,6 +3135,7 @@ def products_page():
         products=snapshot["products"],
         combos=snapshot["combos"],
         component_options=snapshot["component_options"],
+        product_category_options=PRODUCT_CATEGORY_OPTIONS,
         current_user=get_current_user(),
         message=request.args.get("message"),
         error=request.args.get("error"),
@@ -3303,6 +3355,7 @@ def create_order():
     customer_name = sanitize_text(payload.get("customer_name"), "Cliente", limit=48)
     table_label = sanitize_text(payload.get("table_label"), "Retirada", limit=32)
     source = sanitize_text(payload.get("source"), DEFAULT_ORDER_SOURCE, limit=24)
+    order_type = normalize_order_type(payload.get("order_type"))
     raw_payment_method = payload.get("payment_method")
     payment_method = normalize_payment_method(raw_payment_method)
     app.logger.info(
@@ -3314,6 +3367,8 @@ def create_order():
     )
     if not payment_method:
         return jsonify({"error": "Escolha uma forma de pagamento valida antes de enviar o pedido."}), 400
+    if not order_type:
+        return jsonify({"error": "Escolha o tipo do pedido antes de enviar."}), 400
     payment_status = "pending"
     payment_provider = sanitize_optional_text(payload.get("payment_provider"), limit=64) or None
     payment_provider_id = sanitize_optional_text(payload.get("payment_provider_id"), limit=128) or None
@@ -3432,13 +3487,14 @@ def create_order():
                 source,
                 payment_method,
                 payment_status,
+                order_type,
                 payment_provider,
                 payment_provider_id,
                 pix_qr_code,
                 pix_copy_paste,
                 request_id
             )
-            VALUES (?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 codigo,
@@ -3451,6 +3507,7 @@ def create_order():
                 source,
                 payment_method,
                 payment_status,
+                order_type,
                 payment_provider,
                 payment_provider_id,
                 pix_qr_code,
@@ -3522,6 +3579,7 @@ def create_order():
             order_number,
             payment_method,
             payment_status,
+            order_type,
             payment_provider,
             payment_provider_id,
             paid_at,
