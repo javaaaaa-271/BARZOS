@@ -70,8 +70,13 @@ PAYMENT_STATUS_LABELS = {
 }
 ORDER_TYPE_LABELS = {
     "pista": "Pista",
-    "bistro": "Bistrô",
     "camarote": "Camarote",
+}
+ORDER_STATUS_LABELS = {
+    "new": "Liberado ao bar",
+    "pending": "Liberado ao bar",
+    "pending_payment": "Aguardando Pix",
+    "completed": "Concluido",
 }
 PRODUCT_CATEGORY_OPTIONS = [
     "Bebida",
@@ -86,6 +91,7 @@ PRODUCT_CATEGORY_OPTIONS = [
     "Chopp",
 ]
 ACTIVE_ORDER_STATUSES = ("new", "pending")
+AWAITING_PAYMENT_STATUS = "pending_payment"
 PREORDER_ACTIVE_STATUSES = ("new", "preparing")
 try:
     LOCAL_TIMEZONE = ZoneInfo(os.getenv("BAROS_TIMEZONE", "America/Sao_Paulo"))
@@ -856,7 +862,16 @@ def init_db() -> None:
         "UPDATE pedidos SET payment_status = 'pending' WHERE payment_status IS NULL OR TRIM(payment_status) = ''"
     )
     db.execute(
-        "UPDATE pedidos SET order_type = 'pista' WHERE order_type IS NULL OR TRIM(order_type) = ''"
+        "UPDATE pedidos SET order_type = 'pista' WHERE order_type IS NULL OR TRIM(order_type) = '' OR order_type = 'bistro'"
+    )
+    db.execute(
+        f"""
+        UPDATE pedidos
+        SET status = '{AWAITING_PAYMENT_STATUS}'
+        WHERE payment_method = 'pix'
+          AND COALESCE(payment_status, 'pending') != 'paid'
+          AND status IN ('new', 'pending')
+        """
     )
     db.execute(
         """
@@ -1258,6 +1273,10 @@ def get_payment_status_label(status: str | None) -> str:
     return PAYMENT_STATUS_LABELS.get(status or "", "Pendente")
 
 
+def get_order_status_label(status: str | None) -> str:
+    return ORDER_STATUS_LABELS.get(status or "", "Pedido criado")
+
+
 def normalize_request_id(raw_value: str | None) -> str | None:
     value = sanitize_optional_text(raw_value, limit=128)
     return value or None
@@ -1353,12 +1372,12 @@ def mark_as_paid(code: str, shift_id: int | None = None) -> dict:
         SET payment_status = 'paid',
             paid_at = ?,
             status = CASE
-                WHEN payment_method = 'pix' AND status = 'pending' THEN 'new'
+                WHEN payment_method = 'pix' AND status = ? THEN 'new'
                 ELSE status
             END
         WHERE id = ?
         """,
-        (paid_at, row["id"]),
+        (paid_at, AWAITING_PAYMENT_STATUS, row["id"]),
     )
     db.commit()
     updated = fetch_order_row_by_code(code, current_shift_id)
@@ -2146,6 +2165,8 @@ def serialize_order(row: sqlite3.Row) -> dict:
         "code": row["codigo_retirada"],
         "order_number": row["order_number"] if "order_number" in row.keys() and row["order_number"] else row["codigo_retirada"],
         "status": row["status"],
+        "status_label": get_order_status_label(row["status"] if "status" in row.keys() else None),
+        "released_to_bar": (row["status"] if "status" in row.keys() else "") in (*ACTIVE_ORDER_STATUSES, "completed"),
         "created_at": display_datetime(row["horario_pedido"]),
         "completed_at": display_datetime(row["completed_at"]) if "completed_at" in row.keys() and row["completed_at"] else None,
         "paid_at": display_datetime(row["paid_at"]) if "paid_at" in row.keys() and row["paid_at"] else None,
@@ -2214,6 +2235,9 @@ def fetch_orders(status: str | None = None, limit: int | None = None, shift_id: 
         if status == "pending":
             conditions.append("status IN (?, ?)")
             params.extend(ACTIVE_ORDER_STATUSES)
+        elif status == "awaiting_payment":
+            conditions.append("status = ?")
+            params.append(AWAITING_PAYMENT_STATUS)
         else:
             conditions.append("status = ?")
             params.append(status)
@@ -2824,12 +2848,17 @@ def build_order_summary(shift_id: int | None = None) -> dict:
         "SELECT COUNT(*) AS total FROM pedidos WHERE status = 'completed' AND turno_id = ?",
         (current_shift_id,),
     ).fetchone()["total"]
+    awaiting_payment = get_db().execute(
+        "SELECT COUNT(*) AS total FROM pedidos WHERE status = ? AND turno_id = ?",
+        (AWAITING_PAYMENT_STATUS, current_shift_id),
+    ).fetchone()["total"]
     average_ticket = 0.0
     if report["total_pedidos_pagos"]:
         average_ticket = round(report["total_recebido"] / report["total_pedidos_pagos"], 2)
     return {
         "pending_count": pending or 0,
         "completed_count": completed or 0,
+        "awaiting_payment_count": awaiting_payment or 0,
         "total_count": report["total_pedidos"],
         "revenue": report["total_recebido"],
         "average_ticket": average_ticket,
@@ -2901,6 +2930,7 @@ def archive_current_shift_and_open_next(expected_shift_id: int | None = None) ->
         "current_shift_id": new_shift_id,
         "report": report,
         "summary": build_order_summary(new_shift_id),
+        "awaiting_payment": fetch_orders(status="awaiting_payment", shift_id=new_shift_id),
         "pending": fetch_orders(status="pending", shift_id=new_shift_id),
         "completed": fetch_orders(status="completed", limit=20, shift_id=new_shift_id),
         "logistics": fetch_logistics_snapshot(),
@@ -3581,6 +3611,7 @@ def get_orders():
         {
             "current_shift_id": get_current_shift_id(),
             "summary": build_order_summary(),
+            "awaiting_payment": fetch_orders(status="awaiting_payment"),
             "pending": fetch_orders(status="pending"),
             "completed": fetch_orders(status="completed", limit=20),
             "logistics": fetch_logistics_snapshot(),
@@ -3707,6 +3738,7 @@ def create_order():
     if not order_type:
         return jsonify({"error": "Escolha o tipo do pedido antes de enviar."}), 400
     payment_status = "pending"
+    order_status = AWAITING_PAYMENT_STATUS if payment_method == "pix" else "new"
     payment_provider = sanitize_optional_text(payload.get("payment_provider"), limit=64) or None
     payment_provider_id = sanitize_optional_text(payload.get("payment_provider_id"), limit=128) or None
     pix_qr_code = sanitize_optional_text(payload.get("pix_qr_code"), limit=4000) or None
@@ -3831,12 +3863,13 @@ def create_order():
                 pix_copy_paste,
                 request_id
             )
-            VALUES (?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 codigo,
                 order_number,
                 horario,
+                order_status,
                 round(valor_total, 2),
                 turno_id,
                 customer_name,
@@ -3950,6 +3983,8 @@ def complete_order(code: str):
         return jsonify({"error": "Pedido nao encontrado."}), 404
     if row["status"] == "completed":
         return jsonify({"order": serialize_order(row), "summary": build_order_summary()})
+    if row["status"] == AWAITING_PAYMENT_STATUS:
+        return jsonify({"error": "Esse pedido ainda aguarda confirmacao do Pix antes de ser liberado para o bar."}), 400
 
     if row["payment_method"] == "pix" and normalize_payment_status(row["payment_status"], "pending") != "paid":
         return jsonify({"error": "Pedidos com Pix so podem ser concluidos depois da confirmacao de pagamento."}), 400
