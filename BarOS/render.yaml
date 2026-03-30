@@ -25,7 +25,3 @@ services:
 
       - key: BAROS_COOKIE_SECURE
         value: "true"
-
-      # Só usa no PRIMEIRO deploy se quiser importar SQLite
-      - key: BAROS_SQLITE_IMPORT_PATH
-        value: /var/data/baros.db
