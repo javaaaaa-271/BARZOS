@@ -26,6 +26,13 @@
     </div>
   </header>
 
+  {% if auth_message %}
+  <div class="alert alert-success">{{ auth_message }}</div>
+  {% endif %}
+  {% if auth_error %}
+  <div class="alert">{{ auth_error }}</div>
+  {% endif %}
+
   <section class="stats-grid premium-stats-grid">
     <article class="stat-card stat-card-highlight">
       <span>Pedidos pendentes</span>
@@ -52,6 +59,64 @@
       <strong id="peak-time">{{ summary.peak_time_label }}</strong>
     </article>
   </section>
+
+  {% if current_user.can_manage_bar and staff_settings %}
+  <section class="panel-card panel-card-premium">
+    <div class="panel-head">
+      <div>
+        <p class="mini-label">Acesso da equipe</p>
+        <h2>Credenciais do painel</h2>
+      </div>
+    </div>
+    <div class="detail-content-grid single-column-grid">
+      <form class="product-form compact-form" method="post" action="{{ url_for('save_staff_credentials') }}">
+        <input type="hidden" name="account_action" value="admin_credentials">
+        <p class="muted-note">Atualize o usuario do admin e troque a senha quando precisar. Deixe a nova senha em branco para manter a atual.</p>
+        <div class="form-grid-two">
+          <label>
+            <span>Usuario admin</span>
+            <input type="text" name="username" value="{{ staff_settings.admin.username }}" autocomplete="username" required>
+          </label>
+          <label>
+            <span>Nova senha do admin</span>
+            <input type="password" name="new_password" autocomplete="new-password" placeholder="Minimo 8 caracteres">
+          </label>
+        </div>
+        <label>
+          <span>Confirmar nova senha</span>
+          <input type="password" name="confirm_password" autocomplete="new-password" placeholder="Repita a nova senha">
+        </label>
+        <button class="secondary-button" type="submit">Salvar admin</button>
+      </form>
+
+      <form class="product-form compact-form" method="post" action="{{ url_for('save_staff_credentials') }}">
+        <input type="hidden" name="account_action" value="operator_account">
+        <p class="muted-note">Crie ou atualize a conta usada pela operacao. Se a senha ficar vazia em uma edicao, a senha atual e mantida.</p>
+        <div class="form-grid-two">
+          <label>
+            <span>Usuario do operador</span>
+            <input type="text" name="operator_username" value="{{ staff_settings.operator.username }}" autocomplete="username" required>
+          </label>
+          <label>
+            <span>Nome exibido</span>
+            <input type="text" name="operator_display_name" value="{{ staff_settings.operator.display_name }}" required>
+          </label>
+        </div>
+        <div class="form-grid-two">
+          <label>
+            <span>Senha do operador</span>
+            <input type="password" name="operator_password" autocomplete="new-password" placeholder="Minimo 8 caracteres">
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" name="operator_is_active" {% if staff_settings.operator.is_active %}checked{% endif %}>
+            <span>Conta do operador ativa</span>
+          </label>
+        </div>
+        <button class="secondary-button" type="submit">Salvar operador</button>
+      </form>
+    </div>
+  </section>
+  {% endif %}
 
   <section class="dashboard-grid dashboard-grid-premium">
     <article class="panel-card panel-card-premium">
