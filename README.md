@@ -1,117 +1,47 @@
 # BarOS
 
-<<<<<<< HEAD
-BarOS is a digital operating system for bars, focused on real-time ordering, inventory control, and operational analytics.
+BarOS is the digital operating system for bars, clubs, and live events.
 
-## Features
+## What is BarOS
 
-- QR Code digital menu
-- Real-time order management dashboard
-- Inventory control with automatic deduction
-- Product system with support for combos
-- Shift-based analytics
-- CSV and PDF reports
-- Product management (images, editing, availability)
+BarOS is a product built to modernize how bars run during busy service. It gives customers a faster way to order, gives teams a real-time view of operations, and helps venues reduce friction across the entire service flow.
 
-## Tech Stack
+At its core, BarOS is designed for high-volume environments where speed matters, lines hurt revenue, and operational clarity makes the difference between chaos and control.
 
-- Python (Flask)
-- SQLite
-- HTML, CSS, JavaScript
+## The Problem
+
+Most bars and nightlife venues still operate with too much manual work.
+
+Customers wait too long to order. Teams lose time handling repeated questions and fragmented requests. Managers lack a clear view of what is happening in real time. During peak demand, lines get longer, service slows down, and the operation becomes harder to control.
+
+This creates a simple but expensive problem: poor service experience, slower turnover, and lost sales.
+
+## The Solution
+
+BarOS turns bar operations into a fast, connected, and visible system.
+
+Customers can order through QR-based flows instead of depending entirely on physical lines. Staff can manage service through a live dashboard with a real-time view of orders. Operators gain better control over what is being sold, what is moving fastest, and where the operation is under pressure.
+
+The result is a smoother experience for customers and a more efficient operation for the venue.
+
+## Key Features
+
+- QR-based ordering flow
+- Real-time order dashboard
+- Faster service with reduced queue pressure
+- Operational visibility during peak demand
+- Inventory-aware order management
+- Consumption and sales insights
+- Better coordination between front-of-house and operations
+
+## Vision
+
+BarOS is being built as infrastructure for in-person commerce in high-volume events.
+
+The long-term vision is to power bars, clubs, concerts, festivals, and other live experiences where service speed and operational control directly impact revenue. Over time, data becomes a competitive advantage: understanding demand, consumption patterns, and operational bottlenecks allows venues to make smarter decisions and scale with more confidence.
+
+BarOS is not just a digital menu. It is the foundation for how live event operations can run better.
 
 ## Status
 
-In development and already tested in real-world scenarios.
-
-## Goal
-
-To simplify bar operations and provide real-time insights for decision making.
-LINK: https://baros-hh80.onrender.com/
-=======
-Aplicacao Flask para menu digital, painel do bar, pedidos persistidos em SQLite e bloco inicial de logistica operacional.
-
-## O que ja existe
-
-- Cardapio publico para cliente montar pedidos
-- Login para o painel do bar
-- Painel operacional com pedidos pendentes e concluidos
-- Banco SQLite com pedidos, itens, estoque e notas do turno
-- Estrutura pronta para deploy com `waitress` e `render.yaml`
-
-## Rodando localmente
-
-```bash
-python -m pip install -r requirements.txt
-python app.py
-```
-
-Ou em modo mais proximo de producao:
-
-```bash
-python serve.py
-```
-
-## Variaveis de ambiente
-
-Copie `.env.example` e ajuste:
-
-- `BAROS_SECRET_KEY`: chave de sessao
-- `BAROS_USERNAME`: usuario do painel
-- `BAROS_PASSWORD`: senha do painel
-- `BAROS_DB_PATH`: caminho do banco SQLite
-- `BAROS_HOST`: host de execucao
-- `BAROS_PORT`: porta de execucao
-- `BAROS_DEBUG`: `true` ou `false`
-- `BAROS_COOKIE_SECURE`: usar `true` quando estiver servindo por HTTPS
-
-## Publicando na internet
-
-### Render
-
-1. Suba este projeto para um repositorio Git.
-2. Crie um novo Web Service no Render apontando para o repositorio.
-3. O Render pode usar o arquivo `render.yaml` automaticamente.
-4. Crie um disco persistente montado em `/var/data`.
-5. Defina uma senha real em `BAROS_PASSWORD`.
-6. Depois do deploy, abra a URL publica gerada pelo Render.
-
-### Variaveis esperadas no Render
-
-- `BAROS_SECRET_KEY`
-- `BAROS_USERNAME`
-- `BAROS_PASSWORD`
-- `BAROS_DB_PATH=/var/data/baros.db`
-
-### Observacao importante sobre SQLite
-
-Se voce publicar sem disco persistente, o arquivo do banco pode ser perdido quando a instancia reiniciar.
-Para manter os dados, use o disco persistente do provedor ou depois migre para Postgres.
-
-### O que considerar antes de ir para producao
-
-- Trocar `admin` e a senha padrao
-- Mover de SQLite para Postgres quando houver mais volume ou varios atendentes
-- Colocar HTTPS e dominio proprio
-- Adicionar backup do banco e logs centralizados
-
-## Como os dados e a logistica estao organizados
-
-### Pedidos e consumo
-
-- `bebidas`: nome, preco de venda e custo estimado
-- `pedidos`: codigo de retirada, horario, status e valor total
-- `itens_pedido`: itens vendidos por pedido
-
-### Logistica
-
-- `inventory_items`: estoque basico e nivel minimo
-- `shift_notes`: checklist e recados do turno
-- `turnos`: fechamento por turno sem perder historico
-
-Essa base permite evoluir para:
-
-- controle de estoque por baixa automatica
-- fechamento de caixa por turno
-- origem do pedido por QR mesa, balcao ou delivery
-- relatorios diarios
->>>>>>> 40e7bb6 (Initial BarOS deploy setup)
+BarOS is currently in development and has already been tested in real operational scenarios.
