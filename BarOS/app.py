@@ -6,6 +6,8 @@ import os
 import re
 import secrets
 import sqlite3  # legacy import only; runtime storage uses PostgreSQL
+import time
+from threading import Lock
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from html import escape
@@ -320,6 +322,14 @@ SHIFT_NOTES_SEED = [
 ENABLE_BOOTSTRAP_SEED = os.getenv("BAROS_ENABLE_BOOTSTRAP_SEED", "true").lower() == "true"
 SQL_NAMED_PARAM_PATTERN = re.compile(r"(?<!:):([A-Za-z_][A-Za-z0-9_]*)")
 DbRow = dict[str, Any]
+SNAPSHOT_CACHE_TTLS = {
+    "menu": 2.0,
+    "logistics": 3.0,
+    "order_summary": 2.0,
+    "shift_history": 15.0,
+}
+_SNAPSHOT_CACHE: dict[str, tuple[float, Any]] = {}
+_SNAPSHOT_CACHE_LOCK = Lock()
 
 
 def normalize_internal_access_path(raw_value: str) -> str:
@@ -422,6 +432,34 @@ def sanitize_text(value: str | None, fallback: str, limit: int = 40) -> str:
 
 def currency_brl(value: float | int | None) -> str:
     return f"R$ {float(value or 0):.2f}"
+
+
+def read_snapshot_cache(cache_key: str) -> Any | None:
+    with _SNAPSHOT_CACHE_LOCK:
+        entry = _SNAPSHOT_CACHE.get(cache_key)
+        if not entry:
+            return None
+        expires_at, value = entry
+        if expires_at <= time.monotonic():
+            _SNAPSHOT_CACHE.pop(cache_key, None)
+            return None
+        return value
+
+
+def write_snapshot_cache(cache_key: str, ttl_seconds: float, value: Any) -> Any:
+    with _SNAPSHOT_CACHE_LOCK:
+        _SNAPSHOT_CACHE[cache_key] = (time.monotonic() + ttl_seconds, value)
+    return value
+
+
+def invalidate_snapshot_cache(*prefixes: str) -> None:
+    with _SNAPSHOT_CACHE_LOCK:
+        if not prefixes:
+            _SNAPSHOT_CACHE.clear()
+            return
+        stale_keys = [key for key in _SNAPSHOT_CACHE if any(key.startswith(prefix) for prefix in prefixes)]
+        for key in stale_keys:
+            _SNAPSHOT_CACHE.pop(key, None)
 
 
 def sanitize_optional_text(value: str | None, limit: int = 255) -> str:
@@ -893,11 +931,16 @@ def apply_schema_updates(db: DatabaseConnection) -> None:
     db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS request_id TEXT")
     db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS order_type TEXT")
     db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_pedidos_request_id ON pedidos(request_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_pedidos_turno_status_horario ON pedidos(turno_id, status, horario_pedido DESC)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_pedidos_turno_horario ON pedidos(turno_id, horario_pedido DESC)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_pedidos_codigo_turno ON pedidos(codigo_retirada, turno_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_turnos_status_id ON turnos(status, id DESC)")
 
     db.execute("ALTER TABLE itens_pedido ADD COLUMN IF NOT EXISTS item_name_snapshot TEXT")
     db.execute("ALTER TABLE itens_pedido ADD COLUMN IF NOT EXISTS item_type_snapshot TEXT")
     db.execute("ALTER TABLE itens_pedido ADD COLUMN IF NOT EXISTS unit_price_snapshot DOUBLE PRECISION")
     db.execute("ALTER TABLE itens_pedido ADD COLUMN IF NOT EXISTS unit_cost_snapshot DOUBLE PRECISION")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_itens_pedido_pedido_id ON itens_pedido(pedido_id)")
 
 
 def seed_bootstrap_data(db: DatabaseConnection) -> None:
@@ -1618,11 +1661,16 @@ def build_ticket(order: dict) -> dict:
 
 
 def get_current_shift_id() -> int:
+    cached_shift_id = getattr(g, "current_shift_id", None)
+    if cached_shift_id is not None:
+        return cached_shift_id
+
     db = get_db()
     row = db.execute(
         "SELECT id FROM turnos WHERE status = 'open' ORDER BY id DESC LIMIT 1"
     ).fetchone()
     if row:
+        g.current_shift_id = row["id"]
         return row["id"]
 
     row = db.execute(
@@ -1634,6 +1682,7 @@ def get_current_shift_id() -> int:
         (utc_now_iso(),),
     ).fetchone()
     db.commit()
+    g.current_shift_id = row["id"]
     return row["id"]
 
 
@@ -2147,7 +2196,7 @@ def reserve_stock_deductions(
     return []
 
 
-def fetch_menu() -> list[dict]:
+def build_menu_snapshot() -> list[dict]:
     inventory_by_name = get_inventory_by_name()
     rows = fetch_beverage_rows(include_inactive=False)
     beverages_by_id = fetch_beverage_map(include_inactive=True)
@@ -2180,6 +2229,14 @@ def fetch_menu() -> list[dict]:
         )
         menu.append(menu_item)
     return menu
+
+
+def fetch_menu() -> list[dict]:
+    cache_key = "menu"
+    cached_value = read_snapshot_cache(cache_key)
+    if cached_value is not None:
+        return cached_value
+    return write_snapshot_cache(cache_key, SNAPSHOT_CACHE_TTLS["menu"], build_menu_snapshot())
 
 
 def calculate_combo_cost_estimate(
@@ -2352,10 +2409,15 @@ def parse_combo_components_from_form(selected_ids: list[str]) -> list[dict]:
     return components
 
 
-def serialize_order(row: sqlite3.Row) -> dict:
-    items = get_db().execute(
+def fetch_order_items_map(order_ids: list[int]) -> dict[int, list[DbRow]]:
+    if not order_ids:
+        return {}
+
+    placeholders = ",".join("?" for _ in order_ids)
+    rows = get_db().execute(
         """
         SELECT
+            ip.pedido_id,
             ip.id,
             ip.quantidade,
             ip.subtotal,
@@ -2368,11 +2430,20 @@ def serialize_order(row: sqlite3.Row) -> dict:
             b.is_combo
         FROM itens_pedido ip
         JOIN bebidas b ON b.id = ip.bebida_id
-        WHERE ip.pedido_id = ?
-        ORDER BY ip.id ASC
+        WHERE ip.pedido_id IN (""" + placeholders + """)
+        ORDER BY ip.pedido_id ASC, ip.id ASC
         """,
-        (row["id"],),
+        order_ids,
     ).fetchall()
+    items_by_order_id: dict[int, list[DbRow]] = {}
+    for item_row in rows:
+        items_by_order_id.setdefault(item_row["pedido_id"], []).append(item_row)
+    return items_by_order_id
+
+
+def serialize_order(row: sqlite3.Row, items: list[DbRow] | None = None) -> dict:
+    if items is None:
+        items = fetch_order_items_map([row["id"]]).get(row["id"], [])
 
     return {
         "id": row["id"],
@@ -2461,7 +2532,11 @@ def fetch_orders(status: str | None = None, limit: int | None = None, shift_id: 
         query += " LIMIT ?"
         params.append(limit)
     rows = get_db().execute(query, params).fetchall()
-    return [serialize_order(row) for row in rows]
+    if not rows:
+        return []
+
+    items_by_order_id = fetch_order_items_map([row["id"] for row in rows])
+    return [serialize_order(row, items_by_order_id.get(row["id"], [])) for row in rows]
 
 
 def validate_order_payload(selected_items: list[dict]) -> tuple[list[dict], str | None]:
@@ -2494,7 +2569,7 @@ def validate_order_payload(selected_items: list[dict]) -> tuple[list[dict], str 
     return normalized_items, None
 
 
-def fetch_logistics_snapshot() -> dict:
+def build_logistics_snapshot() -> dict:
     db = get_db()
     items = db.execute(
         """
@@ -2554,6 +2629,14 @@ def fetch_logistics_snapshot() -> dict:
             "tracked_count": len(items),
         },
     }
+
+
+def fetch_logistics_snapshot() -> dict:
+    cache_key = "logistics"
+    cached_value = read_snapshot_cache(cache_key)
+    if cached_value is not None:
+        return cached_value
+    return write_snapshot_cache(cache_key, SNAPSHOT_CACHE_TTLS["logistics"], build_logistics_snapshot())
 
 
 def parse_shift_observations(summary_data: dict | None) -> list[str]:
@@ -3038,9 +3121,8 @@ def build_sales_report(shift_id: int | None = None) -> dict:
     }
 
 
-def build_order_summary(shift_id: int | None = None) -> dict:
-    current_shift_id = shift_id or get_current_shift_id()
-    report = build_sales_report(current_shift_id)
+def build_order_summary_payload(shift_id: int) -> dict:
+    report = build_sales_report(shift_id)
     top_tables = get_db().execute(
         """
         SELECT
@@ -3052,19 +3134,19 @@ def build_order_summary(shift_id: int | None = None) -> dict:
         ORDER BY total DESC, table_label ASC
         LIMIT 4
         """,
-        (current_shift_id,),
+        (shift_id,),
     ).fetchall()
     pending = get_db().execute(
         "SELECT COUNT(*) AS total FROM pedidos WHERE status IN (?, ?) AND turno_id = ?",
-        (*ACTIVE_ORDER_STATUSES, current_shift_id),
+        (*ACTIVE_ORDER_STATUSES, shift_id),
     ).fetchone()["total"]
     completed = get_db().execute(
         "SELECT COUNT(*) AS total FROM pedidos WHERE status = 'completed' AND turno_id = ?",
-        (current_shift_id,),
+        (shift_id,),
     ).fetchone()["total"]
     awaiting_payment = get_db().execute(
         "SELECT COUNT(*) AS total FROM pedidos WHERE status = ? AND turno_id = ?",
-        (AWAITING_PAYMENT_STATUS, current_shift_id),
+        (AWAITING_PAYMENT_STATUS, shift_id),
     ).fetchone()["total"]
     average_ticket = 0.0
     if report["total_pedidos_pagos"]:
@@ -3084,6 +3166,19 @@ def build_order_summary(shift_id: int | None = None) -> dict:
             for row in top_tables
         ],
     }
+
+
+def build_order_summary(shift_id: int | None = None) -> dict:
+    current_shift_id = shift_id or get_current_shift_id()
+    cache_key = f"order-summary:{current_shift_id}"
+    cached_value = read_snapshot_cache(cache_key)
+    if cached_value is not None:
+        return cached_value
+    return write_snapshot_cache(
+        cache_key,
+        SNAPSHOT_CACHE_TTLS["order_summary"],
+        build_order_summary_payload(current_shift_id),
+    )
 
 
 def build_closeout_report(shift_id: int | None = None) -> dict:
@@ -3151,7 +3246,7 @@ def archive_current_shift_and_open_next(expected_shift_id: int | None = None) ->
     }
 
 
-def fetch_shift_history(limit: int = 10) -> list[dict]:
+def build_shift_history_payload(limit: int) -> list[dict]:
     rows = get_db().execute(
         """
         SELECT id, aberto_em, fechado_em
@@ -3176,6 +3271,18 @@ def fetch_shift_history(limit: int = 10) -> list[dict]:
             }
         )
     return shifts
+
+
+def fetch_shift_history(limit: int = 10) -> list[dict]:
+    cache_key = f"shift-history:{limit}"
+    cached_value = read_snapshot_cache(cache_key)
+    if cached_value is not None:
+        return cached_value
+    return write_snapshot_cache(
+        cache_key,
+        SNAPSHOT_CACHE_TTLS["shift_history"],
+        build_shift_history_payload(limit),
+    )
 
 
 def fetch_shift_details(
@@ -3820,15 +3927,16 @@ def shift_detail_page(shift_id: int):
 @app.get("/api/orders")
 @login_required
 def get_orders():
+    current_shift_id = get_current_shift_id()
     return jsonify(
         {
-            "current_shift_id": get_current_shift_id(),
-            "summary": build_order_summary(),
-            "awaiting_payment": fetch_orders(status="awaiting_payment"),
-            "pending": fetch_orders(status="pending"),
-            "completed": fetch_orders(status="completed", limit=20),
+            "current_shift_id": current_shift_id,
+            "summary": build_order_summary(current_shift_id),
+            "awaiting_payment": fetch_orders(status="awaiting_payment", shift_id=current_shift_id),
+            "pending": fetch_orders(status="pending", shift_id=current_shift_id),
+            "completed": fetch_orders(status="completed", limit=20, shift_id=current_shift_id),
             "logistics": fetch_logistics_snapshot(),
-            "shifts": fetch_shift_history(),
+            "shifts": fetch_shift_history(limit=5),
             "generated_at": display_datetime(utc_now_iso()),
         }
     )
@@ -4141,6 +4249,7 @@ def create_order():
             ],
         )
         db.commit()
+        invalidate_snapshot_cache("menu", "logistics", "order-summary")
     except IntegrityError as exc:
         safe_rollback(db)
         existing_order = fetch_order_row_by_request_id(request_id)
@@ -4206,6 +4315,7 @@ def pay_order(code: str):
             shift_id=current_shift_id,
         )
         order = mark_as_paid(code, current_shift_id)
+        invalidate_snapshot_cache("order-summary")
     except LookupError:
         return jsonify({"error": "Pedido nao encontrado."}), 404
     except Exception as exc:
@@ -4247,6 +4357,7 @@ def complete_order(code: str):
             (utc_now_iso(), session.get("bar_user_id"), code, current_shift_id),
         )
         db.commit()
+        invalidate_snapshot_cache("order-summary")
 
         updated = fetch_order_row_by_code(code, current_shift_id)
         return jsonify({"order": serialize_order(updated), "summary": build_order_summary()})
@@ -4269,7 +4380,9 @@ def closeout_report():
         except (TypeError, ValueError):
             return jsonify({"error": "Turno esperado invalido."}), 400
     try:
-        return jsonify(archive_current_shift_and_open_next(expected_shift_id))
+        payload = archive_current_shift_and_open_next(expected_shift_id)
+        invalidate_snapshot_cache("order-summary", "shift-history", "logistics", "menu")
+        return jsonify(payload)
     except ValueError as error:
         return jsonify({"error": str(error)}), 409
 
@@ -4290,6 +4403,7 @@ def reset_data():
         archived = archive_current_shift_and_open_next(expected_shift_id)
     except ValueError as error:
         return jsonify({"error": str(error)}), 409
+    invalidate_snapshot_cache("order-summary", "shift-history", "logistics", "menu")
     archived["ok"] = True
     return jsonify(archived)
 
@@ -4354,6 +4468,7 @@ def update_inventory(item_id: int):
         (next_stock, next_par, next_status, utc_now_iso(), item_id),
     )
     db.commit()
+    invalidate_snapshot_cache("logistics", "menu")
     return jsonify(fetch_logistics_snapshot())
 
 
@@ -4366,6 +4481,7 @@ def close_shift_note(note_id: int):
         return jsonify({"error": "Nota nao encontrada."}), 404
     db.execute("UPDATE shift_notes SET status = 'done' WHERE id = ?", (note_id,))
     db.commit()
+    invalidate_snapshot_cache("logistics")
     return jsonify(fetch_logistics_snapshot())
 
 
