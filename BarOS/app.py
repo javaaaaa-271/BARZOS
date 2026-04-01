@@ -39,6 +39,7 @@ LEGACY_SQLITE_IMPORT_PATH_RAW = (
     os.getenv("BAROS_SQLITE_IMPORT_PATH")
     or os.getenv("DATABASE_PATH")
     or os.getenv("BAROS_DB_PATH")
+    or ""
 ).strip()
 LEGACY_SQLITE_IMPORT_PATH = (
     Path(LEGACY_SQLITE_IMPORT_PATH_RAW).expanduser() if LEGACY_SQLITE_IMPORT_PATH_RAW else None
