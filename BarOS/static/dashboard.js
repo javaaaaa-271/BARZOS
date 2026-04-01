@@ -18,11 +18,15 @@ const closeoutDrinks = document.getElementById("closeout-drinks");
 const closeoutExportLink = document.getElementById("closeout-export-link");
 const closeCloseoutModalButton = document.getElementById("close-closeout-modal");
 const closeCloseoutModalTopButton = document.getElementById("close-closeout-modal-top");
+const DASHBOARD_REFRESH_VISIBLE_MS = 10000;
+const DASHBOARD_REFRESH_HIDDEN_MS = 30000;
 
 let latestClosedShiftId = null;
 let currentShiftId = dashboardConfig.currentShiftId || null;
 let closeoutRequestInFlight = false;
 let resetRequestInFlight = false;
+let dashboardRefreshInFlight = false;
+let dashboardRefreshTimer = null;
 
 const brl = new Intl.NumberFormat("pt-BR", {
   style: "currency",
@@ -382,14 +386,23 @@ function setButtonBusy(button, busy, busyLabel, idleLabel) {
 }
 
 async function refreshDashboard() {
-  const response = await fetch("/api/orders");
-  if (!response.ok) {
-    refreshStatus.textContent = "Falha ao atualizar";
+  if (dashboardRefreshInFlight) {
     return;
   }
 
-  const data = await response.json();
-  applyDashboardSnapshot(data);
+  dashboardRefreshInFlight = true;
+  try {
+    const response = await fetch("/api/orders");
+    if (!response.ok) {
+      refreshStatus.textContent = "Falha ao atualizar";
+      return;
+    }
+
+    const data = await response.json();
+    applyDashboardSnapshot(data);
+  } finally {
+    dashboardRefreshInFlight = false;
+  }
 }
 
 async function completeOrder(code) {
@@ -634,4 +647,18 @@ document.addEventListener("keydown", (event) => {
 
 setCloseoutExportLink(null);
 refreshDashboard();
-setInterval(refreshDashboard, 5000);
+
+function scheduleDashboardRefresh() {
+  const nextDelay = document.hidden ? DASHBOARD_REFRESH_HIDDEN_MS : DASHBOARD_REFRESH_VISIBLE_MS;
+  window.clearTimeout(dashboardRefreshTimer);
+  dashboardRefreshTimer = window.setTimeout(async () => {
+    await refreshDashboard();
+    scheduleDashboardRefresh();
+  }, nextDelay);
+}
+
+document.addEventListener("visibilitychange", () => {
+  scheduleDashboardRefresh();
+});
+
+scheduleDashboardRefresh();
