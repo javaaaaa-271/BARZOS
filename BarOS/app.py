@@ -1,19 +1,23 @@
 ﻿from __future__ import annotations
-
 import csv
 import json
 import io
 import os
 import re
 import secrets
-import sqlite3
+import sqlite3  # legacy import only; runtime storage uses PostgreSQL
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from html import escape
 from pathlib import Path
+from typing import Any
 from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import sentry_sdk
+from dotenv import load_dotenv
+from psycopg import IntegrityError, connect
+from psycopg.rows import dict_row
 from flask import Flask, Response, g, jsonify, redirect, render_template, request, session, url_for
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -23,30 +27,30 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 from werkzeug.security import check_password_hash, generate_password_hash
 
 
+load_dotenv(override=False)
+
 BASE_DIR = Path(__file__).resolve().parent
+
 INSTANCE_DIR = BASE_DIR / "instance"
 INSTANCE_DIR.mkdir(exist_ok=True)
 
-# Render so preserva arquivos locais dentro do mount path de um Persistent Disk.
-# Em servicos free do Render, o filesystem local e efemero: um SQLite salvo fora
-# de um disco persistente pode sumir em restart ou redeploy.
-# Para persistencia real, configure DATABASE_PATH apontando para um arquivo dentro
-# do mount path do Persistent Disk do seu servico pago, por exemplo /var/data/baros.db.
-#
-# Compatibilidade: DATABASE_PATH tem prioridade. BAROS_DB_PATH continua aceito
-# como fallback legado para nao quebrar ambientes ja configurados.
-DATABASE_PATH = Path(
-    os.getenv(
-        "DATABASE_PATH",
-        os.getenv("BAROS_DB_PATH", str(INSTANCE_DIR / "baros.db")),
-    )
-).expanduser()
+DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
+LEGACY_SQLITE_IMPORT_PATH_RAW = (
+    os.getenv("BAROS_SQLITE_IMPORT_PATH")
+    or os.getenv("DATABASE_PATH")
+    or os.getenv("BAROS_DB_PATH")
+).strip()
+LEGACY_SQLITE_IMPORT_PATH = (
+    Path(LEGACY_SQLITE_IMPORT_PATH_RAW).expanduser() if LEGACY_SQLITE_IMPORT_PATH_RAW else None
+)
 BAROS_ENV = (os.getenv("BAROS_ENV") or os.getenv("FLASK_ENV") or "development").strip().lower()
+IS_LOCAL_ENV = BAROS_ENV in {"development", "dev", "local"}
 IS_PRODUCTION = BAROS_ENV in {"production", "staging"}
 BAROS_SECRET_KEY = (os.getenv("BAROS_SECRET_KEY") or "").strip()
 BAROS_COOKIE_SECURE = os.getenv("BAROS_COOKIE_SECURE")
+SENTRY_DSN = (os.getenv("SENTRY_DSN") or "").strip()
 ALLOW_DEFAULT_SEED_USERS = (
-    os.getenv("BAROS_ALLOW_DEFAULT_SEED_USERS", "false" if IS_PRODUCTION else "true").strip().lower()
+    os.getenv("BAROS_ALLOW_DEFAULT_SEED_USERS", "true" if IS_LOCAL_ENV else "false").strip().lower()
     == "true"
 )
 LEGACY_SEED_ADMIN_USERNAME = (os.getenv("BAROS_USERNAME") or "").strip()
@@ -312,6 +316,8 @@ SHIFT_NOTES_SEED = [
 ]
 
 ENABLE_BOOTSTRAP_SEED = os.getenv("BAROS_ENABLE_BOOTSTRAP_SEED", "true").lower() == "true"
+SQL_NAMED_PARAM_PATTERN = re.compile(r"(?<!:):([A-Za-z_][A-Za-z0-9_]*)")
+DbRow = dict[str, Any]
 
 
 def normalize_internal_access_path(raw_value: str) -> str:
@@ -331,10 +337,24 @@ def build_runtime_secret_key() -> str:
 
 
 def validate_runtime_security() -> None:
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL obrigatorio para iniciar o BarOS.")
     if IS_PRODUCTION and len(BAROS_SECRET_KEY) < 32:
         raise RuntimeError("BAROS_SECRET_KEY precisa ter pelo menos 32 caracteres em producao.")
     if IS_PRODUCTION and ALLOW_DEFAULT_SEED_USERS:
         raise RuntimeError("BAROS_ALLOW_DEFAULT_SEED_USERS deve ficar desativado em producao.")
+
+
+validate_runtime_security()
+
+
+if SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        environment=BAROS_ENV,
+        traces_sample_rate=0.2,
+        send_default_pii=False,
+    )
 
 
 app = Flask(__name__)
@@ -348,27 +368,25 @@ app.config["SESSION_COOKIE_SECURE"] = (
     else IS_PRODUCTION
 )
 
-validate_runtime_security()
-
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def local_now() -> datetime:
-    return datetime.now(LOCAL_TIMEZONE)
+    return datetime.now(ZoneInfo("America/Sao_Paulo"))
 
 
 def display_datetime(value: str | None) -> str:
     if not value:
         return "-"
-    return datetime.fromisoformat(value).astimezone().strftime("%d/%m/%Y %H:%M")
+    return datetime.fromisoformat(value).astimezone(ZoneInfo("America/Sao_Paulo")).strftime("%d/%m/%Y %H:%M")
 
 
 def hour_bucket_label(value: str | None) -> str:
     if not value:
         return "-"
-    return datetime.fromisoformat(value).astimezone().strftime("%Hh")
+    return datetime.fromisoformat(value).astimezone(ZoneInfo("America/Sao_Paulo")).strftime("%Hh")
 
 
 def duration_label(start_value: str | None, end_value: str | None) -> str:
@@ -469,21 +487,57 @@ def load_summary_payload(raw_value: str | None) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def ensure_database_parent() -> None:
-    database_parent = DATABASE_PATH.parent
-    if database_parent and str(database_parent) not in {"", "."}:
-        database_parent.mkdir(parents=True, exist_ok=True)
+def normalize_query_params(params: Any = None):
+    if params is None:
+        return None
+    if isinstance(params, dict):
+        return params
+    if isinstance(params, (list, tuple)):
+        return tuple(params)
+    return (params,)
 
 
-def open_db_connection() -> sqlite3.Connection:
-    ensure_database_parent()
-    connection = sqlite3.connect(DATABASE_PATH)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
-    return connection
+def adapt_sql_query(query: str, params: Any = None) -> tuple[str, Any]:
+    if params is None:
+        return query, None
+    if isinstance(params, dict):
+        return SQL_NAMED_PARAM_PATTERN.sub(lambda match: f"%({match.group(1)})s", query), params
+    return query.replace("?", "%s"), normalize_query_params(params)
 
 
-def get_db() -> sqlite3.Connection:
+class DatabaseConnection:
+    def __init__(self, raw_connection) -> None:
+        self._raw_connection = raw_connection
+
+    def execute(self, query: str, params: Any = None):
+        sql, values = adapt_sql_query(query, params)
+        cursor = self._raw_connection.cursor(row_factory=dict_row)
+        cursor.execute(sql, values)
+        return cursor
+
+    def executemany(self, query: str, params_seq) -> Any:
+        sql, _ = adapt_sql_query(query, ())
+        normalized_params = [normalize_query_params(item) for item in params_seq]
+        cursor = self._raw_connection.cursor(row_factory=dict_row)
+        cursor.executemany(sql, normalized_params)
+        return cursor
+
+    def commit(self) -> None:
+        self._raw_connection.commit()
+
+    def rollback(self) -> None:
+        self._raw_connection.rollback()
+
+    def close(self) -> None:
+        self._raw_connection.close()
+
+
+def open_db_connection() -> DatabaseConnection:
+    raw_connection = connect(DATABASE_URL, row_factory=dict_row, autocommit=False)
+    return DatabaseConnection(raw_connection)
+
+
+def get_db() -> DatabaseConnection:
     if "db" not in g:
         g.db = open_db_connection()
     return g.db
@@ -504,6 +558,121 @@ def apply_response_headers(response):
     if request.path.startswith("/api/") or request.path == "/painel":
         response.headers["Cache-Control"] = "no-store"
     return response
+
+
+def get_table_columns(db: DatabaseConnection, table_name: str) -> list[str]:
+    rows = db.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = ?
+        ORDER BY ordinal_position
+        """,
+        (table_name,),
+    ).fetchall()
+    return [row["column_name"] for row in rows]
+
+
+def table_row_count(db: DatabaseConnection, table_name: str) -> int:
+    row = db.execute(f"SELECT COUNT(*) AS total FROM {table_name}").fetchone()
+    return int(row["total"] or 0)
+
+
+def reset_table_sequence(db: DatabaseConnection, table_name: str) -> None:
+    sequence_row = db.execute(
+        "SELECT pg_get_serial_sequence(?, 'id') AS sequence_name",
+        (table_name,),
+    ).fetchone()
+    sequence_name = sequence_row["sequence_name"] if sequence_row else None
+    if not sequence_name:
+        return
+    db.execute(
+        f"""
+        SELECT setval(
+            ?,
+            COALESCE((SELECT MAX(id) FROM {table_name}), 1),
+            EXISTS(SELECT 1 FROM {table_name})
+        )
+        """,
+        (sequence_name,),
+    )
+
+
+def safe_rollback(db: DatabaseConnection) -> None:
+    try:
+        db.rollback()
+    except Exception:
+        pass
+
+
+def sqlite_table_exists(db: sqlite3.Connection, table_name: str) -> bool:
+    row = db.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return bool(row)
+
+
+def sqlite_table_columns(db: sqlite3.Connection, table_name: str) -> list[str]:
+    return [row["name"] for row in db.execute(f"PRAGMA table_info({table_name})").fetchall()]
+
+
+def import_table_from_sqlite(
+    postgres_db: DatabaseConnection,
+    sqlite_db: sqlite3.Connection,
+    table_name: str,
+    postgres_columns: list[str],
+) -> None:
+    if not sqlite_table_exists(sqlite_db, table_name):
+        return
+
+    source_columns = sqlite_table_columns(sqlite_db, table_name)
+    shared_columns = [column for column in postgres_columns if column in source_columns]
+    if not shared_columns:
+        return
+
+    select_sql = f"SELECT {', '.join(shared_columns)} FROM {table_name} ORDER BY id ASC"
+    rows = sqlite_db.execute(select_sql).fetchall()
+    if not rows:
+        return
+
+    placeholders = ", ".join(["?"] * len(shared_columns))
+    insert_sql = (
+        f"INSERT INTO {table_name} ({', '.join(shared_columns)}) "
+        f"VALUES ({placeholders}) ON CONFLICT (id) DO NOTHING"
+    )
+    postgres_db.executemany(
+        insert_sql,
+        [tuple(row[column] for column in shared_columns) for row in rows],
+    )
+    reset_table_sequence(postgres_db, table_name)
+
+
+def import_legacy_sqlite_if_needed(db: DatabaseConnection) -> None:
+    if not LEGACY_SQLITE_IMPORT_PATH or not LEGACY_SQLITE_IMPORT_PATH.exists():
+        return
+
+    tables = [
+        "turnos",
+        "bebidas",
+        "staff_users",
+        "preorder_settings",
+        "inventory_items",
+        "shift_notes",
+        "pedidos",
+        "itens_pedido",
+        "combo_items",
+    ]
+    if any(table_row_count(db, table_name) for table_name in tables):
+        return
+
+    sqlite_db = sqlite3.connect(LEGACY_SQLITE_IMPORT_PATH)
+    sqlite_db.row_factory = sqlite3.Row
+    try:
+        for table_name in tables:
+            import_table_from_sqlite(db, sqlite_db, table_name, get_table_columns(db, table_name))
+    finally:
+        sqlite_db.close()
 
 
 def build_seed_staff_accounts() -> list[dict]:
@@ -536,7 +705,9 @@ def build_seed_staff_accounts() -> list[dict]:
     if accounts:
         return accounts
 
-    if not ALLOW_DEFAULT_SEED_USERS or IS_PRODUCTION:
+    # Credenciais previsiveis so existem como atalho local, nunca como padrao
+    # implícito em staging/producao.
+    if not ALLOW_DEFAULT_SEED_USERS or not IS_LOCAL_ENV:
         return []
 
     return [
@@ -555,7 +726,7 @@ def build_seed_staff_accounts() -> list[dict]:
     ]
 
 
-def seed_staff_user_if_missing(db: sqlite3.Connection, username: str, password: str, role: str, display_name: str) -> None:
+def seed_staff_user_if_missing(db: DatabaseConnection, username: str, password: str, role: str, display_name: str) -> None:
     if not username or not password:
         return
 
@@ -575,7 +746,7 @@ def seed_staff_user_if_missing(db: sqlite3.Connection, username: str, password: 
     )
 
 
-def validate_staff_bootstrap(db: sqlite3.Connection) -> None:
+def validate_staff_bootstrap(db: DatabaseConnection) -> None:
     admin_total = db.execute(
         "SELECT COUNT(*) AS total FROM staff_users WHERE role = 'admin' AND is_active = 1"
     ).fetchone()["total"]
@@ -586,75 +757,91 @@ def validate_staff_bootstrap(db: sqlite3.Connection) -> None:
         )
 
 
-def init_db() -> None:
-    db = open_db_connection()
-    db.executescript(
+def create_core_tables(db: DatabaseConnection) -> None:
+    db.execute(
         """
         CREATE TABLE IF NOT EXISTS bebidas (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id BIGSERIAL PRIMARY KEY,
             nome TEXT NOT NULL UNIQUE,
-            preco_venda REAL NOT NULL,
-            custo_estimado REAL NOT NULL
-        );
-
+            preco_venda DOUBLE PRECISION NOT NULL,
+            custo_estimado DOUBLE PRECISION NOT NULL
+        )
+        """
+    )
+    db.execute(
+        """
         CREATE TABLE IF NOT EXISTS pedidos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id BIGSERIAL PRIMARY KEY,
             codigo_retirada TEXT NOT NULL UNIQUE,
             horario_pedido TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'pending',
-            valor_total REAL NOT NULL
-        );
-
+            valor_total DOUBLE PRECISION NOT NULL
+        )
+        """
+    )
+    db.execute(
+        """
         CREATE TABLE IF NOT EXISTS turnos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id BIGSERIAL PRIMARY KEY,
             aberto_em TEXT NOT NULL,
             fechado_em TEXT,
             status TEXT NOT NULL DEFAULT 'open',
             resumo_fechamento TEXT
-        );
-
+        )
+        """
+    )
+    db.execute(
+        """
         CREATE TABLE IF NOT EXISTS itens_pedido (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            pedido_id INTEGER NOT NULL,
-            bebida_id INTEGER NOT NULL,
+            id BIGSERIAL PRIMARY KEY,
+            pedido_id BIGINT NOT NULL REFERENCES pedidos(id) ON DELETE CASCADE,
+            bebida_id BIGINT NOT NULL REFERENCES bebidas(id),
             quantidade INTEGER NOT NULL,
-            subtotal REAL NOT NULL,
-            FOREIGN KEY(pedido_id) REFERENCES pedidos(id) ON DELETE CASCADE,
-            FOREIGN KEY(bebida_id) REFERENCES bebidas(id)
-        );
-
+            subtotal DOUBLE PRECISION NOT NULL
+        )
+        """
+    )
+    db.execute(
+        """
         CREATE TABLE IF NOT EXISTS combo_items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            combo_beverage_id INTEGER NOT NULL,
-            component_beverage_id INTEGER NOT NULL,
+            id BIGSERIAL PRIMARY KEY,
+            combo_beverage_id BIGINT NOT NULL REFERENCES bebidas(id) ON DELETE CASCADE,
+            component_beverage_id BIGINT NOT NULL REFERENCES bebidas(id),
             quantity INTEGER NOT NULL DEFAULT 1,
-            FOREIGN KEY(combo_beverage_id) REFERENCES bebidas(id) ON DELETE CASCADE,
-            FOREIGN KEY(component_beverage_id) REFERENCES bebidas(id),
             UNIQUE(combo_beverage_id, component_beverage_id)
-        );
-
+        )
+        """
+    )
+    db.execute(
+        """
         CREATE TABLE IF NOT EXISTS inventory_items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id BIGSERIAL PRIMARY KEY,
             name TEXT NOT NULL UNIQUE,
             category TEXT NOT NULL,
             unit TEXT NOT NULL,
-            stock_level REAL NOT NULL,
-            par_level REAL NOT NULL,
+            stock_level DOUBLE PRECISION NOT NULL,
+            par_level DOUBLE PRECISION NOT NULL,
             status TEXT NOT NULL DEFAULT 'ok',
             updated_at TEXT NOT NULL
-        );
-
+        )
+        """
+    )
+    db.execute(
+        """
         CREATE TABLE IF NOT EXISTS shift_notes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id BIGSERIAL PRIMARY KEY,
             title TEXT NOT NULL,
             body TEXT NOT NULL,
             priority TEXT NOT NULL DEFAULT 'media',
             status TEXT NOT NULL DEFAULT 'open',
             created_at TEXT NOT NULL
-        );
-
+        )
+        """
+    )
+    db.execute(
+        """
         CREATE TABLE IF NOT EXISTS staff_users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id BIGSERIAL PRIMARY KEY,
             username TEXT NOT NULL UNIQUE,
             password_hash TEXT NOT NULL,
             role TEXT NOT NULL DEFAULT 'operator',
@@ -662,84 +849,59 @@ def init_db() -> None:
             is_active INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
-        );
-
+        )
+        """
+    )
+    db.execute(
+        """
         CREATE TABLE IF NOT EXISTS preorder_settings (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             preorder_start_time TEXT,
             preorder_end_time TEXT,
             updated_at TEXT NOT NULL
-        );
+        )
         """
     )
 
-    beverage_columns = [row["name"] for row in db.execute("PRAGMA table_info(bebidas)").fetchall()]
-    if "categoria" not in beverage_columns:
-        db.execute("ALTER TABLE bebidas ADD COLUMN categoria TEXT")
-    if "descricao" not in beverage_columns:
-        db.execute("ALTER TABLE bebidas ADD COLUMN descricao TEXT")
-    if "tempo_preparo" not in beverage_columns:
-        db.execute("ALTER TABLE bebidas ADD COLUMN tempo_preparo TEXT")
-    if "imagem_url" not in beverage_columns:
-        db.execute("ALTER TABLE bebidas ADD COLUMN imagem_url TEXT")
-    if "is_active" not in beverage_columns:
-        db.execute("ALTER TABLE bebidas ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
-    if "is_combo" not in beverage_columns:
-        db.execute("ALTER TABLE bebidas ADD COLUMN is_combo INTEGER NOT NULL DEFAULT 0")
-    if "max_active_orders" not in beverage_columns:
-        db.execute("ALTER TABLE bebidas ADD COLUMN max_active_orders INTEGER")
 
-    pedido_columns = [row["name"] for row in db.execute("PRAGMA table_info(pedidos)").fetchall()]
-    if "turno_id" not in pedido_columns:
-        db.execute("ALTER TABLE pedidos ADD COLUMN turno_id INTEGER")
-    if "customer_name" not in pedido_columns:
-        db.execute("ALTER TABLE pedidos ADD COLUMN customer_name TEXT")
-    if "table_label" not in pedido_columns:
-        db.execute("ALTER TABLE pedidos ADD COLUMN table_label TEXT")
-    if "source" not in pedido_columns:
-        db.execute("ALTER TABLE pedidos ADD COLUMN source TEXT")
-    if "completed_at" not in pedido_columns:
-        db.execute("ALTER TABLE pedidos ADD COLUMN completed_at TEXT")
-    if "completed_by_user_id" not in pedido_columns:
-        db.execute("ALTER TABLE pedidos ADD COLUMN completed_by_user_id INTEGER")
-    if "order_number" not in pedido_columns:
-        db.execute("ALTER TABLE pedidos ADD COLUMN order_number TEXT")
-    if "payment_method" not in pedido_columns:
-        db.execute("ALTER TABLE pedidos ADD COLUMN payment_method TEXT")
-    if "payment_status" not in pedido_columns:
-        db.execute("ALTER TABLE pedidos ADD COLUMN payment_status TEXT")
-    if "payment_provider" not in pedido_columns:
-        db.execute("ALTER TABLE pedidos ADD COLUMN payment_provider TEXT")
-    if "payment_provider_id" not in pedido_columns:
-        db.execute("ALTER TABLE pedidos ADD COLUMN payment_provider_id TEXT")
-    if "paid_at" not in pedido_columns:
-        db.execute("ALTER TABLE pedidos ADD COLUMN paid_at TEXT")
-    if "pix_qr_code" not in pedido_columns:
-        db.execute("ALTER TABLE pedidos ADD COLUMN pix_qr_code TEXT")
-    if "pix_copy_paste" not in pedido_columns:
-        db.execute("ALTER TABLE pedidos ADD COLUMN pix_copy_paste TEXT")
-    if "request_id" not in pedido_columns:
-        db.execute("ALTER TABLE pedidos ADD COLUMN request_id TEXT")
-    if "order_type" not in pedido_columns:
-        db.execute("ALTER TABLE pedidos ADD COLUMN order_type TEXT")
+def apply_schema_updates(db: DatabaseConnection) -> None:
+    db.execute("ALTER TABLE bebidas ADD COLUMN IF NOT EXISTS categoria TEXT")
+    db.execute("ALTER TABLE bebidas ADD COLUMN IF NOT EXISTS descricao TEXT")
+    db.execute("ALTER TABLE bebidas ADD COLUMN IF NOT EXISTS tempo_preparo TEXT")
+    db.execute("ALTER TABLE bebidas ADD COLUMN IF NOT EXISTS imagem_url TEXT")
+    db.execute("ALTER TABLE bebidas ADD COLUMN IF NOT EXISTS is_active INTEGER NOT NULL DEFAULT 1")
+    db.execute("ALTER TABLE bebidas ADD COLUMN IF NOT EXISTS is_combo INTEGER NOT NULL DEFAULT 0")
+    db.execute("ALTER TABLE bebidas ADD COLUMN IF NOT EXISTS max_active_orders INTEGER")
+
+    db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS turno_id BIGINT")
+    db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS customer_name TEXT")
+    db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS table_label TEXT")
+    db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS source TEXT")
+    db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS completed_at TEXT")
+    db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS completed_by_user_id BIGINT")
+    db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS order_number TEXT")
+    db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS payment_method TEXT")
+    db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS payment_status TEXT")
+    db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS payment_provider TEXT")
+    db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS payment_provider_id TEXT")
+    db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS paid_at TEXT")
+    db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS pix_qr_code TEXT")
+    db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS pix_copy_paste TEXT")
+    db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS request_id TEXT")
+    db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS order_type TEXT")
     db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_pedidos_request_id ON pedidos(request_id)")
 
-    order_item_columns = [row["name"] for row in db.execute("PRAGMA table_info(itens_pedido)").fetchall()]
-    if "item_name_snapshot" not in order_item_columns:
-        db.execute("ALTER TABLE itens_pedido ADD COLUMN item_name_snapshot TEXT")
-    if "item_type_snapshot" not in order_item_columns:
-        db.execute("ALTER TABLE itens_pedido ADD COLUMN item_type_snapshot TEXT")
-    if "unit_price_snapshot" not in order_item_columns:
-        db.execute("ALTER TABLE itens_pedido ADD COLUMN unit_price_snapshot REAL")
-    if "unit_cost_snapshot" not in order_item_columns:
-        db.execute("ALTER TABLE itens_pedido ADD COLUMN unit_cost_snapshot REAL")
+    db.execute("ALTER TABLE itens_pedido ADD COLUMN IF NOT EXISTS item_name_snapshot TEXT")
+    db.execute("ALTER TABLE itens_pedido ADD COLUMN IF NOT EXISTS item_type_snapshot TEXT")
+    db.execute("ALTER TABLE itens_pedido ADD COLUMN IF NOT EXISTS unit_price_snapshot DOUBLE PRECISION")
+    db.execute("ALTER TABLE itens_pedido ADD COLUMN IF NOT EXISTS unit_cost_snapshot DOUBLE PRECISION")
 
+
+def seed_bootstrap_data(db: DatabaseConnection) -> None:
     beverages_total = db.execute("SELECT COUNT(*) AS total FROM bebidas").fetchone()["total"]
     inventory_total = db.execute("SELECT COUNT(*) AS total FROM inventory_items").fetchone()["total"]
     notes_total = db.execute("SELECT COUNT(*) AS total FROM shift_notes").fetchone()["total"]
 
-    # Dados bootstrap so entram em banco vazio. Isso evita reintroduzir
-    # dados de exemplo sobre uma base de producao ja operando.
     if ENABLE_BOOTSTRAP_SEED and beverages_total == 0:
         for beverage in BEVERAGE_SEED:
             db.execute(
@@ -825,19 +987,24 @@ def init_db() -> None:
             account["display_name"],
         )
 
-    open_shift = db.execute("SELECT id FROM turnos WHERE status = 'open' ORDER BY id DESC LIMIT 1").fetchone()
-    if not open_shift:
-        cursor = db.execute(
-            """
-            INSERT INTO turnos (aberto_em, status)
-            VALUES (?, 'open')
-            """,
-            (utc_now_iso(),),
-        )
-        open_shift_id = cursor.lastrowid
-    else:
-        open_shift_id = open_shift["id"]
 
+def ensure_open_shift(db: DatabaseConnection) -> int:
+    open_shift = db.execute("SELECT id FROM turnos WHERE status = 'open' ORDER BY id DESC LIMIT 1").fetchone()
+    if open_shift:
+        return open_shift["id"]
+
+    created_shift = db.execute(
+        """
+        INSERT INTO turnos (aberto_em, status)
+        VALUES (?, 'open')
+        RETURNING id
+        """,
+        (utc_now_iso(),),
+    ).fetchone()
+    return created_shift["id"]
+
+
+def backfill_existing_rows(db: DatabaseConnection, open_shift_id: int) -> None:
     db.execute(
         "UPDATE pedidos SET turno_id = ? WHERE turno_id IS NULL",
         (open_shift_id,),
@@ -924,7 +1091,7 @@ def init_db() -> None:
         """
         UPDATE itens_pedido
         SET unit_price_snapshot = ROUND(
-            subtotal / CASE WHEN quantidade > 0 THEN quantidade ELSE 1 END,
+            CAST((subtotal / CASE WHEN quantidade > 0 THEN quantidade ELSE 1 END) AS numeric),
             2
         )
         WHERE unit_price_snapshot IS NULL
@@ -942,9 +1109,23 @@ def init_db() -> None:
         """
     )
 
-    validate_staff_bootstrap(db)
-    db.commit()
-    db.close()
+
+def init_db() -> None:
+    db = open_db_connection()
+    try:
+        create_core_tables(db)
+        apply_schema_updates(db)
+        import_legacy_sqlite_if_needed(db)
+        seed_bootstrap_data(db)
+        open_shift_id = ensure_open_shift(db)
+        backfill_existing_rows(db, open_shift_id)
+        validate_staff_bootstrap(db)
+        db.commit()
+    except Exception:
+        safe_rollback(db)
+        raise
+    finally:
+        db.close()
 
 
 def is_api_request() -> bool:
@@ -967,7 +1148,7 @@ def permission_denied_response():
     return redirect(url_for("dashboard"))
 
 
-def fetch_staff_user_by_id(user_id: int | None, db: sqlite3.Connection | None = None) -> sqlite3.Row | None:
+def fetch_staff_user_by_id(user_id: int | None, db: DatabaseConnection | None = None) -> DbRow | None:
     if not user_id:
         return None
     connection = db or get_db()
@@ -981,7 +1162,7 @@ def fetch_staff_user_by_id(user_id: int | None, db: sqlite3.Connection | None = 
     ).fetchone()
 
 
-def fetch_staff_user_by_username(username: str, db: sqlite3.Connection | None = None) -> sqlite3.Row | None:
+def fetch_staff_user_by_username(username: str, db: DatabaseConnection | None = None) -> DbRow | None:
     normalized_username = (username or "").strip()
     if not normalized_username:
         return None
@@ -996,7 +1177,7 @@ def fetch_staff_user_by_username(username: str, db: sqlite3.Connection | None = 
     ).fetchone()
 
 
-def authenticate_staff_user(username: str, password: str) -> sqlite3.Row | None:
+def authenticate_staff_user(username: str, password: str) -> DbRow | None:
     user = fetch_staff_user_by_username(username)
     if not user or not user["is_active"]:
         return None
@@ -1005,7 +1186,7 @@ def authenticate_staff_user(username: str, password: str) -> sqlite3.Row | None:
     return user
 
 
-def begin_staff_session(user: sqlite3.Row) -> None:
+def begin_staff_session(user: DbRow) -> None:
     session.clear()
     session["bar_authenticated"] = True
     session["bar_user_id"] = user["id"]
@@ -1413,30 +1594,32 @@ def get_current_shift_id() -> int:
     if row:
         return row["id"]
 
-    cursor = db.execute(
+    row = db.execute(
         """
         INSERT INTO turnos (aberto_em, status)
         VALUES (?, 'open')
+        RETURNING id
         """,
         (utc_now_iso(),),
-    )
+    ).fetchone()
     db.commit()
-    return cursor.lastrowid
+    return row["id"]
 
 
 def open_new_shift(*, commit: bool = True) -> int:
     db = get_db()
-    cursor = db.execute(
+    row = db.execute(
         """
         INSERT INTO turnos (aberto_em, status)
         VALUES (?, 'open')
+        RETURNING id
         """,
         (utc_now_iso(),),
-    )
+    ).fetchone()
     db.execute("UPDATE shift_notes SET status = 'open'")
     if commit:
         db.commit()
-    return cursor.lastrowid
+    return row["id"]
 
 
 def calculate_inventory_status(stock_level: float, par_level: float) -> str:
@@ -2399,7 +2582,7 @@ def build_peak_window_metrics(order_rows: list[sqlite3.Row]) -> dict | None:
 
     buckets: dict[datetime, dict[str, float]] = {}
     for row in order_rows:
-        local_dt = datetime.fromisoformat(row["horario_pedido"]).astimezone()
+        local_dt = datetime.fromisoformat(row["horario_pedido"]).astimezone(ZoneInfo("America/Sao_Paulo"))
         bucket_start = local_dt.replace(minute=0, second=0, microsecond=0)
         bucket = buckets.setdefault(bucket_start, {"orders": 0, "revenue": 0.0})
         bucket["orders"] += 1
@@ -2881,20 +3064,19 @@ def build_closeout_report(shift_id: int | None = None) -> dict:
 def archive_current_shift_and_open_next(expected_shift_id: int | None = None) -> dict:
     db = get_db()
     try:
-        db.execute("BEGIN IMMEDIATE")
         current_shift_id = get_current_shift_id()
         if expected_shift_id is not None and expected_shift_id != current_shift_id:
-            db.rollback()
+            safe_rollback(db)
             raise ValueError("O turno ativo mudou. Atualize o painel antes de tentar fechar novamente.")
 
         blockers = get_shift_closeout_blockers(current_shift_id)
         if blockers["pending_orders"]:
-            db.rollback()
+            safe_rollback(db)
             raise ValueError(
                 f"Nao e possivel fechar o turno: existem {blockers['pending_orders']} pedidos pendentes."
             )
         if blockers["unpaid_orders"]:
-            db.rollback()
+            safe_rollback(db)
             if blockers["unpaid_pix_orders"]:
                 raise ValueError(
                     f"Nao e possivel fechar o turno: existem {blockers['unpaid_pix_orders']} pedidos Pix sem confirmacao."
@@ -2914,14 +3096,13 @@ def archive_current_shift_and_open_next(expected_shift_id: int | None = None) ->
             (closed_at, json.dumps(report), current_shift_id),
         )
         if result.rowcount != 1:
-            db.rollback()
+            safe_rollback(db)
             raise ValueError("O turno nao pode ser fechado novamente. Atualize o painel.")
 
         new_shift_id = open_new_shift(commit=False)
         db.commit()
     except Exception:
-        if db.in_transaction:
-            db.rollback()
+        safe_rollback(db)
         raise
 
     return {
@@ -3354,7 +3535,7 @@ def upsert_combo_from_form(combo_id: int | None = None) -> str:
         target_combo_id = combo_id
         success_message = "Combo atualizado com sucesso."
     else:
-        cursor = db.execute(
+        row = db.execute(
             """
             INSERT INTO bebidas (
                 nome,
@@ -3369,10 +3550,11 @@ def upsert_combo_from_form(combo_id: int | None = None) -> str:
                 max_active_orders
             )
             VALUES (?, ?, ?, 'Combo', ?, '4 min', ?, ?, 1, ?)
+            RETURNING id
             """,
             (name, price, estimated_cost, description, image_url, is_active, max_active_orders),
-        )
-        target_combo_id = cursor.lastrowid
+        ).fetchone()
+        target_combo_id = row["id"]
         success_message = "Combo criado com sucesso."
 
     db.executemany(
@@ -3535,7 +3717,7 @@ def save_product():
         message = upsert_product_from_form(product_id)
         get_db().commit()
         return build_products_redirect(message=message)
-    except sqlite3.IntegrityError:
+    except IntegrityError:
         get_db().rollback()
         return build_products_redirect(error="Ja existe um produto com esse nome.")
     except ValueError as error:
@@ -3553,7 +3735,7 @@ def save_combo():
         message = upsert_combo_from_form(combo_id)
         get_db().commit()
         return build_products_redirect(message=message)
-    except sqlite3.IntegrityError:
+    except IntegrityError:
         get_db().rollback()
         return build_products_redirect(error="Ja existe um item com esse nome.")
     except ValueError as error:
@@ -3749,7 +3931,6 @@ def create_order():
         pix_qr_code = None
         pix_copy_paste = None
     try:
-        db.execute("BEGIN IMMEDIATE")
         existing_order = fetch_order_row_by_request_id(request_id)
         if existing_order:
             db.rollback()
@@ -3842,7 +4023,7 @@ def create_order():
         horario = utc_now_iso()
         turno_id = get_current_shift_id()
 
-        cursor = db.execute(
+        pedido_row = db.execute(
             """
             INSERT INTO pedidos (
                 codigo_retirada,
@@ -3864,6 +4045,7 @@ def create_order():
                 request_id
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            RETURNING id
             """,
             (
                 codigo,
@@ -3884,8 +4066,8 @@ def create_order():
                 pix_copy_paste,
                 request_id,
             ),
-        )
-        pedido_id = cursor.lastrowid
+        ).fetchone()
+        pedido_id = pedido_row["id"]
 
         db.executemany(
             """
@@ -3916,7 +4098,7 @@ def create_order():
             ],
         )
         db.commit()
-    except sqlite3.IntegrityError:
+    except IntegrityError:
         db.rollback()
         existing_order = fetch_order_row_by_request_id(request_id)
         if existing_order:
@@ -4122,6 +4304,6 @@ init_db()
 if __name__ == "__main__":
     host = os.getenv("BAROS_HOST", "127.0.0.1")
     port = int(os.getenv("PORT", os.getenv("BAROS_PORT", "5000")))
-    debug = os.getenv("BAROS_DEBUG", "true").lower() == "true"
+    debug = IS_LOCAL_ENV and os.getenv("BAROS_DEBUG", "true").lower() == "true"
     app.run(debug=debug, host=host, port=port)
 
