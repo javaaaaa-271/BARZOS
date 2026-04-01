@@ -323,7 +323,8 @@ ENABLE_BOOTSTRAP_SEED = os.getenv("BAROS_ENABLE_BOOTSTRAP_SEED", "true").lower()
 SQL_NAMED_PARAM_PATTERN = re.compile(r"(?<!:):([A-Za-z_][A-Za-z0-9_]*)")
 DbRow = dict[str, Any]
 SNAPSHOT_CACHE_TTLS = {
-    "menu": 2.0,
+    "catalog_context": 3.0,
+    "menu": 10.0,
     "logistics": 3.0,
     "order_summary": 2.0,
     "shift_history": 15.0,
@@ -460,6 +461,34 @@ def invalidate_snapshot_cache(*prefixes: str) -> None:
         stale_keys = [key for key in _SNAPSHOT_CACHE if any(key.startswith(prefix) for prefix in prefixes)]
         for key in stale_keys:
             _SNAPSHOT_CACHE.pop(key, None)
+
+
+class RequestProfiler:
+    def __init__(self, route_name: str) -> None:
+        self.route_name = route_name
+        self.started_at = time.perf_counter()
+        self.last_checkpoint = self.started_at
+        self.steps: list[tuple[str, float]] = []
+
+    def mark(self, step_name: str) -> None:
+        current_time = time.perf_counter()
+        self.steps.append((step_name, (current_time - self.last_checkpoint) * 1000))
+        self.last_checkpoint = current_time
+
+    def log(self, *, status: str = "ok", **extra: Any) -> None:
+        total_ms = (time.perf_counter() - self.started_at) * 1000
+        serialized_steps = ", ".join(f"{name}={duration:.1f}ms" for name, duration in self.steps) or "no-steps"
+        serialized_extra = ", ".join(f"{key}={value}" for key, value in extra.items() if value is not None)
+        if serialized_extra:
+            serialized_extra = f" | {serialized_extra}"
+        app.logger.info(
+            "[perf] route=%s status=%s total_ms=%.1f | %s%s",
+            self.route_name,
+            status,
+            total_ms,
+            serialized_steps,
+            serialized_extra,
+        )
 
 
 def sanitize_optional_text(value: str | None, limit: int = 255) -> str:
@@ -2196,16 +2225,57 @@ def reserve_stock_deductions(
     return []
 
 
+def build_catalog_runtime_context() -> dict[str, Any]:
+    beverage_rows = fetch_beverage_rows(include_inactive=True)
+    beverages_by_id = {row["id"]: row for row in beverage_rows}
+    combo_ids = [row["id"] for row in beverage_rows if row["is_combo"]]
+    return {
+        "beverage_rows": beverage_rows,
+        "active_beverage_rows": [row for row in beverage_rows if row["is_active"]],
+        "beverages_by_id": beverages_by_id,
+        "combo_components_map": fetch_combo_components_map(combo_ids),
+        "inventory_by_name": get_inventory_by_name(),
+        "preorder_settings": fetch_preorder_settings(),
+        "active_preorder_counts": fetch_active_preorder_counts(),
+    }
+
+
+def fetch_catalog_runtime_context() -> dict[str, Any]:
+    cache_key = "catalog-context"
+    cached_value = read_snapshot_cache(cache_key)
+    if cached_value is not None:
+        return cached_value
+    return write_snapshot_cache(
+        cache_key,
+        SNAPSHOT_CACHE_TTLS["catalog_context"],
+        build_catalog_runtime_context(),
+    )
+
+
 def build_menu_snapshot() -> list[dict]:
-    inventory_by_name = get_inventory_by_name()
-    rows = fetch_beverage_rows(include_inactive=False)
-    beverages_by_id = fetch_beverage_map(include_inactive=True)
-    combo_components_map = fetch_combo_components_map([row["id"] for row in rows if row["is_combo"]])
-    preorder_settings = fetch_preorder_settings()
-    active_counts = fetch_active_preorder_counts()
+    profiler = RequestProfiler("menu_snapshot")
+    catalog_context = fetch_catalog_runtime_context()
+    profiler.mark("fetch_catalog_context")
+    inventory_by_name = catalog_context["inventory_by_name"]
+    rows = catalog_context["active_beverage_rows"]
+    beverages_by_id = catalog_context["beverages_by_id"]
+    combo_components_map = catalog_context["combo_components_map"]
+    preorder_settings = catalog_context["preorder_settings"]
+    active_counts = catalog_context["active_preorder_counts"]
     menu = []
     for row in rows:
-        menu_item = get_beverage_display_data(row)
+        display_data = get_beverage_display_data(row)
+        menu_item = {
+            "id": display_data["id"],
+            "name": display_data["name"],
+            "price": display_data["price"],
+            "category": display_data["category"],
+            "description": display_data["description"],
+            "prep_time": display_data["prep_time"],
+            "image_src": display_data["image_src"],
+            "placeholder": display_data["placeholder"],
+            "is_combo": display_data["is_combo"],
+        }
         is_available, availability_note, availability_state = beverage_availability(
             row,
             inventory_by_name,
@@ -2228,6 +2298,8 @@ def build_menu_snapshot() -> list[dict]:
             }
         )
         menu.append(menu_item)
+    profiler.mark("assemble_menu")
+    profiler.log(status="cache_miss", menu_items=len(menu))
     return menu
 
 
@@ -2487,6 +2559,63 @@ def serialize_order(row: sqlite3.Row, items: list[DbRow] | None = None) -> dict:
             for item in items
         ],
     }
+
+
+def build_created_order_response(
+    *,
+    order_id: int,
+    code: str,
+    order_number: str,
+    created_at: str,
+    status: str,
+    total: float,
+    customer_name: str,
+    table_label: str,
+    source: str,
+    payment_method: str,
+    payment_status: str,
+    order_type: str,
+    payment_provider: str | None,
+    payment_provider_id: str | None,
+    pix_qr_code: str | None,
+    pix_copy_paste: str | None,
+    items: list[dict],
+) -> dict:
+    row = {
+        "id": order_id,
+        "codigo_retirada": code,
+        "order_number": order_number,
+        "horario_pedido": created_at,
+        "status": status,
+        "valor_total": total,
+        "customer_name": customer_name,
+        "table_label": table_label,
+        "source": source,
+        "completed_at": None,
+        "payment_method": payment_method,
+        "payment_status": payment_status,
+        "order_type": order_type,
+        "payment_provider": payment_provider,
+        "payment_provider_id": payment_provider_id,
+        "paid_at": None,
+        "pix_qr_code": pix_qr_code,
+        "pix_copy_paste": pix_copy_paste,
+    }
+    serialized_items = [
+        {
+            "bebida_id": item["bebida_id"],
+            "item_name_snapshot": item["name"],
+            "nome": item["name"],
+            "quantidade": item["quantity"],
+            "unit_price_snapshot": item["price"],
+            "preco_venda": item["price"],
+            "subtotal": item["subtotal"],
+            "item_type_snapshot": item["item_type"],
+            "is_combo": item["item_type"] == "combo",
+        }
+        for item in items
+    ]
+    return serialize_order(row, serialized_items)
 
 
 def fetch_orders(status: str | None = None, limit: int | None = None, shift_id: int | None = None) -> list[dict]:
@@ -3710,20 +3839,33 @@ def upsert_combo_from_form(combo_id: int | None = None) -> str:
 
 @app.get("/")
 def index():
-    return render_template(
-        "index.html",
-        menu=fetch_menu(),
-        current_time=display_datetime(utc_now_iso()),
-        staff_access_url=url_for("staff_access"),
-        order_types=[
-            {"value": value, "label": label}
-            for value, label in ORDER_TYPE_LABELS.items()
-        ],
-        payment_methods=[
-            {"value": value, "label": label}
-            for value, label in PAYMENT_METHOD_LABELS.items()
-        ],
-    )
+    profiler = RequestProfiler("GET /")
+    menu: list[dict] = []
+    status = "ok"
+    try:
+        menu = fetch_menu()
+        profiler.mark("fetch_menu")
+        response = render_template(
+            "index.html",
+            menu=menu,
+            current_time=local_now().strftime("%d/%m/%Y %H:%M"),
+            staff_access_url=url_for("staff_access"),
+            order_types=[
+                {"value": value, "label": label}
+                for value, label in ORDER_TYPE_LABELS.items()
+            ],
+            payment_methods=[
+                {"value": value, "label": label}
+                for value, label in PAYMENT_METHOD_LABELS.items()
+            ],
+        )
+        profiler.mark("render_template")
+        return response
+    except Exception:
+        status = "error"
+        raise
+    finally:
+        profiler.log(status=status, menu_items=len(menu))
 
 
 def build_dashboard_redirect(message: str | None = None, error: str | None = None):
@@ -3854,6 +3996,7 @@ def save_product():
     try:
         message = upsert_product_from_form(product_id)
         get_db().commit()
+        invalidate_snapshot_cache("catalog-context", "menu", "logistics")
         return build_products_redirect(message=message)
     except IntegrityError:
         get_db().rollback()
@@ -3872,6 +4015,7 @@ def save_combo():
     try:
         message = upsert_combo_from_form(combo_id)
         get_db().commit()
+        invalidate_snapshot_cache("catalog-context", "menu", "logistics")
         return build_products_redirect(message=message)
     except IntegrityError:
         get_db().rollback()
@@ -3888,6 +4032,7 @@ def save_preorder():
     try:
         message = save_preorder_settings_from_form()
         get_db().commit()
+        invalidate_snapshot_cache("catalog-context", "menu")
         return build_preorder_redirect(message=message)
     except ValueError as error:
         get_db().rollback()
@@ -4031,13 +4176,19 @@ def export_shift_pdf(shift_id: int):
 
 @app.post("/api/orders")
 def create_order():
+    profiler = RequestProfiler("POST /api/orders")
+    status = "ok"
     payload = request.get_json(silent=True) or {}
+    profiler.mark("parse_json")
     request_id = normalize_request_id(request.headers.get("Idempotency-Key") or payload.get("request_id"))
     if not request_id:
+        status = "missing_request_id"
         return jsonify({"error": "request_id obrigatorio para criar o pedido."}), 400
 
     selected_items, validation_error = validate_order_payload(payload.get("items") or [])
+    profiler.mark("validate_payload")
     if validation_error:
+        status = "invalid_payload"
         return jsonify({"error": validation_error}), 400
 
     db = get_db()
@@ -4055,8 +4206,10 @@ def create_order():
         customer_name,
     )
     if not payment_method:
+        status = "invalid_payment_method"
         return jsonify({"error": "Escolha uma forma de pagamento valida antes de enviar o pedido."}), 400
     if not order_type:
+        status = "invalid_order_type"
         return jsonify({"error": "Escolha o tipo do pedido antes de enviar."}), 400
 
     payment_status = "pending"
@@ -4070,6 +4223,14 @@ def create_order():
         payment_provider_id = None
         pix_qr_code = None
         pix_copy_paste = None
+
+    pedido_id: int | None = None
+    codigo: str | None = None
+    itens: list[dict] = []
+    valor_total = 0.0
+    response_order: dict | None = None
+    response_summary: dict | None = None
+    turno_id: int | None = None
     try:
         turno_id = get_current_shift_id()
         attach_order_context(
@@ -4077,9 +4238,12 @@ def create_order():
             payment_method=payment_method,
             shift_id=turno_id,
         )
+        profiler.mark("resolve_shift")
         existing_order = fetch_order_row_by_request_id(request_id)
+        profiler.mark("idempotency_lookup")
         if existing_order:
-            db.rollback()
+            safe_rollback(db)
+            status = "idempotent_hit"
             return (
                 jsonify(
                     {
@@ -4090,14 +4254,14 @@ def create_order():
                 200,
             )
 
-        bebidas_por_id = fetch_beverage_map(include_inactive=True)
-        combo_components_map = fetch_combo_components_map()
-        inventory_by_name = get_inventory_by_name()
-        preorder_settings = fetch_preorder_settings()
-        active_preorder_counts = fetch_active_preorder_counts()
+        catalog_context = fetch_catalog_runtime_context()
+        bebidas_por_id = catalog_context["beverages_by_id"]
+        combo_components_map = catalog_context["combo_components_map"]
+        inventory_by_name = catalog_context["inventory_by_name"]
+        preorder_settings = catalog_context["preorder_settings"]
+        active_preorder_counts = catalog_context["active_preorder_counts"]
+        profiler.mark("load_catalog_context")
 
-        itens = []
-        valor_total = 0.0
         for entry in selected_items:
             bebida_id = entry["id"]
             quantidade = entry["quantity"]
@@ -4129,18 +4293,22 @@ def create_order():
                     "item_type": "combo" if bebida["is_combo"] else "product",
                 }
             )
+        profiler.mark("build_order_items")
 
         if not itens:
-            db.rollback()
+            safe_rollback(db)
+            status = "invalid_items"
             return jsonify({"error": "Itens invalidos."}), 400
 
         shortages = reserve_stock_deductions(itens, bebidas_por_id, combo_components_map)
+        profiler.mark("reserve_stock")
         if shortages:
             readable = ", ".join(
                 f'{entry["item"]} ({entry["available"]}/{entry["needed"]} {entry["unit"]})'.strip()
                 for entry in shortages
             )
-            db.rollback()
+            safe_rollback(db)
+            status = "stock_shortage"
             return jsonify(
                 {
                     "error": f"Estoque insuficiente para concluir o pedido: {readable}",
@@ -4167,6 +4335,7 @@ def create_order():
         else:
             app.logger.info("create_order counter_branch code=%s", codigo)
         horario = utc_now_iso()
+        profiler.mark("prepare_order")
         attach_order_context(
             order_code=codigo,
             order_type=order_type,
@@ -4219,6 +4388,7 @@ def create_order():
             ),
         ).fetchone()
         pedido_id = pedido_row["id"]
+        profiler.mark("insert_order")
 
         db.executemany(
             """
@@ -4248,12 +4418,38 @@ def create_order():
                 for item in itens
             ],
         )
+        profiler.mark("insert_items")
         db.commit()
-        invalidate_snapshot_cache("menu", "logistics", "order-summary")
+        profiler.mark("commit")
+        response_order = build_created_order_response(
+            order_id=pedido_id,
+            code=codigo,
+            order_number=order_number,
+            created_at=horario,
+            status=order_status,
+            total=round(valor_total, 2),
+            customer_name=customer_name,
+            table_label=table_label,
+            source=source,
+            payment_method=payment_method,
+            payment_status=payment_status,
+            order_type=order_type,
+            payment_provider=payment_provider,
+            payment_provider_id=payment_provider_id,
+            pix_qr_code=pix_qr_code,
+            pix_copy_paste=pix_copy_paste,
+            items=itens,
+        )
+        profiler.mark("build_response_order")
+        invalidate_snapshot_cache("catalog-context", "menu", "logistics", "order-summary")
+        response_summary = build_order_summary(turno_id)
+        profiler.mark("build_summary_response")
+        status = "created"
     except IntegrityError as exc:
         safe_rollback(db)
         existing_order = fetch_order_row_by_request_id(request_id)
         if existing_order:
+            status = "integrity_idempotent_hit"
             return (
                 jsonify(
                     {
@@ -4264,39 +4460,23 @@ def create_order():
                 200,
             )
         sentry_sdk.capture_exception(exc)
+        status = "integrity_error"
         return jsonify({"error": "Nao foi possivel registrar o pedido agora. Tente novamente."}), 500
     except Exception as exc:
         safe_rollback(db)
         sentry_sdk.capture_exception(exc)
+        status = "error"
         return jsonify({"error": "Nao foi possivel criar o pedido agora. Tente novamente."}), 500
+    finally:
+        profiler.log(
+            status=status,
+            shift_id=turno_id,
+            item_count=len(itens),
+            payment_method=payment_method,
+            order_id=pedido_id,
+        )
 
-    row = db.execute(
-        """
-        SELECT
-            id,
-            codigo_retirada,
-            horario_pedido,
-            status,
-            valor_total,
-            customer_name,
-            table_label,
-            source,
-            completed_at,
-            order_number,
-            payment_method,
-            payment_status,
-            order_type,
-            payment_provider,
-            payment_provider_id,
-            paid_at,
-            pix_qr_code,
-            pix_copy_paste
-        FROM pedidos
-        WHERE id = ?
-        """,
-        (pedido_id,),
-    ).fetchone()
-    return jsonify({"order": serialize_order(row), "summary": build_order_summary()}), 201
+    return jsonify({"order": response_order, "summary": response_summary}), 201
 
 
 @app.post("/api/orders/<code>/pay")
@@ -4315,7 +4495,7 @@ def pay_order(code: str):
             shift_id=current_shift_id,
         )
         order = mark_as_paid(code, current_shift_id)
-        invalidate_snapshot_cache("order-summary")
+        invalidate_snapshot_cache("catalog-context", "order-summary")
     except LookupError:
         return jsonify({"error": "Pedido nao encontrado."}), 404
     except Exception as exc:
@@ -4357,7 +4537,7 @@ def complete_order(code: str):
             (utc_now_iso(), session.get("bar_user_id"), code, current_shift_id),
         )
         db.commit()
-        invalidate_snapshot_cache("order-summary")
+        invalidate_snapshot_cache("catalog-context", "order-summary")
 
         updated = fetch_order_row_by_code(code, current_shift_id)
         return jsonify({"order": serialize_order(updated), "summary": build_order_summary()})
@@ -4381,7 +4561,7 @@ def closeout_report():
             return jsonify({"error": "Turno esperado invalido."}), 400
     try:
         payload = archive_current_shift_and_open_next(expected_shift_id)
-        invalidate_snapshot_cache("order-summary", "shift-history", "logistics", "menu")
+        invalidate_snapshot_cache("catalog-context", "order-summary", "shift-history", "logistics", "menu")
         return jsonify(payload)
     except ValueError as error:
         return jsonify({"error": str(error)}), 409
@@ -4403,7 +4583,7 @@ def reset_data():
         archived = archive_current_shift_and_open_next(expected_shift_id)
     except ValueError as error:
         return jsonify({"error": str(error)}), 409
-    invalidate_snapshot_cache("order-summary", "shift-history", "logistics", "menu")
+    invalidate_snapshot_cache("catalog-context", "order-summary", "shift-history", "logistics", "menu")
     archived["ok"] = True
     return jsonify(archived)
 
@@ -4468,7 +4648,7 @@ def update_inventory(item_id: int):
         (next_stock, next_par, next_status, utc_now_iso(), item_id),
     )
     db.commit()
-    invalidate_snapshot_cache("logistics", "menu")
+    invalidate_snapshot_cache("catalog-context", "logistics", "menu")
     return jsonify(fetch_logistics_snapshot())
 
 
