@@ -50,6 +50,7 @@ IS_PRODUCTION = BAROS_ENV in {"production", "staging"}
 BAROS_SECRET_KEY = (os.getenv("BAROS_SECRET_KEY") or "").strip()
 BAROS_COOKIE_SECURE = os.getenv("BAROS_COOKIE_SECURE")
 SENTRY_DSN = (os.getenv("SENTRY_DSN") or "").strip()
+SENTRY_RELEASE = (os.getenv("BAROS_RELEASE") or os.getenv("RENDER_GIT_COMMIT") or "").strip() or None
 ALLOW_DEFAULT_SEED_USERS = (
     os.getenv("BAROS_ALLOW_DEFAULT_SEED_USERS", "true" if IS_LOCAL_ENV else "false").strip().lower()
     == "true"
@@ -353,6 +354,7 @@ if SENTRY_DSN:
     sentry_sdk.init(
         dsn=SENTRY_DSN,
         environment=BAROS_ENV,
+        release=SENTRY_RELEASE,
         traces_sample_rate=0.2,
         send_default_pii=False,
     )
@@ -1473,6 +1475,34 @@ def normalize_order_type(raw_value: str | None, fallback: str = "pista") -> str 
 
 def get_order_type_label(order_type: str | None) -> str:
     return ORDER_TYPE_LABELS.get(order_type or "", ORDER_TYPE_LABELS["pista"])
+
+
+def attach_order_context(
+    *,
+    order_code: str | None = None,
+    order_type: str | None = None,
+    payment_method: str | None = None,
+    shift_id: int | None = None,
+) -> None:
+    if not SENTRY_DSN:
+        return
+
+    context: dict[str, str | int] = {}
+    if order_code:
+        context["order_code"] = order_code
+        sentry_sdk.set_tag("order_code", order_code)
+    if order_type:
+        context["order_type"] = order_type
+        sentry_sdk.set_tag("order_type", order_type)
+    if payment_method:
+        context["payment_method"] = payment_method
+        sentry_sdk.set_tag("payment_method", payment_method)
+    if shift_id is not None:
+        context["shift_id"] = shift_id
+        sentry_sdk.set_tag("shift_id", str(shift_id))
+
+    if context:
+        sentry_sdk.set_context("order", context)
 
 
 def fetch_order_row_by_code(code: str, shift_id: int | None = None) -> sqlite3.Row | None:
@@ -3920,6 +3950,7 @@ def create_order():
         return jsonify({"error": "Escolha uma forma de pagamento valida antes de enviar o pedido."}), 400
     if not order_type:
         return jsonify({"error": "Escolha o tipo do pedido antes de enviar."}), 400
+
     payment_status = "pending"
     order_status = AWAITING_PAYMENT_STATUS if payment_method == "pix" else "new"
     payment_provider = sanitize_optional_text(payload.get("payment_provider"), limit=64) or None
@@ -3932,6 +3963,12 @@ def create_order():
         pix_qr_code = None
         pix_copy_paste = None
     try:
+        turno_id = get_current_shift_id()
+        attach_order_context(
+            order_type=order_type,
+            payment_method=payment_method,
+            shift_id=turno_id,
+        )
         existing_order = fetch_order_row_by_request_id(request_id)
         if existing_order:
             db.rollback()
@@ -4022,7 +4059,12 @@ def create_order():
         else:
             app.logger.info("create_order counter_branch code=%s", codigo)
         horario = utc_now_iso()
-        turno_id = get_current_shift_id()
+        attach_order_context(
+            order_code=codigo,
+            order_type=order_type,
+            payment_method=payment_method,
+            shift_id=turno_id,
+        )
 
         pedido_row = db.execute(
             """
@@ -4099,8 +4141,8 @@ def create_order():
             ],
         )
         db.commit()
-    except IntegrityError:
-        db.rollback()
+    except IntegrityError as exc:
+        safe_rollback(db)
         existing_order = fetch_order_row_by_request_id(request_id)
         if existing_order:
             return (
@@ -4112,10 +4154,12 @@ def create_order():
                 ),
                 200,
             )
-        raise
-    except Exception:
-        db.rollback()
-        raise
+        sentry_sdk.capture_exception(exc)
+        return jsonify({"error": "Nao foi possivel registrar o pedido agora. Tente novamente."}), 500
+    except Exception as exc:
+        safe_rollback(db)
+        sentry_sdk.capture_exception(exc)
+        return jsonify({"error": "Nao foi possivel criar o pedido agora. Tente novamente."}), 500
 
     row = db.execute(
         """
@@ -4150,9 +4194,23 @@ def create_order():
 @login_required
 def pay_order(code: str):
     try:
-        order = mark_as_paid(code)
+        current_shift_id = get_current_shift_id()
+        attach_order_context(order_code=code, shift_id=current_shift_id)
+        row = fetch_order_row_by_code(code, current_shift_id)
+        if not row:
+            return jsonify({"error": "Pedido nao encontrado."}), 404
+        attach_order_context(
+            order_code=code,
+            order_type=normalize_order_type(row["order_type"]) or "pista",
+            payment_method=normalize_payment_method(row["payment_method"]) or "counter",
+            shift_id=current_shift_id,
+        )
+        order = mark_as_paid(code, current_shift_id)
     except LookupError:
         return jsonify({"error": "Pedido nao encontrado."}), 404
+    except Exception as exc:
+        sentry_sdk.capture_exception(exc)
+        return jsonify({"error": "Nao foi possivel confirmar o pagamento agora. Tente novamente."}), 500
     return jsonify({"order": order, "summary": build_order_summary()})
 
 
@@ -4160,30 +4218,42 @@ def pay_order(code: str):
 @login_required
 def complete_order(code: str):
     db = get_db()
-    current_shift_id = get_current_shift_id()
-    row = fetch_order_row_by_code(code, current_shift_id)
-    if not row:
-        return jsonify({"error": "Pedido nao encontrado."}), 404
-    if row["status"] == "completed":
-        return jsonify({"order": serialize_order(row), "summary": build_order_summary()})
-    if row["status"] == AWAITING_PAYMENT_STATUS:
-        return jsonify({"error": "Esse pedido ainda aguarda confirmacao do Pix antes de ser liberado para o bar."}), 400
+    try:
+        current_shift_id = get_current_shift_id()
+        attach_order_context(order_code=code, shift_id=current_shift_id)
+        row = fetch_order_row_by_code(code, current_shift_id)
+        if not row:
+            return jsonify({"error": "Pedido nao encontrado."}), 404
+        attach_order_context(
+            order_code=code,
+            order_type=normalize_order_type(row["order_type"]) or "pista",
+            payment_method=normalize_payment_method(row["payment_method"]) or "counter",
+            shift_id=current_shift_id,
+        )
+        if row["status"] == "completed":
+            return jsonify({"order": serialize_order(row), "summary": build_order_summary()})
+        if row["status"] == AWAITING_PAYMENT_STATUS:
+            return jsonify({"error": "Esse pedido ainda aguarda confirmacao do Pix antes de ser liberado para o bar."}), 400
 
-    if row["payment_method"] == "pix" and normalize_payment_status(row["payment_status"], "pending") != "paid":
-        return jsonify({"error": "Pedidos com Pix so podem ser concluidos depois da confirmacao de pagamento."}), 400
+        if row["payment_method"] == "pix" and normalize_payment_status(row["payment_status"], "pending") != "paid":
+            return jsonify({"error": "Pedidos com Pix so podem ser concluidos depois da confirmacao de pagamento."}), 400
 
-    db.execute(
-        """
-        UPDATE pedidos
-        SET status = 'completed', completed_at = ?, completed_by_user_id = ?
-        WHERE codigo_retirada = ? AND turno_id = ?
-        """,
-        (utc_now_iso(), session.get("bar_user_id"), code, current_shift_id),
-    )
-    db.commit()
+        db.execute(
+            """
+            UPDATE pedidos
+            SET status = 'completed', completed_at = ?, completed_by_user_id = ?
+            WHERE codigo_retirada = ? AND turno_id = ?
+            """,
+            (utc_now_iso(), session.get("bar_user_id"), code, current_shift_id),
+        )
+        db.commit()
 
-    updated = fetch_order_row_by_code(code, current_shift_id)
-    return jsonify({"order": serialize_order(updated), "summary": build_order_summary()})
+        updated = fetch_order_row_by_code(code, current_shift_id)
+        return jsonify({"order": serialize_order(updated), "summary": build_order_summary()})
+    except Exception as exc:
+        safe_rollback(db)
+        sentry_sdk.capture_exception(exc)
+        return jsonify({"error": "Nao foi possivel concluir o pedido agora. Tente novamente."}), 500
 
 
 @app.post("/api/reports/closeout")
@@ -4297,6 +4367,20 @@ def close_shift_note(note_id: int):
     db.execute("UPDATE shift_notes SET status = 'done' WHERE id = ?", (note_id,))
     db.commit()
     return jsonify(fetch_logistics_snapshot())
+
+
+@app.get("/test-error")
+def test_error():
+    if BAROS_ENV == "production":
+        return "", 404
+    raise RuntimeError("BarOS test error for Sentry validation.")
+
+
+@app.errorhandler(500)
+def handle_internal_server_error(error):
+    if is_api_request():
+        return jsonify({"error": "Ocorreu um erro interno. Tente novamente."}), 500
+    return "Ocorreu um erro interno. Tente novamente.", 500
 
 
 init_db()
