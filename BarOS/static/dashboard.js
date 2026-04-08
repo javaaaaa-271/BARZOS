@@ -25,7 +25,8 @@ let latestClosedShiftId = null;
 let currentShiftId = dashboardConfig.currentShiftId || null;
 let closeoutRequestInFlight = false;
 let resetRequestInFlight = false;
-let dashboardRefreshInFlight = false;
+let isLoadingOrders = false;
+let pendingOrdersRefresh = false;
 let dashboardRefreshTimer = null;
 
 const brl = new Intl.NumberFormat("pt-BR", {
@@ -385,12 +386,31 @@ function setButtonBusy(button, busy, busyLabel, idleLabel) {
   button.textContent = busy ? busyLabel : idleLabel;
 }
 
-async function refreshDashboard() {
-  if (dashboardRefreshInFlight) {
+function clearDashboardRefreshTimer() {
+  if (dashboardRefreshTimer !== null) {
+    window.clearTimeout(dashboardRefreshTimer);
+    dashboardRefreshTimer = null;
+  }
+}
+
+function scheduleDashboardRefresh(delay = document.hidden ? DASHBOARD_REFRESH_HIDDEN_MS : DASHBOARD_REFRESH_VISIBLE_MS) {
+  clearDashboardRefreshTimer();
+  dashboardRefreshTimer = window.setTimeout(() => {
+    void refreshDashboard();
+  }, delay);
+}
+
+async function refreshDashboard({ queueIfBusy = false } = {}) {
+  if (isLoadingOrders) {
+    if (queueIfBusy) {
+      // Keep one follow-up refresh queued after manual actions during a slow poll.
+      pendingOrdersRefresh = true;
+    }
     return;
   }
 
-  dashboardRefreshInFlight = true;
+  clearDashboardRefreshTimer();
+  isLoadingOrders = true;
   try {
     const response = await fetch("/api/orders");
     if (!response.ok) {
@@ -400,8 +420,18 @@ async function refreshDashboard() {
 
     const data = await response.json();
     applyDashboardSnapshot(data);
+  } catch (error) {
+    refreshStatus.textContent = "Falha ao atualizar";
   } finally {
-    dashboardRefreshInFlight = false;
+    isLoadingOrders = false;
+
+    if (pendingOrdersRefresh) {
+      pendingOrdersRefresh = false;
+      scheduleDashboardRefresh(0);
+      return;
+    }
+
+    scheduleDashboardRefresh();
   }
 }
 
@@ -412,7 +442,7 @@ async function completeOrder(code) {
     refreshStatus.textContent = data.error || "Nao foi possivel concluir";
     return;
   }
-  await refreshDashboard();
+  await refreshDashboard({ queueIfBusy: true });
 }
 
 async function payOrder(code) {
@@ -422,7 +452,7 @@ async function payOrder(code) {
     refreshStatus.textContent = data.error || "Nao foi possivel registrar o pagamento";
     return;
   }
-  await refreshDashboard();
+  await refreshDashboard({ queueIfBusy: true });
 }
 
 async function updateInventoryRequest(itemId, payload) {
@@ -646,19 +676,10 @@ document.addEventListener("keydown", (event) => {
 });
 
 setCloseoutExportLink(null);
-refreshDashboard();
-
-function scheduleDashboardRefresh() {
-  const nextDelay = document.hidden ? DASHBOARD_REFRESH_HIDDEN_MS : DASHBOARD_REFRESH_VISIBLE_MS;
-  window.clearTimeout(dashboardRefreshTimer);
-  dashboardRefreshTimer = window.setTimeout(async () => {
-    await refreshDashboard();
-    scheduleDashboardRefresh();
-  }, nextDelay);
-}
+void refreshDashboard();
 
 document.addEventListener("visibilitychange", () => {
-  scheduleDashboardRefresh();
+  if (!isLoadingOrders) {
+    scheduleDashboardRefresh();
+  }
 });
-
-scheduleDashboardRefresh();
