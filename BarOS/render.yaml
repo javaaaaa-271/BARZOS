@@ -4,7 +4,7 @@ services:
     env: python
     buildCommand: python -m pip install -r requirements.txt
     startCommand: gunicorn app:app --worker-class gthread --workers 2 --threads 4 --timeout 120 --graceful-timeout 30 --keep-alive 5 --bind 0.0.0.0:$PORT
-    healthCheckPath: /
+    healthCheckPath: /health
     envVars:
       - key: BAROS_SECRET_KEY
         generateValue: true
