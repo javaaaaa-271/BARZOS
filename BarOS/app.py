@@ -3422,6 +3422,8 @@ def build_sales_report(shift_id: int | None = None) -> dict:
 
 def build_order_summary_payload(shift_id: int) -> dict:
     report = build_sales_report(shift_id)
+    peak_data = report.get("pico_atendimento") or {}
+    top_items = report.get("quantidade_por_bebida") or []
     counts = get_db().execute(
         """
         SELECT
@@ -3450,12 +3452,12 @@ def build_order_summary_payload(shift_id: int) -> dict:
         "pending_count": int(counts["pending_count"] or 0),
         "completed_count": int(counts["completed_count"] or 0),
         "awaiting_payment_count": int(counts["awaiting_payment_count"] or 0),
-        "total_count": report["total_pedidos"],
-        "revenue": report["total_recebido"],
-        "average_ticket": report["ticket_medio"],
-        "top_items": report["quantidade_por_bebida"][:4],
-        "peak_time_label": report["pico_atendimento"]["label"] if report["pico_atendimento"] else "Sem dados",
-        "peak_order_count": report["pico_atendimento"]["orders"] if report["pico_atendimento"] else 0,
+        "total_count": report.get("total_pedidos", 0),
+        "revenue": report.get("total_recebido", 0),
+        "average_ticket": report.get("ticket_medio", 0),
+        "top_items": top_items[:4],
+        "peak_time_label": peak_data.get("label", "Sem dados"),
+        "peak_order_count": peak_data.get("orders", 0),
         "top_tables": [
             {"table_label": row["table_label"], "total": row["total"]}
             for row in top_tables
