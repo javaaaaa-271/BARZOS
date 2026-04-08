@@ -643,6 +643,18 @@ def get_table_columns(db: DatabaseConnection, table_name: str) -> list[str]:
     return [row["column_name"] for row in rows]
 
 
+def get_table_indexes(db: DatabaseConnection, table_name: str) -> set[str]:
+    rows = db.execute(
+        """
+        SELECT indexname
+        FROM pg_indexes
+        WHERE schemaname = 'public' AND tablename = ?
+        """,
+        (table_name,),
+    ).fetchall()
+    return {row["indexname"] for row in rows}
+
+
 def table_row_count(db: DatabaseConnection, table_name: str) -> int:
     row = db.execute(f"SELECT COUNT(*) AS total FROM {table_name}").fetchone()
     return int(row["total"] or 0)
@@ -935,42 +947,71 @@ def create_core_tables(db: DatabaseConnection) -> None:
 
 
 def apply_schema_updates(db: DatabaseConnection) -> None:
-    db.execute("ALTER TABLE bebidas ADD COLUMN IF NOT EXISTS categoria TEXT")
-    db.execute("ALTER TABLE bebidas ADD COLUMN IF NOT EXISTS descricao TEXT")
-    db.execute("ALTER TABLE bebidas ADD COLUMN IF NOT EXISTS tempo_preparo TEXT")
-    db.execute("ALTER TABLE bebidas ADD COLUMN IF NOT EXISTS imagem_url TEXT")
-    db.execute("ALTER TABLE bebidas ADD COLUMN IF NOT EXISTS is_active INTEGER NOT NULL DEFAULT 1")
-    db.execute("ALTER TABLE bebidas ADD COLUMN IF NOT EXISTS is_combo INTEGER NOT NULL DEFAULT 0")
-    db.execute("ALTER TABLE bebidas ADD COLUMN IF NOT EXISTS max_active_orders INTEGER")
+    table_columns = {
+        "bebidas": set(get_table_columns(db, "bebidas")),
+        "pedidos": set(get_table_columns(db, "pedidos")),
+        "itens_pedido": set(get_table_columns(db, "itens_pedido")),
+    }
+    column_updates = [
+        ("bebidas", "categoria", "ALTER TABLE bebidas ADD COLUMN categoria TEXT"),
+        ("bebidas", "descricao", "ALTER TABLE bebidas ADD COLUMN descricao TEXT"),
+        ("bebidas", "tempo_preparo", "ALTER TABLE bebidas ADD COLUMN tempo_preparo TEXT"),
+        ("bebidas", "imagem_url", "ALTER TABLE bebidas ADD COLUMN imagem_url TEXT"),
+        ("bebidas", "is_active", "ALTER TABLE bebidas ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1"),
+        ("bebidas", "is_combo", "ALTER TABLE bebidas ADD COLUMN is_combo INTEGER NOT NULL DEFAULT 0"),
+        ("bebidas", "max_active_orders", "ALTER TABLE bebidas ADD COLUMN max_active_orders INTEGER"),
+        ("pedidos", "turno_id", "ALTER TABLE pedidos ADD COLUMN turno_id BIGINT"),
+        ("pedidos", "customer_name", "ALTER TABLE pedidos ADD COLUMN customer_name TEXT"),
+        ("pedidos", "table_label", "ALTER TABLE pedidos ADD COLUMN table_label TEXT"),
+        ("pedidos", "source", "ALTER TABLE pedidos ADD COLUMN source TEXT"),
+        ("pedidos", "completed_at", "ALTER TABLE pedidos ADD COLUMN completed_at TEXT"),
+        ("pedidos", "completed_by_user_id", "ALTER TABLE pedidos ADD COLUMN completed_by_user_id BIGINT"),
+        ("pedidos", "order_number", "ALTER TABLE pedidos ADD COLUMN order_number TEXT"),
+        ("pedidos", "payment_method", "ALTER TABLE pedidos ADD COLUMN payment_method TEXT"),
+        ("pedidos", "payment_status", "ALTER TABLE pedidos ADD COLUMN payment_status TEXT"),
+        ("pedidos", "payment_provider", "ALTER TABLE pedidos ADD COLUMN payment_provider TEXT"),
+        ("pedidos", "payment_provider_id", "ALTER TABLE pedidos ADD COLUMN payment_provider_id TEXT"),
+        ("pedidos", "paid_at", "ALTER TABLE pedidos ADD COLUMN paid_at TEXT"),
+        ("pedidos", "pix_qr_code", "ALTER TABLE pedidos ADD COLUMN pix_qr_code TEXT"),
+        ("pedidos", "pix_copy_paste", "ALTER TABLE pedidos ADD COLUMN pix_copy_paste TEXT"),
+        ("pedidos", "request_id", "ALTER TABLE pedidos ADD COLUMN request_id TEXT"),
+        ("pedidos", "order_type", "ALTER TABLE pedidos ADD COLUMN order_type TEXT"),
+        ("itens_pedido", "item_name_snapshot", "ALTER TABLE itens_pedido ADD COLUMN item_name_snapshot TEXT"),
+        ("itens_pedido", "item_type_snapshot", "ALTER TABLE itens_pedido ADD COLUMN item_type_snapshot TEXT"),
+        ("itens_pedido", "unit_price_snapshot", "ALTER TABLE itens_pedido ADD COLUMN unit_price_snapshot DOUBLE PRECISION"),
+        ("itens_pedido", "unit_cost_snapshot", "ALTER TABLE itens_pedido ADD COLUMN unit_cost_snapshot DOUBLE PRECISION"),
+    ]
+    for table_name, column_name, sql in column_updates:
+        if column_name not in table_columns[table_name]:
+            db.execute(sql)
+            table_columns[table_name].add(column_name)
 
-    db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS turno_id BIGINT")
-    db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS customer_name TEXT")
-    db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS table_label TEXT")
-    db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS source TEXT")
-    db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS completed_at TEXT")
-    db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS completed_by_user_id BIGINT")
-    db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS order_number TEXT")
-    db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS payment_method TEXT")
-    db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS payment_status TEXT")
-    db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS payment_provider TEXT")
-    db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS payment_provider_id TEXT")
-    db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS paid_at TEXT")
-    db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS pix_qr_code TEXT")
-    db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS pix_copy_paste TEXT")
-    db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS request_id TEXT")
-    db.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS order_type TEXT")
-    db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_pedidos_request_id ON pedidos(request_id)")
-    db.execute("CREATE INDEX IF NOT EXISTS idx_pedidos_turno_status_horario ON pedidos(turno_id, status, horario_pedido DESC)")
-    db.execute("CREATE INDEX IF NOT EXISTS idx_pedidos_turno_horario ON pedidos(turno_id, horario_pedido DESC)")
-    db.execute("CREATE INDEX IF NOT EXISTS idx_pedidos_turno_payment_status ON pedidos(turno_id, payment_status)")
-    db.execute("CREATE INDEX IF NOT EXISTS idx_pedidos_codigo_turno ON pedidos(codigo_retirada, turno_id)")
-    db.execute("CREATE INDEX IF NOT EXISTS idx_turnos_status_id ON turnos(status, id DESC)")
-
-    db.execute("ALTER TABLE itens_pedido ADD COLUMN IF NOT EXISTS item_name_snapshot TEXT")
-    db.execute("ALTER TABLE itens_pedido ADD COLUMN IF NOT EXISTS item_type_snapshot TEXT")
-    db.execute("ALTER TABLE itens_pedido ADD COLUMN IF NOT EXISTS unit_price_snapshot DOUBLE PRECISION")
-    db.execute("ALTER TABLE itens_pedido ADD COLUMN IF NOT EXISTS unit_cost_snapshot DOUBLE PRECISION")
-    db.execute("CREATE INDEX IF NOT EXISTS idx_itens_pedido_pedido_id ON itens_pedido(pedido_id)")
+    table_indexes = {
+        "pedidos": get_table_indexes(db, "pedidos"),
+        "turnos": get_table_indexes(db, "turnos"),
+        "itens_pedido": get_table_indexes(db, "itens_pedido"),
+    }
+    index_updates = [
+        ("pedidos", "idx_pedidos_request_id", "CREATE UNIQUE INDEX idx_pedidos_request_id ON pedidos(request_id)"),
+        (
+            "pedidos",
+            "idx_pedidos_turno_status_horario",
+            "CREATE INDEX idx_pedidos_turno_status_horario ON pedidos(turno_id, status, horario_pedido DESC)",
+        ),
+        ("pedidos", "idx_pedidos_turno_horario", "CREATE INDEX idx_pedidos_turno_horario ON pedidos(turno_id, horario_pedido DESC)"),
+        (
+            "pedidos",
+            "idx_pedidos_turno_payment_status",
+            "CREATE INDEX idx_pedidos_turno_payment_status ON pedidos(turno_id, payment_status)",
+        ),
+        ("pedidos", "idx_pedidos_codigo_turno", "CREATE INDEX idx_pedidos_codigo_turno ON pedidos(codigo_retirada, turno_id)"),
+        ("turnos", "idx_turnos_status_id", "CREATE INDEX idx_turnos_status_id ON turnos(status, id DESC)"),
+        ("itens_pedido", "idx_itens_pedido_pedido_id", "CREATE INDEX idx_itens_pedido_pedido_id ON itens_pedido(pedido_id)"),
+    ]
+    for table_name, index_name, sql in index_updates:
+        if index_name not in table_indexes[table_name]:
+            db.execute(sql)
+            table_indexes[table_name].add(index_name)
 
 
 def seed_bootstrap_data(db: DatabaseConnection) -> None:
