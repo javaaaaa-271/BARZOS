@@ -962,6 +962,7 @@ def apply_schema_updates(db: DatabaseConnection) -> None:
     db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_pedidos_request_id ON pedidos(request_id)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_pedidos_turno_status_horario ON pedidos(turno_id, status, horario_pedido DESC)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_pedidos_turno_horario ON pedidos(turno_id, horario_pedido DESC)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_pedidos_turno_payment_status ON pedidos(turno_id, payment_status)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_pedidos_codigo_turno ON pedidos(codigo_retirada, turno_id)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_turnos_status_id ON turnos(status, id DESC)")
 
@@ -2668,6 +2669,98 @@ def fetch_orders(status: str | None = None, limit: int | None = None, shift_id: 
     return [serialize_order(row, items_by_order_id.get(row["id"], [])) for row in rows]
 
 
+def fetch_dashboard_orders(shift_id: int | None = None, completed_limit: int = 20) -> dict[str, list[dict]]:
+    current_shift_id = shift_id or get_current_shift_id()
+    rows = get_db().execute(
+        """
+        WITH dashboard_orders AS (
+            SELECT
+                id,
+                codigo_retirada,
+                horario_pedido,
+                status,
+                valor_total,
+                customer_name,
+                table_label,
+                source,
+                completed_at,
+                order_number,
+                payment_method,
+                payment_status,
+                order_type,
+                payment_provider,
+                payment_provider_id,
+                paid_at,
+                pix_qr_code,
+                pix_copy_paste,
+                CASE
+                    WHEN status = ? THEN 'awaiting_payment'
+                    WHEN status IN (?, ?) THEN 'pending'
+                    WHEN status = 'completed' THEN 'completed'
+                    ELSE NULL
+                END AS dashboard_bucket,
+                CASE
+                    WHEN status = 'completed' THEN ROW_NUMBER() OVER (PARTITION BY status ORDER BY horario_pedido DESC)
+                    ELSE 1
+                END AS status_rank
+            FROM pedidos
+            WHERE turno_id = ?
+              AND status IN (?, ?, ?, 'completed')
+        )
+        SELECT
+            id,
+            codigo_retirada,
+            horario_pedido,
+            status,
+            valor_total,
+            customer_name,
+            table_label,
+            source,
+            completed_at,
+            order_number,
+            payment_method,
+            payment_status,
+            order_type,
+            payment_provider,
+            payment_provider_id,
+            paid_at,
+            pix_qr_code,
+            pix_copy_paste,
+            dashboard_bucket
+        FROM dashboard_orders
+        WHERE dashboard_bucket IS NOT NULL
+          AND (dashboard_bucket != 'completed' OR status_rank <= ?)
+        ORDER BY
+            CASE dashboard_bucket
+                WHEN 'awaiting_payment' THEN 0
+                WHEN 'pending' THEN 1
+                ELSE 2
+            END,
+            horario_pedido DESC
+        """,
+        (
+            AWAITING_PAYMENT_STATUS,
+            *ACTIVE_ORDER_STATUSES,
+            current_shift_id,
+            AWAITING_PAYMENT_STATUS,
+            *ACTIVE_ORDER_STATUSES,
+            completed_limit,
+        ),
+    ).fetchall()
+    grouped_orders: dict[str, list[dict]] = {
+        "awaiting_payment": [],
+        "pending": [],
+        "completed": [],
+    }
+    if not rows:
+        return grouped_orders
+
+    items_by_order_id = fetch_order_items_map([row["id"] for row in rows])
+    for row in rows:
+        grouped_orders[row["dashboard_bucket"]].append(serialize_order(row, items_by_order_id.get(row["id"], [])))
+    return grouped_orders
+
+
 def validate_order_payload(selected_items: list[dict]) -> tuple[list[dict], str | None]:
     if not isinstance(selected_items, list):
         return [], "Formato de itens invalido."
@@ -2847,6 +2940,38 @@ def build_peak_window_metrics(order_rows: list[sqlite3.Row]) -> dict | None:
     }
 
 
+def fetch_peak_window_metrics(shift_id: int) -> dict | None:
+    row = get_db().execute(
+        """
+        SELECT
+            DATE_TRUNC('hour', (horario_pedido::timestamptz AT TIME ZONE 'America/Sao_Paulo')) AS bucket_start_local,
+            COUNT(*) AS orders,
+            COALESCE(SUM(CASE WHEN COALESCE(payment_status, 'pending') = 'paid' THEN valor_total ELSE 0 END), 0) AS revenue
+        FROM pedidos
+        WHERE turno_id = ?
+        GROUP BY bucket_start_local
+        ORDER BY orders DESC, bucket_start_local ASC
+        LIMIT 1
+        """,
+        (shift_id,),
+    ).fetchone()
+    if not row:
+        return None
+
+    peak_start = row["bucket_start_local"]
+    if isinstance(peak_start, str):
+        peak_start = datetime.fromisoformat(peak_start)
+
+    return {
+        "label": peak_window_label(peak_start),
+        "hour": peak_window_label(peak_start),
+        "start_iso": peak_start.isoformat(),
+        "orders": int(row["orders"] or 0),
+        "order_count": int(row["orders"] or 0),
+        "revenue": round(float(row["revenue"] or 0), 2),
+    }
+
+
 def build_change_indicator(delta_value: float, tolerance: float = 0.01) -> tuple[str, str]:
     if abs(delta_value) < tolerance:
         return "sem mudanca relevante", "neutral"
@@ -2951,8 +3076,7 @@ def build_shift_metrics(shift_id: int) -> dict:
     ).fetchone()
     stored_summary = load_summary_payload(shift_row["resumo_fechamento"]) if shift_row else {}
 
-    order_rows = fetch_shift_orders_rows(shift_id)
-    peak_window = build_peak_window_metrics(order_rows)
+    peak_window = fetch_peak_window_metrics(shift_id)
 
     total_recebido = round(float(totals["total_recebido"] or 0), 2)
     total_pedidos = int(totals["total_pedidos"] or 0)
@@ -3252,6 +3376,17 @@ def build_sales_report(shift_id: int | None = None) -> dict:
 
 def build_order_summary_payload(shift_id: int) -> dict:
     report = build_sales_report(shift_id)
+    counts = get_db().execute(
+        """
+        SELECT
+            COALESCE(SUM(CASE WHEN status IN (?, ?) THEN 1 ELSE 0 END), 0) AS pending_count,
+            COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) AS completed_count,
+            COALESCE(SUM(CASE WHEN status = ? THEN 1 ELSE 0 END), 0) AS awaiting_payment_count
+        FROM pedidos
+        WHERE turno_id = ?
+        """,
+        (*ACTIVE_ORDER_STATUSES, AWAITING_PAYMENT_STATUS, shift_id),
+    ).fetchone()
     top_tables = get_db().execute(
         """
         SELECT
@@ -3265,28 +3400,13 @@ def build_order_summary_payload(shift_id: int) -> dict:
         """,
         (shift_id,),
     ).fetchall()
-    pending = get_db().execute(
-        "SELECT COUNT(*) AS total FROM pedidos WHERE status IN (?, ?) AND turno_id = ?",
-        (*ACTIVE_ORDER_STATUSES, shift_id),
-    ).fetchone()["total"]
-    completed = get_db().execute(
-        "SELECT COUNT(*) AS total FROM pedidos WHERE status = 'completed' AND turno_id = ?",
-        (shift_id,),
-    ).fetchone()["total"]
-    awaiting_payment = get_db().execute(
-        "SELECT COUNT(*) AS total FROM pedidos WHERE status = ? AND turno_id = ?",
-        (AWAITING_PAYMENT_STATUS, shift_id),
-    ).fetchone()["total"]
-    average_ticket = 0.0
-    if report["total_pedidos_pagos"]:
-        average_ticket = round(report["total_recebido"] / report["total_pedidos_pagos"], 2)
     return {
-        "pending_count": pending or 0,
-        "completed_count": completed or 0,
-        "awaiting_payment_count": awaiting_payment or 0,
+        "pending_count": int(counts["pending_count"] or 0),
+        "completed_count": int(counts["completed_count"] or 0),
+        "awaiting_payment_count": int(counts["awaiting_payment_count"] or 0),
         "total_count": report["total_pedidos"],
         "revenue": report["total_recebido"],
-        "average_ticket": average_ticket,
+        "average_ticket": report["ticket_medio"],
         "top_items": report["quantidade_por_bebida"][:4],
         "peak_time_label": report["pico_atendimento"]["label"] if report["pico_atendimento"] else "Sem dados",
         "peak_order_count": report["pico_atendimento"]["orders"] if report["pico_atendimento"] else 0,
@@ -3314,6 +3434,44 @@ def build_closeout_report(shift_id: int | None = None) -> dict:
     current_shift_id = shift_id or get_current_shift_id()
     metrics = build_shift_metrics(current_shift_id)
     return metrics
+
+
+def build_dashboard_snapshot(
+    shift_id: int,
+    *,
+    shift_history_limit: int = 5,
+    completed_limit: int = 20,
+    profiler: RequestProfiler | None = None,
+) -> dict:
+    summary = build_order_summary(shift_id)
+    if profiler:
+        profiler.mark("summary")
+
+    dashboard_orders = fetch_dashboard_orders(shift_id, completed_limit=completed_limit)
+    if profiler:
+        profiler.mark("orders")
+
+    logistics = fetch_logistics_snapshot()
+    if profiler:
+        profiler.mark("logistics")
+
+    shifts = fetch_shift_history(limit=shift_history_limit)
+    if profiler:
+        profiler.mark("shift_history")
+
+    generated_at = display_datetime(utc_now_iso())
+    if profiler:
+        profiler.mark("generated_at")
+
+    return {
+        "summary": summary,
+        "awaiting_payment": dashboard_orders["awaiting_payment"],
+        "pending": dashboard_orders["pending"],
+        "completed": dashboard_orders["completed"],
+        "logistics": logistics,
+        "shifts": shifts,
+        "generated_at": generated_at,
+    }
 
 
 def archive_current_shift_and_open_next(expected_shift_id: int | None = None) -> dict:
@@ -3365,20 +3523,14 @@ def archive_current_shift_and_open_next(expected_shift_id: int | None = None) ->
         "new_shift_id": new_shift_id,
         "current_shift_id": new_shift_id,
         "report": report,
-        "summary": build_order_summary(new_shift_id),
-        "awaiting_payment": fetch_orders(status="awaiting_payment", shift_id=new_shift_id),
-        "pending": fetch_orders(status="pending", shift_id=new_shift_id),
-        "completed": fetch_orders(status="completed", limit=20, shift_id=new_shift_id),
-        "logistics": fetch_logistics_snapshot(),
-        "shifts": fetch_shift_history(),
-        "generated_at": display_datetime(utc_now_iso()),
+        **build_dashboard_snapshot(new_shift_id),
     }
 
 
 def build_shift_history_payload(limit: int) -> list[dict]:
     rows = get_db().execute(
         """
-        SELECT id, aberto_em, fechado_em
+        SELECT id, aberto_em, fechado_em, resumo_fechamento
         FROM turnos
         WHERE status = 'closed'
         ORDER BY id DESC
@@ -3388,7 +3540,9 @@ def build_shift_history_payload(limit: int) -> list[dict]:
     ).fetchall()
     shifts = []
     for row in rows:
-        metrics = build_shift_metrics(row["id"])
+        metrics = load_summary_payload(row["resumo_fechamento"])
+        if not metrics or "total_vendido" not in metrics or "ticket_medio" not in metrics:
+            metrics = build_shift_metrics(row["id"])
         shifts.append(
             {
                 "id": row["id"],
@@ -3396,7 +3550,7 @@ def build_shift_history_payload(limit: int) -> list[dict]:
                 "closed_at": display_datetime(row["fechado_em"]),
                 "duration": duration_label(row["aberto_em"], row["fechado_em"]),
                 "summary": metrics,
-                "observations": metrics["observacoes"],
+                "observations": metrics.get("observacoes", parse_shift_observations(metrics)),
             }
         )
     return shifts
@@ -4072,19 +4226,24 @@ def shift_detail_page(shift_id: int):
 @app.get("/api/orders")
 @login_required
 def get_orders():
-    current_shift_id = get_current_shift_id()
-    return jsonify(
-        {
+    profiler = RequestProfiler("GET /api/orders")
+    status = "ok"
+    current_shift_id = None
+    try:
+        current_shift_id = get_current_shift_id()
+        profiler.mark("resolve_shift")
+        payload = {
             "current_shift_id": current_shift_id,
-            "summary": build_order_summary(current_shift_id),
-            "awaiting_payment": fetch_orders(status="awaiting_payment", shift_id=current_shift_id),
-            "pending": fetch_orders(status="pending", shift_id=current_shift_id),
-            "completed": fetch_orders(status="completed", limit=20, shift_id=current_shift_id),
-            "logistics": fetch_logistics_snapshot(),
-            "shifts": fetch_shift_history(limit=5),
-            "generated_at": display_datetime(utc_now_iso()),
+            **build_dashboard_snapshot(current_shift_id, shift_history_limit=5, profiler=profiler),
         }
-    )
+        response = jsonify(payload)
+        profiler.mark("jsonify")
+        return response
+    except Exception:
+        status = "error"
+        raise
+    finally:
+        profiler.log(status=status, shift_id=current_shift_id)
 
 
 @app.get("/pedidos/<code>/imprimir")
