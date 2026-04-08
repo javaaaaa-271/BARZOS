@@ -324,10 +324,15 @@ SQL_NAMED_PARAM_PATTERN = re.compile(r"(?<!:):([A-Za-z_][A-Za-z0-9_]*)")
 DbRow = dict[str, Any]
 SNAPSHOT_CACHE_TTLS = {
     "catalog_context": 3.0,
+    "current_shift": 60.0,
+    "dashboard_orders": 10.0,
+    "dashboard_summary": 20.0,
+    "dashboard_logistics": 30.0,
+    "dashboard_shifts": 120.0,
     "menu": 10.0,
-    "logistics": 3.0,
-    "order_summary": 2.0,
-    "shift_history": 15.0,
+    "logistics": 30.0,
+    "order_summary": 20.0,
+    "shift_history": 120.0,
 }
 _SNAPSHOT_CACHE: dict[str, tuple[float, Any]] = {}
 _SNAPSHOT_CACHE_LOCK = Lock()
@@ -475,13 +480,30 @@ class RequestProfiler:
         self.last_checkpoint = self.started_at
         self.steps: list[tuple[str, float]] = []
 
+    @property
+    def route_label(self) -> str:
+        if " " in self.route_name:
+            _, route_path = self.route_name.split(" ", 1)
+            return route_path
+        return self.route_name
+
     def mark(self, step_name: str) -> None:
         current_time = time.perf_counter()
         self.steps.append((step_name, (current_time - self.last_checkpoint) * 1000))
         self.last_checkpoint = current_time
 
+    def log_steps(self) -> None:
+        for step_name, duration_ms in self.steps:
+            app.logger.info(
+                "[perf] route=%s step=%s duration_ms=%.1f",
+                self.route_label,
+                step_name,
+                duration_ms,
+            )
+
     def log(self, *, status: str = "ok", **extra: Any) -> None:
         total_ms = (time.perf_counter() - self.started_at) * 1000
+        self.log_steps()
         serialized_steps = ", ".join(f"{name}={duration:.1f}ms" for name, duration in self.steps) or "no-steps"
         serialized_extra = ", ".join(f"{key}={value}" for key, value in extra.items() if value is not None)
         if serialized_extra:
@@ -1741,12 +1763,18 @@ def get_current_shift_id() -> int:
     if cached_shift_id is not None:
         return cached_shift_id
 
+    cached_shift_id = read_snapshot_cache("current-shift-id")
+    if cached_shift_id is not None:
+        g.current_shift_id = cached_shift_id
+        return cached_shift_id
+
     db = get_db()
     row = db.execute(
         "SELECT id FROM turnos WHERE status = 'open' ORDER BY id DESC LIMIT 1"
     ).fetchone()
     if row:
         g.current_shift_id = row["id"]
+        write_snapshot_cache("current-shift-id", SNAPSHOT_CACHE_TTLS["current_shift"], row["id"])
         return row["id"]
 
     row = db.execute(
@@ -1759,6 +1787,7 @@ def get_current_shift_id() -> int:
     ).fetchone()
     db.commit()
     g.current_shift_id = row["id"]
+    write_snapshot_cache("current-shift-id", SNAPSHOT_CACHE_TTLS["current_shift"], row["id"])
     return row["id"]
 
 
@@ -1775,6 +1804,7 @@ def open_new_shift(*, commit: bool = True) -> int:
     db.execute("UPDATE shift_notes SET status = 'open'")
     if commit:
         db.commit()
+        write_snapshot_cache("current-shift-id", SNAPSHOT_CACHE_TTLS["current_shift"], row["id"])
     return row["id"]
 
 
@@ -2807,6 +2837,26 @@ def fetch_dashboard_orders(shift_id: int | None = None, completed_limit: int = 2
     return grouped_orders
 
 
+def fetch_dashboard_orders_payload(shift_id: int | None = None, completed_limit: int = 20) -> dict:
+    current_shift_id = shift_id or get_current_shift_id()
+    cache_key = f"dashboard-orders:{current_shift_id}:{completed_limit}"
+    cached_value = read_snapshot_cache(cache_key)
+    if cached_value is not None:
+        return cached_value
+    dashboard_orders = fetch_dashboard_orders(current_shift_id, completed_limit=completed_limit)
+    return write_snapshot_cache(
+        cache_key,
+        SNAPSHOT_CACHE_TTLS["dashboard_orders"],
+        {
+            "current_shift_id": current_shift_id,
+            "awaiting_payment": dashboard_orders["awaiting_payment"],
+            "pending": dashboard_orders["pending"],
+            "completed": dashboard_orders["completed"],
+            "generated_at": display_datetime(utc_now_iso()),
+        },
+    )
+
+
 def validate_order_payload(selected_items: list[dict]) -> tuple[list[dict], str | None]:
     if not isinstance(selected_items, list):
         return [], "Formato de itens invalido."
@@ -3478,10 +3528,57 @@ def build_order_summary(shift_id: int | None = None) -> dict:
     )
 
 
+def fetch_dashboard_summary_payload(shift_id: int | None = None) -> dict:
+    current_shift_id = shift_id or get_current_shift_id()
+    cache_key = f"dashboard-summary:{current_shift_id}"
+    cached_value = read_snapshot_cache(cache_key)
+    if cached_value is not None:
+        return cached_value
+    return write_snapshot_cache(
+        cache_key,
+        SNAPSHOT_CACHE_TTLS["dashboard_summary"],
+        {
+            "current_shift_id": current_shift_id,
+            "summary": build_order_summary(current_shift_id),
+            "generated_at": display_datetime(utc_now_iso()),
+        },
+    )
+
+
 def build_closeout_report(shift_id: int | None = None) -> dict:
     current_shift_id = shift_id or get_current_shift_id()
     metrics = build_shift_metrics(current_shift_id)
     return metrics
+
+
+def fetch_dashboard_logistics_payload() -> dict:
+    cache_key = "dashboard-logistics"
+    cached_value = read_snapshot_cache(cache_key)
+    if cached_value is not None:
+        return cached_value
+    return write_snapshot_cache(
+        cache_key,
+        SNAPSHOT_CACHE_TTLS["dashboard_logistics"],
+        {
+            "logistics": fetch_logistics_snapshot(),
+            "generated_at": display_datetime(utc_now_iso()),
+        },
+    )
+
+
+def fetch_dashboard_shift_history_payload(limit: int = 5) -> dict:
+    cache_key = f"dashboard-shifts:{limit}"
+    cached_value = read_snapshot_cache(cache_key)
+    if cached_value is not None:
+        return cached_value
+    return write_snapshot_cache(
+        cache_key,
+        SNAPSHOT_CACHE_TTLS["dashboard_shifts"],
+        {
+            "shifts": fetch_shift_history(limit=limit),
+            "generated_at": display_datetime(utc_now_iso()),
+        },
+    )
 
 
 def build_dashboard_snapshot(
@@ -3489,6 +3586,7 @@ def build_dashboard_snapshot(
     *,
     shift_history_limit: int = 5,
     completed_limit: int = 20,
+    include_shift_history: bool = True,
     profiler: RequestProfiler | None = None,
 ) -> dict:
     summary = build_order_summary(shift_id)
@@ -3503,23 +3601,21 @@ def build_dashboard_snapshot(
     if profiler:
         profiler.mark("logistics")
 
-    shifts = fetch_shift_history(limit=shift_history_limit)
-    if profiler:
-        profiler.mark("shift_history")
-
-    generated_at = display_datetime(utc_now_iso())
-    if profiler:
-        profiler.mark("generated_at")
-
-    return {
+    payload = {
         "summary": summary,
         "awaiting_payment": dashboard_orders["awaiting_payment"],
         "pending": dashboard_orders["pending"],
         "completed": dashboard_orders["completed"],
         "logistics": logistics,
-        "shifts": shifts,
-        "generated_at": generated_at,
     }
+    if include_shift_history:
+        payload["shifts"] = fetch_shift_history(limit=shift_history_limit)
+        if profiler:
+            profiler.mark("shift_history")
+    payload["generated_at"] = display_datetime(utc_now_iso())
+    if profiler:
+        profiler.mark("generated_at")
+    return payload
 
 
 def archive_current_shift_and_open_next(expected_shift_id: int | None = None) -> dict:
@@ -3562,6 +3658,7 @@ def archive_current_shift_and_open_next(expected_shift_id: int | None = None) ->
 
         new_shift_id = open_new_shift(commit=False)
         db.commit()
+        write_snapshot_cache("current-shift-id", SNAPSHOT_CACHE_TTLS["current_shift"], new_shift_id)
     except Exception:
         safe_rollback(db)
         raise
@@ -4198,7 +4295,7 @@ def save_product():
     try:
         message = upsert_product_from_form(product_id)
         get_db().commit()
-        invalidate_snapshot_cache("catalog-context", "menu", "logistics")
+        invalidate_snapshot_cache("catalog-context", "menu", "logistics", "dashboard-logistics")
         return build_products_redirect(message=message)
     except IntegrityError:
         get_db().rollback()
@@ -4217,7 +4314,7 @@ def save_combo():
     try:
         message = upsert_combo_from_form(combo_id)
         get_db().commit()
-        invalidate_snapshot_cache("catalog-context", "menu", "logistics")
+        invalidate_snapshot_cache("catalog-context", "menu", "logistics", "dashboard-logistics")
         return build_products_redirect(message=message)
     except IntegrityError:
         get_db().rollback()
@@ -4280,18 +4377,106 @@ def get_orders():
     try:
         current_shift_id = get_current_shift_id()
         profiler.mark("resolve_shift")
+        include_shift_history = request.args.get("include_shift_history", "").strip().lower() in {"1", "true", "yes"}
         payload = {
             "current_shift_id": current_shift_id,
-            **build_dashboard_snapshot(current_shift_id, shift_history_limit=5, profiler=profiler),
+            **build_dashboard_snapshot(
+                current_shift_id,
+                shift_history_limit=5,
+                include_shift_history=include_shift_history,
+                profiler=profiler,
+            ),
         }
         response = jsonify(payload)
-        profiler.mark("jsonify")
+        profiler.mark("serialization/jsonify")
         return response
     except Exception:
         status = "error"
         raise
     finally:
         profiler.log(status=status, shift_id=current_shift_id)
+
+
+@app.get("/api/dashboard/orders")
+@login_required
+def get_dashboard_orders():
+    profiler = RequestProfiler("GET /api/dashboard/orders")
+    status = "ok"
+    current_shift_id = None
+    try:
+        current_shift_id = get_current_shift_id()
+        profiler.mark("resolve_shift")
+        payload = fetch_dashboard_orders_payload(current_shift_id)
+        profiler.mark("orders")
+        profiler.mark("generated_at")
+        response = jsonify(payload)
+        profiler.mark("serialization/jsonify")
+        return response
+    except Exception:
+        status = "error"
+        raise
+    finally:
+        profiler.log(status=status, shift_id=current_shift_id)
+
+
+@app.get("/api/dashboard/summary")
+@login_required
+def get_dashboard_summary():
+    profiler = RequestProfiler("GET /api/dashboard/summary")
+    status = "ok"
+    current_shift_id = None
+    try:
+        current_shift_id = get_current_shift_id()
+        profiler.mark("resolve_shift")
+        payload = fetch_dashboard_summary_payload(current_shift_id)
+        profiler.mark("summary")
+        profiler.mark("generated_at")
+        response = jsonify(payload)
+        profiler.mark("serialization/jsonify")
+        return response
+    except Exception:
+        status = "error"
+        raise
+    finally:
+        profiler.log(status=status, shift_id=current_shift_id)
+
+
+@app.get("/api/dashboard/logistics")
+@login_required
+def get_dashboard_logistics():
+    profiler = RequestProfiler("GET /api/dashboard/logistics")
+    status = "ok"
+    try:
+        payload = fetch_dashboard_logistics_payload()
+        profiler.mark("logistics")
+        profiler.mark("generated_at")
+        response = jsonify(payload)
+        profiler.mark("serialization/jsonify")
+        return response
+    except Exception:
+        status = "error"
+        raise
+    finally:
+        profiler.log(status=status)
+
+
+@app.get("/api/dashboard/shifts")
+@login_required
+def get_dashboard_shift_history():
+    profiler = RequestProfiler("GET /api/dashboard/shifts")
+    status = "ok"
+    try:
+        payload = fetch_dashboard_shift_history_payload(limit=5)
+        profiler.mark("shift_history")
+        profiler.mark("generated_at")
+        response = jsonify(payload)
+        profiler.mark("serialization/jsonify")
+        return response
+    except Exception:
+        status = "error"
+        raise
+    finally:
+        profiler.log(status=status)
 
 
 @app.get("/pedidos/<code>/imprimir")
@@ -4648,7 +4833,15 @@ def create_order():
             items=itens,
         )
         profiler.mark("build_response_order")
-        invalidate_snapshot_cache("catalog-context", "menu", "logistics", "order-summary")
+        invalidate_snapshot_cache(
+            "catalog-context",
+            "menu",
+            "logistics",
+            "order-summary",
+            "dashboard-orders",
+            "dashboard-summary",
+            "dashboard-logistics",
+        )
         response_summary = build_order_summary(turno_id)
         profiler.mark("build_summary_response")
         status = "created"
@@ -4702,7 +4895,7 @@ def pay_order(code: str):
             shift_id=current_shift_id,
         )
         order = mark_as_paid(code, current_shift_id)
-        invalidate_snapshot_cache("catalog-context", "order-summary")
+        invalidate_snapshot_cache("catalog-context", "order-summary", "dashboard-orders", "dashboard-summary")
     except LookupError:
         return jsonify({"error": "Pedido nao encontrado."}), 404
     except Exception as exc:
@@ -4744,7 +4937,7 @@ def complete_order(code: str):
             (utc_now_iso(), session.get("bar_user_id"), code, current_shift_id),
         )
         db.commit()
-        invalidate_snapshot_cache("catalog-context", "order-summary")
+        invalidate_snapshot_cache("catalog-context", "order-summary", "dashboard-orders", "dashboard-summary")
 
         updated = fetch_order_row_by_code(code, current_shift_id)
         return jsonify({"order": serialize_order(updated), "summary": build_order_summary()})
@@ -4768,7 +4961,18 @@ def closeout_report():
             return jsonify({"error": "Turno esperado invalido."}), 400
     try:
         payload = archive_current_shift_and_open_next(expected_shift_id)
-        invalidate_snapshot_cache("catalog-context", "order-summary", "shift-history", "logistics", "menu")
+        invalidate_snapshot_cache(
+            "catalog-context",
+            "order-summary",
+            "shift-history",
+            "logistics",
+            "menu",
+            "dashboard-orders",
+            "dashboard-summary",
+            "dashboard-logistics",
+            "dashboard-shifts",
+            "current-shift-id",
+        )
         return jsonify(payload)
     except ValueError as error:
         return jsonify({"error": str(error)}), 409
@@ -4790,7 +4994,18 @@ def reset_data():
         archived = archive_current_shift_and_open_next(expected_shift_id)
     except ValueError as error:
         return jsonify({"error": str(error)}), 409
-    invalidate_snapshot_cache("catalog-context", "order-summary", "shift-history", "logistics", "menu")
+    invalidate_snapshot_cache(
+        "catalog-context",
+        "order-summary",
+        "shift-history",
+        "logistics",
+        "menu",
+        "dashboard-orders",
+        "dashboard-summary",
+        "dashboard-logistics",
+        "dashboard-shifts",
+        "current-shift-id",
+    )
     archived["ok"] = True
     return jsonify(archived)
 
@@ -4855,7 +5070,7 @@ def update_inventory(item_id: int):
         (next_stock, next_par, next_status, utc_now_iso(), item_id),
     )
     db.commit()
-    invalidate_snapshot_cache("catalog-context", "logistics", "menu")
+    invalidate_snapshot_cache("catalog-context", "logistics", "menu", "dashboard-logistics")
     return jsonify(fetch_logistics_snapshot())
 
 
@@ -4868,7 +5083,7 @@ def close_shift_note(note_id: int):
         return jsonify({"error": "Nota nao encontrada."}), 404
     db.execute("UPDATE shift_notes SET status = 'done' WHERE id = ?", (note_id,))
     db.commit()
-    invalidate_snapshot_cache("logistics")
+    invalidate_snapshot_cache("logistics", "dashboard-logistics")
     return jsonify(fetch_logistics_snapshot())
 
 
