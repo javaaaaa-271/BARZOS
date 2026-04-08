@@ -383,6 +383,11 @@ app.config["SESSION_COOKIE_SECURE"] = (
 )
 
 
+@app.get("/health")
+def health():
+    return jsonify({"status": "ok"}), 200
+
+
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
