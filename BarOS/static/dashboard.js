@@ -18,8 +18,12 @@ const closeoutDrinks = document.getElementById("closeout-drinks");
 const closeoutExportLink = document.getElementById("closeout-export-link");
 const closeCloseoutModalButton = document.getElementById("close-closeout-modal");
 const closeCloseoutModalTopButton = document.getElementById("close-closeout-modal-top");
-const DASHBOARD_REFRESH_VISIBLE_MS = 10000;
-const DASHBOARD_REFRESH_HIDDEN_MS = 30000;
+const ORDERS_REFRESH_VISIBLE_MS = 10000;
+const ORDERS_REFRESH_HIDDEN_MS = 30000;
+const SUMMARY_REFRESH_VISIBLE_MS = 20000;
+const SUMMARY_REFRESH_HIDDEN_MS = 60000;
+const LOGISTICS_REFRESH_VISIBLE_MS = 30000;
+const LOGISTICS_REFRESH_HIDDEN_MS = 90000;
 
 let latestClosedShiftId = null;
 let currentShiftId = dashboardConfig.currentShiftId || null;
@@ -27,7 +31,14 @@ let closeoutRequestInFlight = false;
 let resetRequestInFlight = false;
 let isLoadingOrders = false;
 let pendingOrdersRefresh = false;
-let dashboardRefreshTimer = null;
+let ordersRefreshTimer = null;
+let isLoadingSummary = false;
+let pendingSummaryRefresh = false;
+let summaryRefreshTimer = null;
+let isLoadingLogistics = false;
+let pendingLogisticsRefresh = false;
+let logisticsRefreshTimer = null;
+let isLoadingShiftHistory = false;
 
 const brl = new Intl.NumberFormat("pt-BR", {
   style: "currency",
@@ -363,6 +374,44 @@ function updateLogistics(logistics) {
   renderNotes(logistics.notes);
 }
 
+function applyOrdersSnapshot(data) {
+  if (Number.isInteger(Number(data.current_shift_id))) {
+    currentShiftId = Number(data.current_shift_id);
+  }
+  if (data.generated_at) {
+    refreshStatus.textContent = `Atualizado ${data.generated_at}`;
+  }
+  renderAwaitingPayment(data.awaiting_payment || []);
+  renderPending(data.pending || []);
+  renderCompleted(data.completed || []);
+}
+
+function applySummarySnapshot(data) {
+  if (Number.isInteger(Number(data.current_shift_id))) {
+    currentShiftId = Number(data.current_shift_id);
+  }
+  if (!data.summary) {
+    return;
+  }
+  updateSummary(data.summary);
+  renderTopItems(data.summary.top_items || []);
+  renderTopTables(data.summary.top_tables || []);
+}
+
+function applyLogisticsSnapshot(data) {
+  if (!data.logistics) {
+    return;
+  }
+  updateLogistics(data.logistics);
+}
+
+function applyShiftHistorySnapshot(data) {
+  if (!Array.isArray(data.shifts)) {
+    return;
+  }
+  renderShiftHistory(data.shifts);
+}
+
 function setCloseoutExportLink(shiftId) {
   if (!closeoutExportLink) {
     return;
@@ -386,40 +435,53 @@ function setButtonBusy(button, busy, busyLabel, idleLabel) {
   button.textContent = busy ? busyLabel : idleLabel;
 }
 
-function clearDashboardRefreshTimer() {
-  if (dashboardRefreshTimer !== null) {
-    window.clearTimeout(dashboardRefreshTimer);
-    dashboardRefreshTimer = null;
+function clearRefreshTimer(timerId) {
+  if (timerId !== null) {
+    window.clearTimeout(timerId);
   }
+  return null;
 }
 
-function scheduleDashboardRefresh(delay = document.hidden ? DASHBOARD_REFRESH_HIDDEN_MS : DASHBOARD_REFRESH_VISIBLE_MS) {
-  clearDashboardRefreshTimer();
-  dashboardRefreshTimer = window.setTimeout(() => {
-    void refreshDashboard();
+function scheduleOrdersRefresh(delay = document.hidden ? ORDERS_REFRESH_HIDDEN_MS : ORDERS_REFRESH_VISIBLE_MS) {
+  ordersRefreshTimer = clearRefreshTimer(ordersRefreshTimer);
+  ordersRefreshTimer = window.setTimeout(() => {
+    void refreshOrders();
   }, delay);
 }
 
-async function refreshDashboard({ queueIfBusy = false } = {}) {
+function scheduleSummaryRefresh(delay = document.hidden ? SUMMARY_REFRESH_HIDDEN_MS : SUMMARY_REFRESH_VISIBLE_MS) {
+  summaryRefreshTimer = clearRefreshTimer(summaryRefreshTimer);
+  summaryRefreshTimer = window.setTimeout(() => {
+    void refreshSummary();
+  }, delay);
+}
+
+function scheduleLogisticsRefresh(delay = document.hidden ? LOGISTICS_REFRESH_HIDDEN_MS : LOGISTICS_REFRESH_VISIBLE_MS) {
+  logisticsRefreshTimer = clearRefreshTimer(logisticsRefreshTimer);
+  logisticsRefreshTimer = window.setTimeout(() => {
+    void refreshLogistics();
+  }, delay);
+}
+
+async function refreshOrders({ queueIfBusy = false } = {}) {
   if (isLoadingOrders) {
     if (queueIfBusy) {
-      // Keep one follow-up refresh queued after manual actions during a slow poll.
       pendingOrdersRefresh = true;
     }
     return;
   }
 
-  clearDashboardRefreshTimer();
+  ordersRefreshTimer = clearRefreshTimer(ordersRefreshTimer);
   isLoadingOrders = true;
   try {
-    const response = await fetch("/api/orders");
+    const response = await fetch("/api/dashboard/orders");
     if (!response.ok) {
       refreshStatus.textContent = "Falha ao atualizar";
       return;
     }
 
     const data = await response.json();
-    applyDashboardSnapshot(data);
+    applyOrdersSnapshot(data);
   } catch (error) {
     refreshStatus.textContent = "Falha ao atualizar";
   } finally {
@@ -427,11 +489,98 @@ async function refreshDashboard({ queueIfBusy = false } = {}) {
 
     if (pendingOrdersRefresh) {
       pendingOrdersRefresh = false;
-      scheduleDashboardRefresh(0);
+      scheduleOrdersRefresh(0);
       return;
     }
 
-    scheduleDashboardRefresh();
+    scheduleOrdersRefresh();
+  }
+}
+
+async function refreshSummary({ queueIfBusy = false } = {}) {
+  if (isLoadingSummary) {
+    if (queueIfBusy) {
+      pendingSummaryRefresh = true;
+    }
+    return;
+  }
+
+  summaryRefreshTimer = clearRefreshTimer(summaryRefreshTimer);
+  isLoadingSummary = true;
+  try {
+    const response = await fetch("/api/dashboard/summary");
+    if (!response.ok) {
+      refreshStatus.textContent = "Falha ao atualizar";
+      return;
+    }
+
+    applySummarySnapshot(await response.json());
+  } catch (error) {
+    refreshStatus.textContent = "Falha ao atualizar";
+  } finally {
+    isLoadingSummary = false;
+
+    if (pendingSummaryRefresh) {
+      pendingSummaryRefresh = false;
+      scheduleSummaryRefresh(0);
+      return;
+    }
+
+    scheduleSummaryRefresh();
+  }
+}
+
+async function refreshLogistics({ queueIfBusy = false } = {}) {
+  if (isLoadingLogistics) {
+    if (queueIfBusy) {
+      pendingLogisticsRefresh = true;
+    }
+    return;
+  }
+
+  logisticsRefreshTimer = clearRefreshTimer(logisticsRefreshTimer);
+  isLoadingLogistics = true;
+  try {
+    const response = await fetch("/api/dashboard/logistics");
+    if (!response.ok) {
+      refreshStatus.textContent = "Falha ao atualizar";
+      return;
+    }
+
+    applyLogisticsSnapshot(await response.json());
+  } catch (error) {
+    refreshStatus.textContent = "Falha ao atualizar";
+  } finally {
+    isLoadingLogistics = false;
+
+    if (pendingLogisticsRefresh) {
+      pendingLogisticsRefresh = false;
+      scheduleLogisticsRefresh(0);
+      return;
+    }
+
+    scheduleLogisticsRefresh();
+  }
+}
+
+async function refreshShiftHistory() {
+  if (isLoadingShiftHistory) {
+    return;
+  }
+
+  isLoadingShiftHistory = true;
+  try {
+    const response = await fetch("/api/dashboard/shifts");
+    if (!response.ok) {
+      refreshStatus.textContent = "Falha ao atualizar";
+      return;
+    }
+
+    applyShiftHistorySnapshot(await response.json());
+  } catch (error) {
+    refreshStatus.textContent = "Falha ao atualizar";
+  } finally {
+    isLoadingShiftHistory = false;
   }
 }
 
@@ -442,7 +591,10 @@ async function completeOrder(code) {
     refreshStatus.textContent = data.error || "Nao foi possivel concluir";
     return;
   }
-  await refreshDashboard({ queueIfBusy: true });
+  await Promise.all([
+    refreshOrders({ queueIfBusy: true }),
+    refreshSummary({ queueIfBusy: true }),
+  ]);
 }
 
 async function payOrder(code) {
@@ -452,7 +604,10 @@ async function payOrder(code) {
     refreshStatus.textContent = data.error || "Nao foi possivel registrar o pagamento";
     return;
   }
-  await refreshDashboard({ queueIfBusy: true });
+  await Promise.all([
+    refreshOrders({ queueIfBusy: true }),
+    refreshSummary({ queueIfBusy: true }),
+  ]);
 }
 
 async function updateInventoryRequest(itemId, payload) {
@@ -524,18 +679,10 @@ function renderCloseoutReport(report) {
 }
 
 function applyDashboardSnapshot(data) {
-  if (Number.isInteger(Number(data.current_shift_id))) {
-    currentShiftId = Number(data.current_shift_id);
-  }
-  refreshStatus.textContent = `Atualizado ${data.generated_at}`;
-  updateSummary(data.summary);
-  renderAwaitingPayment(data.awaiting_payment || []);
-  renderPending(data.pending);
-  renderCompleted(data.completed);
-  renderTopItems(data.summary.top_items);
-  renderTopTables(data.summary.top_tables);
-  updateLogistics(data.logistics);
-  renderShiftHistory(data.shifts || []);
+  applyOrdersSnapshot(data);
+  applySummarySnapshot(data);
+  applyLogisticsSnapshot(data);
+  applyShiftHistorySnapshot(data);
 }
 
 async function closeBar() {
@@ -676,10 +823,19 @@ document.addEventListener("keydown", (event) => {
 });
 
 setCloseoutExportLink(null);
-void refreshDashboard();
+void refreshOrders();
+void refreshSummary();
+void refreshLogistics();
+void refreshShiftHistory();
 
 document.addEventListener("visibilitychange", () => {
   if (!isLoadingOrders) {
-    scheduleDashboardRefresh();
+    scheduleOrdersRefresh();
+  }
+  if (!isLoadingSummary) {
+    scheduleSummaryRefresh();
+  }
+  if (!isLoadingLogistics) {
+    scheduleLogisticsRefresh();
   }
 });
