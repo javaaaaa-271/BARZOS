@@ -1,4 +1,5 @@
 const menuItems = window.BAROS_MENU || [];
+const orderFlowSettings = window.BAROS_ORDER_FLOW || {};
 const cart = new Map();
 
 const currencyFormatter = new Intl.NumberFormat("pt-BR", {
@@ -15,6 +16,7 @@ const toggleCheckoutButton = document.getElementById("toggle-checkout");
 const openCheckoutQuickButton = document.getElementById("open-checkout-quick");
 const customerNameInput = document.getElementById("customer-name");
 const tableLabelInput = document.getElementById("table-label");
+const customerMetaFeedback = document.getElementById("customer-meta-feedback");
 const checkoutFooterCount = document.getElementById("checkout-footer-count");
 
 const checkoutModal = document.getElementById("checkout-modal");
@@ -62,6 +64,44 @@ const paymentMethodInstructions = {
 };
 const PENDING_ORDER_STORAGE_KEY = "baros_pending_order_v1";
 const PENDING_ORDER_MAX_AGE_MS = 30 * 60 * 1000;
+
+function isCustomerIdentificationRequired() {
+  return Boolean(orderFlowSettings.customerIdentificationRequired);
+}
+
+function setCustomerMetaFeedback(message = "") {
+  if (!customerMetaFeedback) {
+    return;
+  }
+  customerMetaFeedback.textContent = message;
+  customerMetaFeedback.classList.toggle("hidden", !message);
+}
+
+function validateCustomerIdentification({ focus = false } = {}) {
+  if (!isCustomerIdentificationRequired()) {
+    setCustomerMetaFeedback("");
+    return true;
+  }
+
+  const customerName = customerNameInput?.value.trim() || "";
+  const tableLabel = tableLabelInput?.value.trim() || "";
+  if (customerName && tableLabel) {
+    setCustomerMetaFeedback("");
+    return true;
+  }
+
+  setCustomerMetaFeedback("Informe nome e mesa/retirada para continuar.");
+  if (focus) {
+    if (!customerName && customerNameInput) {
+      customerNameInput.focus();
+      customerNameInput.scrollIntoView({ behavior: "smooth", block: "center" });
+    } else if (!tableLabel && tableLabelInput) {
+      tableLabelInput.focus();
+      tableLabelInput.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }
+  return false;
+}
 
 function logCheckoutFlow(step, details = {}) {
   console.info("[BarOS checkout]", step, details);
@@ -378,6 +418,9 @@ function openCheckoutModal() {
   if (!selected.length) {
     return;
   }
+  if (!validateCustomerIdentification({ focus: true })) {
+    return;
+  }
   logCheckoutFlow("open_checkout_modal", {
     itemCount: selected.reduce((sum, item) => sum + item.quantity, 0),
     total: selected.reduce((sum, item) => sum + item.price * item.quantity, 0),
@@ -478,6 +521,10 @@ async function submitOrder() {
   const orderType = getSelectedOrderType();
   const paymentMethod = getSelectedPaymentMethod();
   logCheckoutFlow("selected_checkout_options", { orderType, paymentMethod });
+  if (!validateCustomerIdentification()) {
+    setCheckoutError("Informe nome e mesa/retirada antes de enviar.");
+    return;
+  }
   if (!orderType) {
     setCheckoutError("Escolha o tipo do pedido antes de enviar.");
     return;
@@ -654,4 +701,8 @@ restorePendingOrderDraft();
 applyResponsiveCheckoutMode();
 buildSummary();
 updateCheckoutInstruction();
+validateCustomerIdentification();
 window.addEventListener("resize", applyResponsiveCheckoutMode);
+
+customerNameInput?.addEventListener("input", () => validateCustomerIdentification());
+tableLabelInput?.addEventListener("input", () => validateCustomerIdentification());

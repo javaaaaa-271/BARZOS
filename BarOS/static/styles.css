@@ -64,8 +64,9 @@ img {
 .prep,
 .pill,
 .muted-note {
-  font-family: "IBM Plex Mono", monospace;
-  letter-spacing: 0.08em;
+  font-family: "Manrope", sans-serif;
+  letter-spacing: 0.02em;
+  font-weight: 600;
 }
 
 .customer-shell,
@@ -129,6 +130,10 @@ img {
   line-height: 0.98;
 }
 
+.customer-shell-premium .hero-copy h1 {
+  max-width: 10ch;
+}
+
 .hero-copy,
 .hero-card,
 .menu-card,
@@ -145,6 +150,11 @@ img {
 .hero-card p {
   color: var(--muted);
   line-height: 1.7;
+}
+
+.customer-shell-premium .hero-text,
+.customer-shell-premium .hero-card p {
+  max-width: 34ch;
 }
 
 .hero-meta {
@@ -264,6 +274,10 @@ img {
   margin-bottom: 18px;
 }
 
+.section-heading-compact {
+  justify-content: flex-start;
+}
+
 .customer-meta {
   display: flex;
   gap: 12px;
@@ -280,6 +294,10 @@ img {
   color: var(--muted);
   font-size: 0.76rem;
   line-height: 1.5;
+}
+
+#customer-meta-feedback {
+  color: var(--danger);
 }
 
 .customer-meta label,
@@ -348,8 +366,8 @@ img {
   background: linear-gradient(135deg, rgba(106, 80, 255, 0.95), rgba(75, 107, 251, 0.88));
   color: #ffffff;
   font-size: 0.7rem;
-  font-family: "IBM Plex Mono", monospace;
-  letter-spacing: 0.08em;
+  font-family: "Manrope", sans-serif;
+  letter-spacing: 0.03em;
   text-transform: uppercase;
   border: 1px solid rgba(255, 255, 255, 0.14);
   box-shadow: 0 12px 30px rgba(76, 82, 180, 0.28);
@@ -742,7 +760,7 @@ img {
   background: rgba(255, 255, 255, 0.03);
   color: var(--muted);
   font-size: 0.74rem;
-  font-family: "IBM Plex Mono", monospace;
+  font-family: "Manrope", sans-serif;
 }
 
 .flow-step.is-active {
@@ -850,8 +868,8 @@ img {
   display: grid;
   place-items: center;
   color: var(--text);
-  font-family: "IBM Plex Mono", monospace;
-  letter-spacing: 0.16em;
+  font-family: "Manrope", sans-serif;
+  letter-spacing: 0.06em;
 }
 
 .pix-copy-block {
@@ -1086,7 +1104,7 @@ img {
 }
 
 .status-badge {
-  font-family: "IBM Plex Mono", monospace;
+  font-family: "Manrope", sans-serif;
   font-size: 0.72rem;
   color: var(--success);
 }
@@ -1105,7 +1123,7 @@ img {
   background: rgba(255, 255, 255, 0.03);
   padding: 14px;
   color: var(--muted);
-  font-family: "IBM Plex Mono", monospace;
+  font-family: "Manrope", sans-serif;
   font-size: 0.75rem;
 }
 
@@ -1189,7 +1207,7 @@ img {
   justify-content: center;
   padding: 8px 10px;
   border-radius: 999px;
-  font-family: "IBM Plex Mono", monospace;
+  font-family: "Manrope", sans-serif;
   font-size: 0.72rem;
   text-transform: uppercase;
   border: 1px solid var(--line);
@@ -1428,6 +1446,54 @@ img {
 
 .products-shell {
   padding-bottom: 72px;
+}
+
+.settings-shell .dashboard-header h1 {
+  max-width: 12ch;
+}
+
+.settings-grid {
+  display: grid;
+  gap: 18px;
+}
+
+.settings-choice-group,
+.settings-stack {
+  display: grid;
+  gap: 14px;
+}
+
+.settings-choice-card {
+  display: grid !important;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 14px !important;
+  align-items: start;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 16px 18px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.settings-choice-card input {
+  width: 18px;
+  height: 18px;
+  margin-top: 2px;
+}
+
+.settings-choice-card strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.settings-choice-card p,
+.panel-subhead p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.panel-subhead {
+  display: grid;
+  gap: 4px;
 }
 
 .products-shell-premium .eyebrow,
