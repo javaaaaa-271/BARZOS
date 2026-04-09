@@ -5,25 +5,30 @@
 
 {% block content %}
 <main class="dashboard-shell dashboard-shell-premium">
-  <header class="dashboard-header">
-    <div>
+  <header class="dashboard-header dashboard-header-structured">
+    <div class="dashboard-header-copy">
       <p class="eyebrow">Painel do bar</p>
       <h1>Operacao em tempo real</h1>
       <p class="dashboard-user-meta">{{ current_user.display_name }} / {{ current_user.role_label }}</p>
     </div>
-    <div class="dashboard-actions">
-      <a class="secondary-button" href="{{ url_for('index') }}">Ver menu</a>
-      <a class="secondary-button" href="{{ url_for('shift_history_page') }}">Historico de turnos</a>
-      {% if current_user.can_manage_bar %}
-      <a class="secondary-button" href="{{ url_for('preorder_page') }}">Pre-Order</a>
-      <a class="secondary-button" href="{{ url_for('products_page') }}">Produtos</a>
-      <a class="secondary-button" href="{{ url_for('settings_page') }}">Configuracoes</a>
-      <button class="primary-button" type="button" id="close-bar-button">Close Bar</button>
-      <button class="ghost-button" type="button" id="reset-data-button">Resetar dados</button>
-      {% endif %}
-      <form method="post" action="{{ url_for('logout') }}">
-        <button class="ghost-button" type="submit">Sair</button>
-      </form>
+    <div class="dashboard-toolbar">
+      <div class="dashboard-button-group dashboard-nav-group">
+        <a class="secondary-button" href="{{ url_for('index') }}">Ver menu</a>
+        <a class="secondary-button" href="{{ url_for('shift_history_page') }}">Historico de turnos</a>
+        {% if current_user.can_manage_bar %}
+        <a class="secondary-button" href="{{ url_for('preorder_page') }}">Pre-Order</a>
+        <a class="secondary-button" href="{{ url_for('products_page') }}">Produtos</a>
+        {% endif %}
+      </div>
+      <div class="dashboard-button-group dashboard-action-group">
+        {% if current_user.can_manage_bar %}
+        <button class="primary-button" type="button" id="close-bar-button">Close Bar</button>
+        <button class="ghost-button" type="button" id="reset-data-button">Resetar dados</button>
+        {% endif %}
+        <form method="post" action="{{ url_for('logout') }}">
+          <button class="ghost-button" type="submit">Sair</button>
+        </form>
+      </div>
     </div>
   </header>
 
@@ -35,33 +40,41 @@
   {% endif %}
 
   <section class="stats-grid premium-stats-grid">
-    <article class="stat-card stat-card-highlight">
-      <span>Pedidos pendentes</span>
-      <strong id="pending-count">{{ summary.pending_count }}</strong>
+    <article class="stat-card stat-card-highlight kpi-card">
+      <span class="kpi-label">Pedidos pendentes</span>
+      <strong class="kpi-value" id="pending-count">{{ summary.pending_count }}</strong>
     </article>
-    <article class="stat-card stat-card-highlight">
-      <span>Pedidos finalizados</span>
-      <strong id="completed-count">{{ summary.completed_count }}</strong>
+    <article class="stat-card stat-card-highlight kpi-card">
+      <span class="kpi-label">Pedidos finalizados</span>
+      <strong class="kpi-value" id="completed-count">{{ summary.completed_count }}</strong>
     </article>
-    <article class="stat-card stat-card-highlight">
-      <span>Aguardando Pix</span>
-      <strong id="awaiting-payment-count">{{ summary.awaiting_payment_count }}</strong>
+    <article class="stat-card stat-card-highlight kpi-card">
+      <span class="kpi-label">Aguardando Pix</span>
+      <strong class="kpi-value" id="awaiting-payment-count">{{ summary.awaiting_payment_count }}</strong>
     </article>
-    <article class="stat-card stat-card-highlight">
-      <span>Total de pedidos</span>
-      <strong id="total-count">{{ summary.total_count }}</strong>
+    <article class="stat-card stat-card-highlight kpi-card">
+      <span class="kpi-label">Total de pedidos</span>
+      <strong class="kpi-value" id="total-count">{{ summary.total_count }}</strong>
     </article>
-    <article class="stat-card stat-card-highlight stat-card-accent">
-      <span>Total recebido</span>
-      <strong id="revenue-total">R$ {{ "%.2f"|format(summary.revenue) }}</strong>
+    <article class="stat-card stat-card-highlight stat-card-accent kpi-card">
+      <span class="kpi-label">Total recebido</span>
+      <strong
+        class="kpi-value money-display"
+        id="revenue-total"
+        data-money-value="{{ summary.revenue or 0 }}"
+      >R$ {{ "%.2f"|format(summary.revenue) }}</strong>
     </article>
-    <article class="stat-card stat-card-highlight">
-      <span>Ticket medio</span>
-      <strong id="average-ticket">R$ {{ "%.2f"|format(summary.average_ticket) }}</strong>
+    <article class="stat-card stat-card-highlight kpi-card">
+      <span class="kpi-label">Ticket medio</span>
+      <strong
+        class="kpi-value money-display"
+        id="average-ticket"
+        data-money-value="{{ summary.average_ticket or 0 }}"
+      >R$ {{ "%.2f"|format(summary.average_ticket) }}</strong>
     </article>
-    <article class="stat-card stat-card-highlight">
-      <span>Horario de pico</span>
-      <strong id="peak-time">{{ summary.peak_time_label }}</strong>
+    <article class="stat-card stat-card-highlight kpi-card">
+      <span class="kpi-label">Horario de pico</span>
+      <strong class="kpi-value" id="peak-time">{{ summary.peak_time_label }}</strong>
     </article>
   </section>
 
@@ -238,7 +251,7 @@
             <div class="shift-stats">
               <div class="summary-item">
                 <div><strong>Total recebido</strong></div>
-                <strong>R$ {{ "%.2f"|format(shift.summary.total_vendido or 0) }}</strong>
+                <strong class="money-display" data-money-value="{{ shift.summary.total_vendido or 0 }}">R$ {{ "%.2f"|format(shift.summary.total_vendido or 0) }}</strong>
               </div>
               <div class="summary-item">
                 <div><strong>Pedidos</strong></div>
@@ -246,7 +259,7 @@
               </div>
               <div class="summary-item">
                 <div><strong>Ticket medio</strong></div>
-                <strong>R$ {{ "%.2f"|format(shift.summary.ticket_medio or 0) }}</strong>
+                <strong class="money-display" data-money-value="{{ shift.summary.ticket_medio or 0 }}">R$ {{ "%.2f"|format(shift.summary.ticket_medio or 0) }}</strong>
               </div>
               <div class="summary-item">
                 <div><strong>Bebida lider</strong></div>
@@ -258,7 +271,7 @@
               </div>
               <div class="summary-item">
                 <div><strong>Lucro estimado</strong></div>
-                <strong>R$ {{ "%.2f"|format(shift.summary.lucro_estimado or 0) }}</strong>
+                <strong class="money-display" data-money-value="{{ shift.summary.lucro_estimado or 0 }}">R$ {{ "%.2f"|format(shift.summary.lucro_estimado or 0) }}</strong>
               </div>
             </div>
             <div class="shift-observations-inline">
