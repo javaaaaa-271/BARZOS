@@ -969,6 +969,38 @@ img {
   margin-bottom: 8px;
 }
 
+.dashboard-header-structured {
+  align-items: flex-start;
+}
+
+.dashboard-header-copy {
+  min-width: 0;
+}
+
+.dashboard-toolbar {
+  display: grid;
+  gap: 12px;
+  justify-items: end;
+}
+
+.dashboard-button-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.dashboard-action-group form {
+  margin: 0;
+}
+
+.dashboard-nav-group .secondary-button,
+.dashboard-action-group .primary-button,
+.dashboard-action-group .ghost-button,
+.dashboard-action-group .secondary-button {
+  min-height: 48px;
+}
+
 .dashboard-shell-premium {
   position: relative;
   z-index: 1;
@@ -981,7 +1013,7 @@ img {
 }
 
 .stats-grid {
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   margin: 26px 0 18px;
 }
 
@@ -994,6 +1026,13 @@ img {
 .panel-card {
   border-radius: 24px;
   padding: 22px;
+}
+
+.kpi-card {
+  display: grid;
+  align-content: space-between;
+  gap: 16px;
+  min-height: 148px;
 }
 
 .stat-card-highlight {
@@ -1023,10 +1062,45 @@ img {
   font-size: 0.78rem;
 }
 
-.stat-card strong {
+.kpi-label {
   display: block;
-  margin-top: 12px;
-  font-size: 2rem;
+  min-height: 2.6em;
+}
+
+.kpi-value {
+  display: flex;
+  align-items: flex-end;
+  min-height: 2.4em;
+  margin-top: 0;
+  font-size: clamp(1.8rem, 2vw + 1rem, 2.4rem);
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.money-display {
+  cursor: default;
+}
+
+.money-display.is-touchable {
+  cursor: pointer;
+}
+
+.summary-item .money-display {
+  white-space: nowrap;
+}
+
+.stat-card-accent .kpi-value {
+  font-size: clamp(1.65rem, 1.8vw + 1rem, 2.15rem);
+}
+
+.kpi-value.is-full,
+.summary-item .money-display.is-full {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
 }
 
 .dashboard-grid {
@@ -1803,6 +1877,15 @@ img {
     border-radius: 22px;
   }
 
+  .kpi-card {
+    min-height: 132px;
+  }
+
+  .kpi-value,
+  .stat-card-accent .kpi-value {
+    font-size: clamp(1.6rem, 7vw, 2rem);
+  }
+
   .section-heading,
   .dashboard-header,
   .dashboard-actions,
@@ -1826,6 +1909,17 @@ img {
 
   .customer-shell {
     padding-bottom: 260px;
+  }
+
+  .dashboard-toolbar,
+  .dashboard-button-group {
+    width: 100%;
+    justify-items: stretch;
+    justify-content: stretch;
+  }
+
+  .dashboard-button-group > * {
+    flex: 1 1 100%;
   }
 
   .checkout-panel {

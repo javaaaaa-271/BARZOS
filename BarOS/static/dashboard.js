@@ -44,6 +44,80 @@ const brl = new Intl.NumberFormat("pt-BR", {
   style: "currency",
   currency: "BRL",
 });
+const compactNumberFormatter = new Intl.NumberFormat("pt-BR", {
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 1,
+});
+
+function isTouchCurrencyInteraction() {
+  return window.matchMedia("(hover: none), (pointer: coarse), (max-width: 820px)").matches;
+}
+
+function formatCompactBrl(value) {
+  const amount = Number(value || 0);
+  const absolute = Math.abs(amount);
+  const prefix = amount < 0 ? "-R$ " : "R$ ";
+  if (absolute < 1000) {
+    return brl.format(amount);
+  }
+  if (absolute < 1000000) {
+    return `${prefix}${compactNumberFormatter.format(absolute / 1000)} mil`;
+  }
+  return `${prefix}${compactNumberFormatter.format(absolute / 1000000)} mi`;
+}
+
+function renderMoneyValue(rawValue, { full = false } = {}) {
+  const amount = Number(rawValue || 0);
+  return full ? brl.format(amount) : formatCompactBrl(amount);
+}
+
+function setMoneyDisplayState(element, showFull) {
+  const rawValue = Number(element.dataset.moneyValue || 0);
+  const fullValue = brl.format(rawValue);
+  element.dataset.full = fullValue;
+  element.textContent = renderMoneyValue(rawValue, { full: showFull });
+  element.title = fullValue;
+  element.classList.toggle("is-full", showFull);
+}
+
+function hydrateMoneyDisplays(root = document) {
+  root.querySelectorAll("[data-money-value]").forEach((element) => {
+    const shouldUseTap = isTouchCurrencyInteraction();
+    const expanded = element.dataset.expanded === "true";
+    setMoneyDisplayState(element, expanded);
+    element.classList.toggle("is-touchable", shouldUseTap);
+
+    if (element.dataset.moneyBound === "true") {
+      return;
+    }
+
+    element.dataset.moneyBound = "true";
+    element.addEventListener("mouseenter", () => {
+      if (!isTouchCurrencyInteraction()) {
+        setMoneyDisplayState(element, true);
+      }
+    });
+    element.addEventListener("mouseleave", () => {
+      if (!isTouchCurrencyInteraction()) {
+        setMoneyDisplayState(element, false);
+      }
+    });
+    element.addEventListener("click", () => {
+      if (!isTouchCurrencyInteraction()) {
+        return;
+      }
+      const nextExpanded = element.dataset.expanded !== "true";
+      element.dataset.expanded = nextExpanded ? "true" : "false";
+      setMoneyDisplayState(element, nextExpanded);
+    });
+  });
+}
+
+function renderMoneySpan(value, className = "") {
+  const normalizedValue = Number(value || 0);
+  const classes = ["money-display", className].filter(Boolean).join(" ");
+  return `<span class="${classes}" data-money-value="${normalizedValue}">${renderMoneyValue(normalizedValue)}</span>`;
+}
 
 function setCloseoutModalState(isOpen) {
   if (!closeoutModal) {
@@ -59,7 +133,7 @@ function closeCloseoutModal() {
 
 function renderOrderItems(items) {
   return items
-    .map((item) => `<li>${item.quantity}x ${item.name} <strong>${brl.format(item.subtotal)}</strong></li>`)
+    .map((item) => `<li>${item.quantity}x ${item.name} <strong class="money-display" data-money-value="${Number(item.subtotal || 0)}">${renderMoneyValue(item.subtotal)}</strong></li>`)
     .join("");
 }
 
@@ -93,7 +167,7 @@ function renderPending(orders) {
         ${renderOrderBadges(order)}
         <ul>${renderOrderItems(order.items)}</ul>
         <div class="order-actions">
-          <span class="muted-note">Total ${brl.format(order.total)}</span>
+          <span class="muted-note">Total ${renderMoneySpan(order.total)}</span>
           <div class="order-actions-group">
             ${
               order.payment_status !== "paid"
@@ -129,7 +203,7 @@ function renderCompleted(orders) {
         ${renderOrderBadges(order)}
         <ul>${renderOrderItems(order.items)}</ul>
         <div class="order-actions">
-          <span class="muted-note">Total ${brl.format(order.total)}</span>
+          <span class="muted-note">Total ${renderMoneySpan(order.total)}</span>
           <div class="order-actions-group">
             ${
               order.payment_status !== "paid"
@@ -310,7 +384,7 @@ function renderShiftHistory(shifts) {
           <div class="shift-stats">
             <div class="summary-item">
               <div><strong>Total recebido</strong></div>
-              <strong>${brl.format(totalVendido)}</strong>
+              <strong class="money-display" data-money-value="${totalVendido}">${renderMoneyValue(totalVendido)}</strong>
             </div>
             <div class="summary-item">
               <div><strong>Pedidos</strong></div>
@@ -318,7 +392,7 @@ function renderShiftHistory(shifts) {
             </div>
             <div class="summary-item">
               <div><strong>Ticket medio</strong></div>
-              <strong>${brl.format(ticketMedio)}</strong>
+              <strong class="money-display" data-money-value="${ticketMedio}">${renderMoneyValue(ticketMedio)}</strong>
             </div>
             <div class="summary-item">
               <div><strong>Bebida lider</strong></div>
@@ -330,7 +404,7 @@ function renderShiftHistory(shifts) {
             </div>
             <div class="summary-item">
               <div><strong>Lucro estimado</strong></div>
-              <strong>${brl.format(lucroEstimado)}</strong>
+              <strong class="money-display" data-money-value="${lucroEstimado}">${renderMoneyValue(lucroEstimado)}</strong>
             </div>
           </div>
           <div class="shift-observations-inline">
@@ -351,6 +425,7 @@ function renderShiftHistory(shifts) {
       `;
     })
     .join("");
+  hydrateMoneyDisplays(shiftHistoryContainer);
 }
 
 function updateSummary(summary) {
@@ -358,8 +433,18 @@ function updateSummary(summary) {
   document.getElementById("completed-count").textContent = summary.completed_count;
   document.getElementById("awaiting-payment-count").textContent = summary.awaiting_payment_count || 0;
   document.getElementById("total-count").textContent = summary.total_count;
-  document.getElementById("revenue-total").textContent = brl.format(summary.revenue);
-  document.getElementById("average-ticket").textContent = brl.format(summary.average_ticket);
+  const revenueTotal = document.getElementById("revenue-total");
+  const averageTicket = document.getElementById("average-ticket");
+  if (revenueTotal) {
+    revenueTotal.dataset.moneyValue = Number(summary.revenue || 0);
+    revenueTotal.dataset.expanded = "false";
+    setMoneyDisplayState(revenueTotal, false);
+  }
+  if (averageTicket) {
+    averageTicket.dataset.moneyValue = Number(summary.average_ticket || 0);
+    averageTicket.dataset.expanded = "false";
+    setMoneyDisplayState(averageTicket, false);
+  }
   const peakTime = document.getElementById("peak-time");
   if (peakTime) {
     peakTime.textContent = summary.peak_time_label || "Sem dados";
@@ -384,6 +469,7 @@ function applyOrdersSnapshot(data) {
   renderAwaitingPayment(data.awaiting_payment || []);
   renderPending(data.pending || []);
   renderCompleted(data.completed || []);
+  hydrateMoneyDisplays();
 }
 
 function applySummarySnapshot(data) {
@@ -396,6 +482,7 @@ function applySummarySnapshot(data) {
   updateSummary(data.summary);
   renderTopItems(data.summary.top_items || []);
   renderTopTables(data.summary.top_tables || []);
+  hydrateMoneyDisplays();
 }
 
 function applyLogisticsSnapshot(data) {
@@ -644,13 +731,13 @@ function renderCloseoutReport(report) {
     : "Sem dados";
 
   closeoutContent.innerHTML = [
-    ["Total revenue", brl.format(report.total_recebido ?? report.total_vendido)],
+    ["Total revenue", renderMoneySpan(report.total_recebido ?? report.total_vendido)],
     ["Total number of orders", String(report.total_pedidos)],
     ["Most ordered items", mostOrdered],
     ["Peak time", peakHour],
     ["Itens vendidos", String(report.total_itens_vendidos)],
-    ["Custo total", brl.format(report.custo_total)],
-    ["Lucro estimado", brl.format(report.lucro_estimado)],
+    ["Custo total", renderMoneySpan(report.custo_total)],
+    ["Lucro estimado", renderMoneySpan(report.lucro_estimado)],
   ]
     .map(
       ([label, value]) => `
@@ -661,6 +748,7 @@ function renderCloseoutReport(report) {
     `
     )
     .join("");
+  hydrateMoneyDisplays(closeoutContent);
 
   closeoutDrinks.innerHTML = report.quantidade_por_bebida.length
     ? report.quantidade_por_bebida
@@ -823,6 +911,7 @@ document.addEventListener("keydown", (event) => {
 });
 
 setCloseoutExportLink(null);
+hydrateMoneyDisplays();
 void refreshOrders();
 void refreshSummary();
 void refreshLogistics();
@@ -838,4 +927,8 @@ document.addEventListener("visibilitychange", () => {
   if (!isLoadingLogistics) {
     scheduleLogisticsRefresh();
   }
+});
+
+window.addEventListener("resize", () => {
+  hydrateMoneyDisplays();
 });
