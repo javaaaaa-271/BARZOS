@@ -966,7 +966,7 @@ img {
 
 .dashboard-shell-premium .dashboard-header,
 .products-shell-premium .dashboard-header {
-  margin-bottom: 8px;
+  margin-bottom: 20px;
 }
 
 .dashboard-header-structured {
@@ -979,14 +979,14 @@ img {
 
 .dashboard-toolbar {
   display: grid;
-  gap: 12px;
+  gap: 16px;
   justify-items: end;
 }
 
 .dashboard-button-group {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 12px;
   justify-content: flex-end;
 }
 
@@ -999,6 +999,10 @@ img {
 .dashboard-action-group .ghost-button,
 .dashboard-action-group .secondary-button {
   min-height: 48px;
+}
+
+.dashboard-action-group {
+  padding-top: 4px;
 }
 
 .dashboard-shell-premium {
@@ -1014,12 +1018,12 @@ img {
 
 .stats-grid {
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  margin: 26px 0 18px;
+  margin: 34px 0 22px;
 }
 
 .premium-stats-grid {
-  margin-top: 28px;
-  gap: 20px;
+  margin-top: 36px;
+  gap: 22px;
 }
 
 .stat-card,
@@ -1029,10 +1033,19 @@ img {
 }
 
 .kpi-card {
-  display: grid;
-  align-content: space-between;
-  gap: 16px;
-  min-height: 148px;
+  display: block;
+  min-height: 164px;
+  padding: 24px 22px;
+}
+
+.kpi-content {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 18px;
+  height: 100%;
+  min-height: 116px;
 }
 
 .stat-card-highlight {
@@ -1064,13 +1077,14 @@ img {
 
 .kpi-label {
   display: block;
-  min-height: 2.6em;
+  min-height: 2.8em;
+  line-height: 1.35;
 }
 
 .kpi-value {
-  display: flex;
-  align-items: flex-end;
-  min-height: 2.4em;
+  display: block;
+  width: 100%;
+  min-height: 2.5em;
   margin-top: 0;
   font-size: clamp(1.8rem, 2vw + 1rem, 2.4rem);
   line-height: 1.05;
@@ -1078,6 +1092,7 @@ img {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  text-align: left;
 }
 
 .money-display {
@@ -1878,7 +1893,7 @@ img {
   }
 
   .kpi-card {
-    min-height: 132px;
+    min-height: 144px;
   }
 
   .kpi-value,
@@ -1916,6 +1931,10 @@ img {
     width: 100%;
     justify-items: stretch;
     justify-content: stretch;
+  }
+
+  .dashboard-toolbar {
+    gap: 14px;
   }
 
   .dashboard-button-group > * {
