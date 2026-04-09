@@ -22,6 +22,7 @@
       </div>
       <div class="dashboard-button-group dashboard-action-group">
         {% if current_user.can_manage_bar %}
+        <a class="secondary-button" href="{{ url_for('settings_page') }}">Configuracoes</a>
         <button class="primary-button" type="button" id="close-bar-button">Close Bar</button>
         <button class="ghost-button" type="button" id="reset-data-button">Resetar dados</button>
         {% endif %}
@@ -41,40 +42,54 @@
 
   <section class="stats-grid premium-stats-grid">
     <article class="stat-card stat-card-highlight kpi-card">
-      <span class="kpi-label">Pedidos pendentes</span>
-      <strong class="kpi-value" id="pending-count">{{ summary.pending_count }}</strong>
+      <div class="kpi-content">
+        <span class="kpi-label">Pedidos pendentes</span>
+        <strong class="kpi-value" id="pending-count">{{ summary.pending_count }}</strong>
+      </div>
     </article>
     <article class="stat-card stat-card-highlight kpi-card">
-      <span class="kpi-label">Pedidos finalizados</span>
-      <strong class="kpi-value" id="completed-count">{{ summary.completed_count }}</strong>
+      <div class="kpi-content">
+        <span class="kpi-label">Pedidos finalizados</span>
+        <strong class="kpi-value" id="completed-count">{{ summary.completed_count }}</strong>
+      </div>
     </article>
     <article class="stat-card stat-card-highlight kpi-card">
-      <span class="kpi-label">Aguardando Pix</span>
-      <strong class="kpi-value" id="awaiting-payment-count">{{ summary.awaiting_payment_count }}</strong>
+      <div class="kpi-content">
+        <span class="kpi-label">Aguardando Pix</span>
+        <strong class="kpi-value" id="awaiting-payment-count">{{ summary.awaiting_payment_count }}</strong>
+      </div>
     </article>
     <article class="stat-card stat-card-highlight kpi-card">
-      <span class="kpi-label">Total de pedidos</span>
-      <strong class="kpi-value" id="total-count">{{ summary.total_count }}</strong>
+      <div class="kpi-content">
+        <span class="kpi-label">Total de pedidos</span>
+        <strong class="kpi-value" id="total-count">{{ summary.total_count }}</strong>
+      </div>
     </article>
     <article class="stat-card stat-card-highlight stat-card-accent kpi-card">
-      <span class="kpi-label">Total recebido</span>
-      <strong
-        class="kpi-value money-display"
-        id="revenue-total"
-        data-money-value="{{ summary.revenue or 0 }}"
-      >R$ {{ "%.2f"|format(summary.revenue) }}</strong>
+      <div class="kpi-content">
+        <span class="kpi-label">Total recebido</span>
+        <strong
+          class="kpi-value money-display"
+          id="revenue-total"
+          data-money-value="{{ summary.revenue or 0 }}"
+        >R$ {{ "%.2f"|format(summary.revenue) }}</strong>
+      </div>
     </article>
     <article class="stat-card stat-card-highlight kpi-card">
-      <span class="kpi-label">Ticket medio</span>
-      <strong
-        class="kpi-value money-display"
-        id="average-ticket"
-        data-money-value="{{ summary.average_ticket or 0 }}"
-      >R$ {{ "%.2f"|format(summary.average_ticket) }}</strong>
+      <div class="kpi-content">
+        <span class="kpi-label">Ticket medio</span>
+        <strong
+          class="kpi-value money-display"
+          id="average-ticket"
+          data-money-value="{{ summary.average_ticket or 0 }}"
+        >R$ {{ "%.2f"|format(summary.average_ticket) }}</strong>
+      </div>
     </article>
     <article class="stat-card stat-card-highlight kpi-card">
-      <span class="kpi-label">Horario de pico</span>
-      <strong class="kpi-value" id="peak-time">{{ summary.peak_time_label }}</strong>
+      <div class="kpi-content">
+        <span class="kpi-label">Horario de pico</span>
+        <strong class="kpi-value" id="peak-time">{{ summary.peak_time_label }}</strong>
+      </div>
     </article>
   </section>
 
