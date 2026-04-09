@@ -7,12 +7,12 @@ import re
 import secrets
 import sqlite3  # legacy import only; runtime storage uses PostgreSQL
 import time
-from threading import Lock
+from threading import Event, Lock
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from html import escape
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -27,11 +27,16 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from werkzeug.security import check_password_hash, generate_password_hash
+from werkzeug.utils import secure_filename
 
 
 load_dotenv(override=False)
 
 BASE_DIR = Path(__file__).resolve().parent
+PRODUCT_IMAGE_UPLOAD_DIR = BASE_DIR / "static" / "uploads" / "products"
+PRODUCT_IMAGE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+ALLOWED_PRODUCT_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+ALLOWED_PRODUCT_IMAGE_MIMETYPES = {"image/png", "image/jpeg", "image/webp"}
 
 INSTANCE_DIR = BASE_DIR / "instance"
 INSTANCE_DIR.mkdir(exist_ok=True)
@@ -336,6 +341,8 @@ SNAPSHOT_CACHE_TTLS = {
 }
 _SNAPSHOT_CACHE: dict[str, tuple[float, Any]] = {}
 _SNAPSHOT_CACHE_LOCK = Lock()
+_SNAPSHOT_CACHE_INFLIGHT: dict[str, Event] = {}
+_SNAPSHOT_CACHE_WAIT_TIMEOUT = 0.35
 
 
 def normalize_internal_access_path(raw_value: str) -> str:
@@ -463,6 +470,53 @@ def write_snapshot_cache(cache_key: str, ttl_seconds: float, value: Any) -> Any:
     return value
 
 
+def get_or_compute_snapshot(
+    cache_key: str,
+    ttl_seconds: float,
+    compute_fn: Callable[[], Any],
+    *,
+    wait_timeout: float = _SNAPSHOT_CACHE_WAIT_TIMEOUT,
+) -> Any:
+    cached_value = read_snapshot_cache(cache_key)
+    if cached_value is not None:
+        return cached_value
+
+    should_compute = False
+    cache_event: Event | None = None
+    now = time.monotonic()
+    with _SNAPSHOT_CACHE_LOCK:
+        entry = _SNAPSHOT_CACHE.get(cache_key)
+        if entry:
+            expires_at, value = entry
+            if expires_at > now:
+                return value
+            _SNAPSHOT_CACHE.pop(cache_key, None)
+
+        cache_event = _SNAPSHOT_CACHE_INFLIGHT.get(cache_key)
+        if cache_event is None:
+            cache_event = Event()
+            _SNAPSHOT_CACHE_INFLIGHT[cache_key] = cache_event
+            should_compute = True
+
+    if should_compute:
+        try:
+            computed_value = compute_fn()
+            return write_snapshot_cache(cache_key, ttl_seconds, computed_value)
+        finally:
+            with _SNAPSHOT_CACHE_LOCK:
+                active_event = _SNAPSHOT_CACHE_INFLIGHT.get(cache_key)
+                if active_event is cache_event:
+                    _SNAPSHOT_CACHE_INFLIGHT.pop(cache_key, None)
+                    cache_event.set()
+
+    if cache_event and cache_event.wait(timeout=wait_timeout):
+        cached_value = read_snapshot_cache(cache_key)
+        if cached_value is not None:
+            return cached_value
+
+    return write_snapshot_cache(cache_key, ttl_seconds, compute_fn())
+
+
 def invalidate_snapshot_cache(*prefixes: str) -> None:
     with _SNAPSHOT_CACHE_LOCK:
         if not prefixes:
@@ -565,6 +619,34 @@ def normalize_product_image(value: str | None) -> str:
     if cleaned.startswith("static/"):
         return f"/{cleaned}"
     return cleaned
+
+
+def is_allowed_product_image(filename: str) -> bool:
+    return Path(filename).suffix.lower() in ALLOWED_PRODUCT_IMAGE_EXTENSIONS
+
+
+def save_uploaded_product_image(uploaded_file) -> str:
+    raw_filename = (uploaded_file.filename or "").strip()
+    if not raw_filename:
+        raise ValueError("Selecione uma imagem PNG, JPG, JPEG ou WEBP.")
+
+    safe_name = secure_filename(raw_filename)
+    if not safe_name or not is_allowed_product_image(safe_name):
+        raise ValueError("Formato invalido. Use PNG, JPG, JPEG ou WEBP.")
+    if uploaded_file.mimetype and uploaded_file.mimetype not in ALLOWED_PRODUCT_IMAGE_MIMETYPES:
+        raise ValueError("Arquivo invalido. Envie uma imagem PNG, JPG, JPEG ou WEBP.")
+
+    extension = Path(safe_name).suffix.lower()
+    base_name = Path(safe_name).stem[:80] or "produto"
+    filename = f"{base_name}-{secrets.token_hex(8)}{extension}"
+    destination = PRODUCT_IMAGE_UPLOAD_DIR / filename
+
+    try:
+        uploaded_file.save(destination)
+    except Exception as error:
+        raise OSError("Nao foi possivel salvar a imagem agora.") from error
+
+    return url_for("static", filename=f"uploads/products/{filename}")
 
 
 def build_initials(value: str | None) -> str:
@@ -2840,18 +2922,12 @@ def fetch_dashboard_orders(shift_id: int | None = None, completed_limit: int = 2
 def fetch_dashboard_orders_payload(shift_id: int | None = None, completed_limit: int = 20) -> dict:
     current_shift_id = shift_id or get_current_shift_id()
     cache_key = f"dashboard-orders:{current_shift_id}:{completed_limit}"
-    cached_value = read_snapshot_cache(cache_key)
-    if cached_value is not None:
-        return cached_value
-    dashboard_orders = fetch_dashboard_orders(current_shift_id, completed_limit=completed_limit)
-    return write_snapshot_cache(
+    return get_or_compute_snapshot(
         cache_key,
         SNAPSHOT_CACHE_TTLS["dashboard_orders"],
-        {
+        lambda: {
             "current_shift_id": current_shift_id,
-            "awaiting_payment": dashboard_orders["awaiting_payment"],
-            "pending": dashboard_orders["pending"],
-            "completed": dashboard_orders["completed"],
+            **fetch_dashboard_orders(current_shift_id, completed_limit=completed_limit),
             "generated_at": display_datetime(utc_now_iso()),
         },
     )
@@ -3531,13 +3607,10 @@ def build_order_summary(shift_id: int | None = None) -> dict:
 def fetch_dashboard_summary_payload(shift_id: int | None = None) -> dict:
     current_shift_id = shift_id or get_current_shift_id()
     cache_key = f"dashboard-summary:{current_shift_id}"
-    cached_value = read_snapshot_cache(cache_key)
-    if cached_value is not None:
-        return cached_value
-    return write_snapshot_cache(
+    return get_or_compute_snapshot(
         cache_key,
         SNAPSHOT_CACHE_TTLS["dashboard_summary"],
-        {
+        lambda: {
             "current_shift_id": current_shift_id,
             "summary": build_order_summary(current_shift_id),
             "generated_at": display_datetime(utc_now_iso()),
@@ -3553,13 +3626,10 @@ def build_closeout_report(shift_id: int | None = None) -> dict:
 
 def fetch_dashboard_logistics_payload() -> dict:
     cache_key = "dashboard-logistics"
-    cached_value = read_snapshot_cache(cache_key)
-    if cached_value is not None:
-        return cached_value
-    return write_snapshot_cache(
+    return get_or_compute_snapshot(
         cache_key,
         SNAPSHOT_CACHE_TTLS["dashboard_logistics"],
-        {
+        lambda: {
             "logistics": fetch_logistics_snapshot(),
             "generated_at": display_datetime(utc_now_iso()),
         },
@@ -3568,13 +3638,10 @@ def fetch_dashboard_logistics_payload() -> dict:
 
 def fetch_dashboard_shift_history_payload(limit: int = 5) -> dict:
     cache_key = f"dashboard-shifts:{limit}"
-    cached_value = read_snapshot_cache(cache_key)
-    if cached_value is not None:
-        return cached_value
-    return write_snapshot_cache(
+    return get_or_compute_snapshot(
         cache_key,
         SNAPSHOT_CACHE_TTLS["dashboard_shifts"],
-        {
+        lambda: {
             "shifts": fetch_shift_history(limit=limit),
             "generated_at": display_datetime(utc_now_iso()),
         },
@@ -4268,6 +4335,24 @@ def products_page():
         message=request.args.get("message"),
         error=request.args.get("error"),
     )
+
+
+@app.post("/api/upload-image")
+@login_required
+@role_required("admin")
+def upload_image():
+    uploaded_file = request.files.get("image")
+    if uploaded_file is None:
+        return jsonify({"error": "Nenhum arquivo enviado."}), 400
+
+    try:
+        image_url = save_uploaded_product_image(uploaded_file)
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except OSError as error:
+        return jsonify({"error": str(error)}), 500
+
+    return jsonify({"url": image_url}), 201
 
 
 @app.get("/painel/pre-order")
@@ -5099,6 +5184,15 @@ def handle_internal_server_error(error):
     if is_api_request():
         return jsonify({"error": "Ocorreu um erro interno. Tente novamente."}), 500
     return "Ocorreu um erro interno. Tente novamente.", 500
+
+
+@app.errorhandler(413)
+def handle_payload_too_large(error):
+    if request.path == "/api/upload-image":
+        return jsonify({"error": "Imagem muito grande. Envie um arquivo de ate 1 MB."}), 413
+    if is_api_request():
+        return jsonify({"error": "Arquivo muito grande."}), 413
+    return "Arquivo muito grande.", 413
 
 
 init_db()
