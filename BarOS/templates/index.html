@@ -24,7 +24,7 @@
     <div class="hero-card service-card">
       <p class="mini-label">Servico da casa</p>
       <h2>Pedido simples para o cliente e organizado para o bar.</h2>
-      <p>Voce faz o pedido aqui e a equipe recebe no painel interno, sem misturar atendimento com operacao.</p>
+      <p>Voce pede aqui e a equipe recebe tudo no painel interno.</p>
       <div class="hero-meta compact-meta">
         <span>Fluxo por turno</span>
         <span>Baixa automatica</span>
@@ -47,7 +47,7 @@
           <span>Mesa ou retirada</span>
           <input type="text" id="table-label" placeholder="Ex.: Mesa 7 ou retirada" autocapitalize="words" enterkeyhint="done">
         </label>
-        <p class="customer-meta-help">Nome e mesa ajudam a equipe a localizar seu pedido mais rapido.</p>
+        <p class="customer-meta-help">Nome e mesa agilizam a entrega.</p>
       </form>
     </div>
 
@@ -78,7 +78,7 @@
         <div class="menu-card-content">
           <h3>{{ item.name }}</h3>
           {% if item.is_combo %}
-          <p class="combo-note">Combo vendavel com baixa automatica dos itens da composicao.</p>
+          <p class="combo-note">Combo com baixa automatica dos itens.</p>
           {% endif %}
           <p>{{ item.description }}</p>
           {% if not item.is_available %}
@@ -124,7 +124,6 @@
         <strong id="order-total">R$ 0,00</strong>
       </div>
       <button id="submit-order" class="primary-button" type="button" disabled>Finalizar pedido</button>
-      <p class="muted-note">Fluxo rapido: menu, checkout e confirmacao.</p>
     </div>
   </aside>
 

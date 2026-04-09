@@ -9,7 +9,7 @@
     <div>
       <p class="eyebrow">Pre-Order</p>
       <h1>Controle de janela e capacidade</h1>
-      <p class="dashboard-user-meta">Defina quando o pre-order abre e acompanhe quantos itens estao ativos.</p>
+      <p class="dashboard-user-meta">Ajuste horario e acompanhe a capacidade ativa sem sair do painel.</p>
     </div>
     <div class="dashboard-actions">
       <a class="secondary-button" href="{{ url_for('dashboard') }}">Voltar ao painel</a>
@@ -30,7 +30,7 @@
       <article class="panel-card panel-card-premium sticky-form-card">
         <div class="panel-head">
           <div>
-            <p class="mini-label">Janela global</p>
+            <p class="mini-label">Janela</p>
             <h2>Horario do pre-order</h2>
           </div>
         </div>
@@ -45,7 +45,7 @@
               <input type="time" name="preorder_end_time" value="{{ preorder.end_time }}">
             </label>
           </div>
-          <p class="muted-note">Se os dois campos ficarem vazios, o pre-order nao limita o horario do cardapio.</p>
+          <p class="muted-note">Deixe vazio para manter o pre-order sempre aberto.</p>
           <button class="primary-button" type="submit">Salvar configuracao</button>
         </form>
       </article>
@@ -83,7 +83,7 @@
         <div class="panel-head">
           <div>
             <p class="mini-label">Capacidade por produto</p>
-            <h2>Itens acompanhados no pre-order</h2>
+            <h2>Itens acompanhados</h2>
           </div>
         </div>
         <div class="managed-product-list">

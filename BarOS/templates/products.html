@@ -7,9 +7,9 @@
 <main class="dashboard-shell products-shell products-shell-premium">
   <header class="dashboard-header">
     <div>
-      <p class="eyebrow">Gestao de produtos</p>
-      <h1>Cardapio, imagens e combos</h1>
-      <p class="dashboard-user-meta">Edite o que aparece para o cliente sem mexer manualmente no banco.</p>
+      <p class="eyebrow">Produtos</p>
+      <h1>Cardapio e combos</h1>
+      <p class="dashboard-user-meta">Atualize nome, preco e imagem do menu em um so lugar.</p>
     </div>
     <div class="dashboard-actions">
       <a class="secondary-button" href="{{ url_for('dashboard') }}">Voltar ao painel</a>
@@ -30,8 +30,8 @@
       <article class="panel-card panel-card-premium sticky-form-card">
         <div class="panel-head">
           <div>
-            <p class="mini-label">Novo produto</p>
-            <h2>Criar item simples</h2>
+            <p class="mini-label">Produto</p>
+            <h2>Novo item simples</h2>
           </div>
         </div>
         <form class="product-form" method="post" action="{{ url_for('save_product') }}">
@@ -40,16 +40,16 @@
             <input type="text" name="name" placeholder="Ex.: Gin Tropical" required>
           </label>
           <label>
-            <span>Tipo / categoria</span>
-            <input type="text" name="category" list="product-category-options" value="Bebida" placeholder="Ex.: Bebida, Bistrô, Fogos ou Letreiro" required>
+            <span>Categoria</span>
+            <input type="text" name="category" list="product-category-options" value="Bebida" placeholder="Ex.: Bebida" required>
           </label>
           <label>
             <span>Descricao</span>
-            <textarea name="description" rows="3" placeholder="Resumo curto exibido no cardapio"></textarea>
+            <textarea name="description" rows="3" placeholder="Descricao breve"></textarea>
           </label>
           <div class="form-grid-two">
             <label>
-              <span>Preco de venda</span>
+              <span>Preco</span>
               <input type="text" name="price" placeholder="29.90" required>
             </label>
             <label>
@@ -57,17 +57,28 @@
               <input type="text" name="cost" placeholder="9.40" required>
             </label>
           </div>
+          <div class="image-upload-field" data-image-upload>
+            <label>
+              <span>URL da imagem</span>
+              <input type="text" name="image_url" placeholder="https://... ou /static/imagens/item.jpg" data-image-url-input>
+            </label>
+            <div class="image-upload-actions">
+              <input class="image-upload-input" type="file" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" hidden>
+              <button class="secondary-button image-upload-trigger" type="button">Selecionar imagem</button>
+              <span class="image-upload-status" aria-live="polite"></span>
+            </div>
+            <div class="image-upload-preview">
+              <img class="image-upload-preview-image hidden" alt="Previa da imagem do produto">
+              <div class="image-upload-placeholder">Previa da imagem</div>
+            </div>
+          </div>
           <label>
-            <span>Imagem</span>
-            <input type="text" name="image_url" placeholder="https://... ou /static/imagens/item.jpg">
-          </label>
-          <label>
-            <span>Capacidade de pre-order</span>
+            <span>Limite de pre-order</span>
             <input type="number" min="1" step="1" name="max_active_orders" placeholder="Vazio = sem limite">
           </label>
           <label class="checkbox-row">
             <input type="checkbox" name="is_active" checked>
-            <span>Produto ativo no cardapio</span>
+            <span>Ativo no cardapio</span>
           </label>
           <button class="primary-button" type="submit">Salvar produto</button>
         </form>
@@ -76,8 +87,8 @@
       <article class="panel-card panel-card-premium sticky-form-card secondary-form-card">
         <div class="panel-head">
           <div>
-            <p class="mini-label">Novo combo</p>
-            <h2>Criar item composto</h2>
+            <p class="mini-label">Combo</p>
+            <h2>Novo item composto</h2>
           </div>
         </div>
         <form class="product-form" method="post" action="{{ url_for('save_combo') }}">
@@ -87,23 +98,34 @@
           </label>
           <label>
             <span>Descricao</span>
-            <textarea name="description" rows="3" placeholder="Ex.: 2 drinks + energetico"></textarea>
+            <textarea name="description" rows="3" placeholder="Descricao breve"></textarea>
           </label>
           <label>
-            <span>Preco do combo</span>
+            <span>Preco</span>
             <input type="text" name="price" placeholder="54.90" required>
           </label>
+          <div class="image-upload-field" data-image-upload>
+            <label>
+              <span>URL da imagem</span>
+              <input type="text" name="image_url" placeholder="https://... ou /static/imagens/combo.jpg" data-image-url-input>
+            </label>
+            <div class="image-upload-actions">
+              <input class="image-upload-input" type="file" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" hidden>
+              <button class="secondary-button image-upload-trigger" type="button">Selecionar imagem</button>
+              <span class="image-upload-status" aria-live="polite"></span>
+            </div>
+            <div class="image-upload-preview">
+              <img class="image-upload-preview-image hidden" alt="Previa da imagem do combo">
+              <div class="image-upload-placeholder">Previa da imagem</div>
+            </div>
+          </div>
           <label>
-            <span>Imagem</span>
-            <input type="text" name="image_url" placeholder="https://... ou /static/imagens/combo.jpg">
-          </label>
-          <label>
-            <span>Capacidade de pre-order</span>
+            <span>Limite de pre-order</span>
             <input type="number" min="1" step="1" name="max_active_orders" placeholder="Vazio = sem limite">
           </label>
           <label class="checkbox-row">
             <input type="checkbox" name="is_active" checked>
-            <span>Combo ativo no cardapio</span>
+            <span>Ativo no cardapio</span>
           </label>
           <div class="combo-selector">
             <p class="mini-label">Composicao</p>
@@ -129,7 +151,7 @@
         <div class="panel-head">
           <div>
             <p class="mini-label">Produtos</p>
-            <h2>Itens simples do cardapio</h2>
+            <h2>Itens simples</h2>
           </div>
         </div>
         <div class="managed-product-list">
@@ -171,7 +193,7 @@
                   </label>
                 </div>
                 <label>
-                  <span>Tipo / categoria</span>
+                  <span>Categoria</span>
                   <input type="text" name="category" list="product-category-options" value="{{ product.category }}" required>
                 </label>
                 <div class="form-grid-two">
@@ -180,14 +202,25 @@
                     <input type="text" name="cost" value="{{ '%.2f'|format(product.cost) }}" required>
                   </label>
                   <label>
-                    <span>Imagem</span>
-                    <input type="text" name="image_url" value="{{ product.raw_image_url }}">
+                    <span>Limite de pre-order</span>
+                    <input type="number" min="1" step="1" name="max_active_orders" value="{{ product.raw_max_active_orders }}" placeholder="Vazio = sem limite">
                   </label>
                 </div>
-                <label>
-                  <span>Capacidade de pre-order</span>
-                  <input type="number" min="1" step="1" name="max_active_orders" value="{{ product.raw_max_active_orders }}" placeholder="Vazio = sem limite">
-                </label>
+                <div class="image-upload-field compact-image-upload" data-image-upload>
+                  <label>
+                    <span>URL da imagem</span>
+                    <input type="text" name="image_url" value="{{ product.raw_image_url }}" data-image-url-input>
+                  </label>
+                  <div class="image-upload-actions">
+                    <input class="image-upload-input" type="file" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" hidden>
+                    <button class="secondary-button image-upload-trigger" type="button">Selecionar imagem</button>
+                    <span class="image-upload-status" aria-live="polite"></span>
+                  </div>
+                  <div class="image-upload-preview{% if product.image_src %} has-image{% endif %}">
+                    <img class="image-upload-preview-image{% if not product.image_src %} hidden{% endif %}" src="{{ product.image_src or '' }}" alt="Previa da imagem de {{ product.name }}">
+                    <div class="image-upload-placeholder{% if product.image_src %} hidden{% endif %}">Previa da imagem</div>
+                  </div>
+                </div>
                 <label>
                   <span>Descricao</span>
                   <textarea name="description" rows="2">{{ product.raw_description }}</textarea>
@@ -210,7 +243,7 @@
         <div class="panel-head">
           <div>
             <p class="mini-label">Combos</p>
-            <h2>Itens compostos vendaveis</h2>
+            <h2>Itens compostos</h2>
           </div>
         </div>
         <div class="managed-product-list">
@@ -257,13 +290,24 @@
                   </label>
                 </div>
                 <label>
-                  <span>Imagem</span>
-                  <input type="text" name="image_url" value="{{ combo.raw_image_url }}">
-                </label>
-                <label>
-                  <span>Capacidade de pre-order</span>
+                  <span>Limite de pre-order</span>
                   <input type="number" min="1" step="1" name="max_active_orders" value="{{ combo.raw_max_active_orders }}" placeholder="Vazio = sem limite">
                 </label>
+                <div class="image-upload-field compact-image-upload" data-image-upload>
+                  <label>
+                    <span>URL da imagem</span>
+                    <input type="text" name="image_url" value="{{ combo.raw_image_url }}" data-image-url-input>
+                  </label>
+                  <div class="image-upload-actions">
+                    <input class="image-upload-input" type="file" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" hidden>
+                    <button class="secondary-button image-upload-trigger" type="button">Selecionar imagem</button>
+                    <span class="image-upload-status" aria-live="polite"></span>
+                  </div>
+                  <div class="image-upload-preview{% if combo.image_src %} has-image{% endif %}">
+                    <img class="image-upload-preview-image{% if not combo.image_src %} hidden{% endif %}" src="{{ combo.image_src or '' }}" alt="Previa da imagem de {{ combo.name }}">
+                    <div class="image-upload-placeholder{% if combo.image_src %} hidden{% endif %}">Previa da imagem</div>
+                  </div>
+                </div>
                 <label>
                   <span>Descricao</span>
                   <textarea name="description" rows="2">{{ combo.raw_description }}</textarea>
@@ -311,4 +355,11 @@
   <option value="{{ category }}"></option>
   {% endfor %}
 </datalist>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  window.BAROS_UPLOAD_IMAGE_URL = "{{ url_for('upload_image') }}";
+</script>
+<script src="{{ url_for('static', filename='products.js') }}"></script>
 {% endblock %}
