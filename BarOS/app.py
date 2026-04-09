@@ -81,6 +81,20 @@ PAYMENT_STATUS_LABELS = {
     "failed": "Falhou",
     "cancelled": "Cancelado",
 }
+CUSTOMER_IDENTIFICATION_MODES = {
+    "required": {
+        "label": "Obrigatorio",
+        "note": "Nome e local do pedido aparecem e precisam ser preenchidos.",
+    },
+    "optional": {
+        "label": "Opcional",
+        "note": "Nome e local aparecem, mas o cliente pode enviar sem preencher.",
+    },
+    "disabled": {
+        "label": "Desativado",
+        "note": "O pedido segue sem pedir identificacao do cliente.",
+    },
+}
 ORDER_TYPE_LABELS = {
     "pista": "Pista",
     "camarote": "Camarote",
@@ -621,6 +635,13 @@ def normalize_product_image(value: str | None) -> str:
     return cleaned
 
 
+def normalize_customer_identification_mode(value: str | None, *, default: str = "optional") -> str:
+    cleaned = (value or "").strip().lower()
+    if cleaned in CUSTOMER_IDENTIFICATION_MODES:
+        return cleaned
+    return default
+
+
 def is_allowed_product_image(filename: str) -> bool:
     return Path(filename).suffix.lower() in ALLOWED_PRODUCT_IMAGE_EXTENSIONS
 
@@ -1049,6 +1070,7 @@ def create_core_tables(db: DatabaseConnection) -> None:
             id INTEGER PRIMARY KEY CHECK (id = 1),
             preorder_start_time TEXT,
             preorder_end_time TEXT,
+            customer_identification_mode TEXT NOT NULL DEFAULT 'optional',
             updated_at TEXT NOT NULL
         )
         """
@@ -1060,6 +1082,7 @@ def apply_schema_updates(db: DatabaseConnection) -> None:
         "bebidas": set(get_table_columns(db, "bebidas")),
         "pedidos": set(get_table_columns(db, "pedidos")),
         "itens_pedido": set(get_table_columns(db, "itens_pedido")),
+        "preorder_settings": set(get_table_columns(db, "preorder_settings")),
     }
     column_updates = [
         ("bebidas", "categoria", "ALTER TABLE bebidas ADD COLUMN categoria TEXT"),
@@ -1089,6 +1112,11 @@ def apply_schema_updates(db: DatabaseConnection) -> None:
         ("itens_pedido", "item_type_snapshot", "ALTER TABLE itens_pedido ADD COLUMN item_type_snapshot TEXT"),
         ("itens_pedido", "unit_price_snapshot", "ALTER TABLE itens_pedido ADD COLUMN unit_price_snapshot DOUBLE PRECISION"),
         ("itens_pedido", "unit_cost_snapshot", "ALTER TABLE itens_pedido ADD COLUMN unit_cost_snapshot DOUBLE PRECISION"),
+        (
+            "preorder_settings",
+            "customer_identification_mode",
+            "ALTER TABLE preorder_settings ADD COLUMN customer_identification_mode TEXT NOT NULL DEFAULT 'optional'",
+        ),
     ]
     for table_name, column_name, sql in column_updates:
         if column_name not in table_columns[table_name]:
@@ -1985,18 +2013,26 @@ def parse_preorder_time_value(raw_value: str | None) -> str | None:
 def fetch_preorder_settings() -> dict:
     row = get_db().execute(
         """
-        SELECT preorder_start_time, preorder_end_time, updated_at
+        SELECT preorder_start_time, preorder_end_time, customer_identification_mode, updated_at
         FROM preorder_settings
         WHERE id = 1
         """
     ).fetchone()
     start_time = row["preorder_start_time"] if row else None
     end_time = row["preorder_end_time"] if row else None
+    customer_identification_mode = normalize_customer_identification_mode(
+        row["customer_identification_mode"] if row else None
+    )
     status = resolve_preorder_window_status(start_time, end_time)
     return {
         "start_time": start_time or "",
         "end_time": end_time or "",
         "updated_at": display_datetime(row["updated_at"]) if row and row["updated_at"] else "-",
+        "customer_identification_mode": customer_identification_mode,
+        "customer_identification_mode_label": CUSTOMER_IDENTIFICATION_MODES[customer_identification_mode]["label"],
+        "customer_identification_note": CUSTOMER_IDENTIFICATION_MODES[customer_identification_mode]["note"],
+        "customer_identification_required": customer_identification_mode == "required",
+        "customer_identification_visible": customer_identification_mode != "disabled",
         **status,
     }
 
@@ -2048,6 +2084,20 @@ def fetch_active_preorder_counts() -> dict[int, int]:
         PREORDER_ACTIVE_STATUSES,
     ).fetchall()
     return {row["bebida_id"]: int(row["total"] or 0) for row in rows}
+
+
+def resolve_order_customer_identification(payload: dict, settings: dict) -> tuple[str, str]:
+    mode = settings.get("customer_identification_mode", "optional")
+    raw_customer_name = sanitize_optional_text(payload.get("customer_name"), limit=48)
+    raw_table_label = sanitize_optional_text(payload.get("table_label"), limit=32)
+
+    if mode == "required" and (not raw_customer_name or not raw_table_label):
+        raise ValueError("Informe nome e mesa/retirada para enviar o pedido.")
+
+    if mode == "disabled":
+        return "Cliente", "Retirada"
+
+    return raw_customer_name or "Cliente", raw_table_label or "Retirada"
 
 
 def preorder_availability(
@@ -2559,6 +2609,15 @@ def build_preorder_redirect(message: str | None = None, error: str | None = None
     return redirect(url_for("preorder_page", **params))
 
 
+def build_settings_redirect(message: str | None = None, error: str | None = None):
+    params = {}
+    if message:
+        params["message"] = message
+    if error:
+        params["error"] = error
+    return redirect(url_for("settings_page", **params))
+
+
 def fetch_preorder_dashboard_snapshot() -> dict:
     settings = fetch_preorder_settings()
     active_counts = fetch_active_preorder_counts()
@@ -2606,6 +2665,28 @@ def save_preorder_settings_from_form() -> str:
         (start_time, end_time, utc_now_iso()),
     )
     return "Configuracao de pre-order salva com sucesso."
+
+
+def save_customer_experience_settings_from_form() -> str:
+    db = get_db()
+    customer_identification_mode = normalize_customer_identification_mode(
+        request.form.get("customer_identification_mode"),
+        default="",
+    )
+    if customer_identification_mode not in CUSTOMER_IDENTIFICATION_MODES:
+        raise ValueError("Modo de identificacao invalido.")
+
+    db.execute(
+        """
+        INSERT INTO preorder_settings (id, customer_identification_mode, updated_at)
+        VALUES (1, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            customer_identification_mode = excluded.customer_identification_mode,
+            updated_at = excluded.updated_at
+        """,
+        (customer_identification_mode, utc_now_iso()),
+    )
+    return "Experiencia do pedido atualizada com sucesso."
 
 
 def parse_combo_components_from_form(selected_ids: list[str]) -> list[dict]:
@@ -4209,11 +4290,13 @@ def index():
     menu: list[dict] = []
     status = "ok"
     try:
+        order_flow_settings = fetch_preorder_settings()
         menu = fetch_menu()
         profiler.mark("fetch_menu")
         response = render_template(
             "index.html",
             menu=menu,
+            order_flow_settings=order_flow_settings,
             current_time=local_now().strftime("%d/%m/%Y %H:%M"),
             staff_access_url=url_for("staff_access"),
             order_types=[
@@ -4295,7 +4378,6 @@ def dashboard():
         preorder=fetch_preorder_settings(),
         current_shift_id=get_current_shift_id(),
         current_user=current_user,
-        staff_settings=fetch_staff_settings_snapshot() if current_user["can_manage_bar"] else None,
         auth_message=request.args.get("auth_message"),
         auth_error=request.args.get("auth_error"),
     )
@@ -4314,10 +4396,46 @@ def save_staff_credentials():
         else:
             raise ValueError("Acao de credenciais invalida.")
         get_db().commit()
-        return build_dashboard_redirect(message=message)
+        return build_settings_redirect(message=message)
     except ValueError as error:
         get_db().rollback()
-        return build_dashboard_redirect(error=str(error))
+        return build_settings_redirect(error=str(error))
+
+
+@app.get("/painel/configuracoes")
+@login_required
+@role_required("admin")
+def settings_page():
+    return render_template(
+        "settings.html",
+        preorder=fetch_preorder_settings(),
+        staff_settings=fetch_staff_settings_snapshot(),
+        current_user=get_current_user(),
+        message=request.args.get("message"),
+        error=request.args.get("error"),
+        identification_modes=[
+            {
+                "value": value,
+                "label": data["label"],
+                "note": data["note"],
+            }
+            for value, data in CUSTOMER_IDENTIFICATION_MODES.items()
+        ],
+    )
+
+
+@app.post("/painel/configuracoes/experiencia")
+@login_required
+@role_required("admin")
+def save_customer_experience_settings():
+    try:
+        message = save_customer_experience_settings_from_form()
+        get_db().commit()
+        invalidate_snapshot_cache("catalog-context", "menu")
+        return build_settings_redirect(message=message)
+    except ValueError as error:
+        get_db().rollback()
+        return build_settings_redirect(error=str(error))
 
 
 @app.get("/painel/produtos")
@@ -4669,8 +4787,8 @@ def create_order():
         return jsonify({"error": validation_error}), 400
 
     db = get_db()
-    customer_name = sanitize_text(payload.get("customer_name"), "Cliente", limit=48)
-    table_label = sanitize_text(payload.get("table_label"), "Retirada", limit=32)
+    customer_name = "Cliente"
+    table_label = "Retirada"
     source = sanitize_text(payload.get("source"), DEFAULT_ORDER_SOURCE, limit=24)
     order_type = normalize_order_type(payload.get("order_type"))
     raw_payment_method = payload.get("payment_method")
@@ -4736,6 +4854,11 @@ def create_order():
         combo_components_map = catalog_context["combo_components_map"]
         inventory_by_name = catalog_context["inventory_by_name"]
         preorder_settings = catalog_context["preorder_settings"]
+        try:
+            customer_name, table_label = resolve_order_customer_identification(payload, preorder_settings)
+        except ValueError as error:
+            status = "missing_customer_identification"
+            return jsonify({"error": str(error)}), 400
         active_preorder_counts = catalog_context["active_preorder_counts"]
         profiler.mark("load_catalog_context")
 
