@@ -1,4 +1,4 @@
-{% extends "base.html" %}
+﻿{% extends "base.html" %}
 
 {% block title %}BarOS | Menu Digital{% endblock %}
 {% block body_class %}customer-body{% endblock %}
@@ -7,48 +7,55 @@
 <main class="customer-shell customer-shell-premium">
   <section class="hero-panel hero-panel-premium">
     <div class="hero-copy">
-      <p class="eyebrow">BarOS Menu</p>
-      <h1>Peça rapido, direto do celular.</h1>
-      <p class="hero-text">
-        Escolha sua bebida, revise o carrinho e finalize em poucos toques. Ideal para pedir em pe, com pressa e sem fila.
-      </p>
+      <p class="eyebrow">Bem-vindo</p>
+      <h1>Peca sua bebida em poucos toques.</h1>
+      <p class="hero-text">Escolha, revise e envie sem fila.</p>
       <div class="customer-hero-actions">
         <a class="primary-button hero-cta" href="#menu-grid">Ver cardapio</a>
         <button class="secondary-button hero-cta" type="button" id="open-checkout-quick">Ver carrinho</button>
       </div>
       <div class="hero-meta">
         <span>{{ current_time }}</span>
-        <span>Atendimento em fluxo continuo</span>
+        <span>Pedido direto no bar</span>
       </div>
     </div>
     <div class="hero-card service-card">
-      <p class="mini-label">Servico da casa</p>
-      <h2>Pedido simples para o cliente e organizado para o bar.</h2>
-      <p>Voce pede aqui e a equipe recebe tudo no painel interno.</p>
+      <p class="mini-label">Pedido rapido</p>
+      <h2>Um fluxo leve para o cliente e claro para a equipe.</h2>
+      <p>Monte o pedido e acompanhe a confirmacao sem complicacao.</p>
       <div class="hero-meta compact-meta">
         <span>Fluxo por turno</span>
-        <span>Baixa automatica</span>
+        <span>Menu ao vivo</span>
       </div>
     </div>
   </section>
 
   <section class="menu-section menu-section-premium">
-    <div class="section-heading">
+    <div class="section-heading{% if not order_flow_settings.customer_identification_visible %} section-heading-compact{% endif %}">
       <div>
         <p class="eyebrow">Cardapio</p>
         <h2>Escolha sua bebida</h2>
       </div>
+      {% if order_flow_settings.customer_identification_visible %}
       <form id="customer-form" class="customer-meta">
         <label>
-          <span>Seu nome</span>
-          <input type="text" id="customer-name" placeholder="Ex.: Rafael" autocomplete="name" enterkeyhint="next">
+          <span>Seu nome{% if order_flow_settings.customer_identification_required %}*{% endif %}</span>
+          <input type="text" id="customer-name" placeholder="Ex.: Rafael" autocomplete="name" enterkeyhint="next" {% if order_flow_settings.customer_identification_required %}required{% endif %}>
         </label>
         <label>
-          <span>Mesa ou retirada</span>
-          <input type="text" id="table-label" placeholder="Ex.: Mesa 7 ou retirada" autocapitalize="words" enterkeyhint="done">
+          <span>Mesa ou retirada{% if order_flow_settings.customer_identification_required %}*{% endif %}</span>
+          <input type="text" id="table-label" placeholder="Ex.: Mesa 7 ou retirada" autocapitalize="words" enterkeyhint="done" {% if order_flow_settings.customer_identification_required %}required{% endif %}>
         </label>
-        <p class="customer-meta-help">Nome e mesa agilizam a entrega.</p>
+        <p class="customer-meta-help">
+          {% if order_flow_settings.customer_identification_required %}
+          Informe nome e mesa/retirada para enviar o pedido.
+          {% else %}
+          Se quiser, adicione identificacao para agilizar a entrega.
+          {% endif %}
+        </p>
+        <p id="customer-meta-feedback" class="customer-meta-help hidden"></p>
       </form>
+      {% endif %}
     </div>
 
     <div id="menu-grid" class="menu-grid premium-product-grid">
@@ -255,7 +262,13 @@
 
 {% block scripts %}
 <script>
+  window.BAROS_ORDER_FLOW = {{ {
+    "customerIdentificationMode": order_flow_settings.customer_identification_mode,
+    "customerIdentificationRequired": order_flow_settings.customer_identification_required,
+    "customerIdentificationVisible": order_flow_settings.customer_identification_visible
+  }|tojson }};
   window.BAROS_MENU = {{ menu|tojson }};
 </script>
 <script src="{{ url_for('static', filename='app.js') }}"></script>
 {% endblock %}
+

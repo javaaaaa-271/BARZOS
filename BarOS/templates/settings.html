@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+
+{% block title %}BarOS | Configuracoes{% endblock %}
+{% block body_class %}dashboard-body{% endblock %}
+
+{% block content %}
+<main class="dashboard-shell products-shell settings-shell">
+  <header class="dashboard-header">
+    <div>
+      <p class="eyebrow">Configuracoes</p>
+      <h1>Experiencia e acesso</h1>
+      <p class="dashboard-user-meta">Ajuste o fluxo publico e as credenciais da equipe sem misturar com a operacao do turno.</p>
+    </div>
+    <div class="dashboard-actions">
+      <a class="secondary-button" href="{{ url_for('dashboard') }}">Operacao</a>
+      <a class="secondary-button" href="{{ url_for('products_page') }}">Produtos</a>
+      <a class="secondary-button" href="{{ url_for('preorder_page') }}">Pre-Order</a>
+      <a class="secondary-button" href="{{ url_for('index') }}">Ver menu</a>
+    </div>
+  </header>
+
+  {% if message %}
+  <div class="alert alert-success">{{ message }}</div>
+  {% endif %}
+  {% if error %}
+  <div class="alert">{{ error }}</div>
+  {% endif %}
+
+  <section class="settings-grid">
+    <article class="panel-card panel-card-premium">
+      <div class="panel-head">
+        <div>
+          <p class="mini-label">Experiencia do cliente</p>
+          <h2>Identificacao no pedido</h2>
+        </div>
+        <span class="status-pill neutral">{{ preorder.customer_identification_mode_label }}</span>
+      </div>
+      <form class="product-form" method="post" action="{{ url_for('save_customer_experience_settings') }}">
+        <div class="settings-choice-group">
+          {% for mode in identification_modes %}
+          <label class="settings-choice-card">
+            <input type="radio" name="customer_identification_mode" value="{{ mode.value }}" {% if preorder.customer_identification_mode == mode.value %}checked{% endif %}>
+            <div>
+              <strong>{{ mode.label }}</strong>
+              <p>{{ mode.note }}</p>
+            </div>
+          </label>
+          {% endfor %}
+        </div>
+        <p class="muted-note">{{ preorder.customer_identification_note }}</p>
+        <button class="primary-button" type="submit">Salvar experiencia</button>
+      </form>
+    </article>
+
+    <article class="panel-card panel-card-premium">
+      <div class="panel-head">
+        <div>
+          <p class="mini-label">Acesso da equipe</p>
+          <h2>Credenciais do painel</h2>
+        </div>
+      </div>
+      <div class="settings-stack">
+        <form class="product-form compact-form" method="post" action="{{ url_for('save_staff_credentials') }}">
+          <input type="hidden" name="account_action" value="admin_credentials">
+          <div class="panel-subhead">
+            <strong>Administrador</strong>
+            <p class="muted-note">Troque usuario e senha quando precisar.</p>
+          </div>
+          <div class="form-grid-two">
+            <label>
+              <span>Usuario admin</span>
+              <input type="text" name="username" value="{{ staff_settings.admin.username }}" autocomplete="username" required>
+            </label>
+            <label>
+              <span>Nova senha</span>
+              <input type="password" name="new_password" autocomplete="new-password" placeholder="Minimo 8 caracteres">
+            </label>
+          </div>
+          <label>
+            <span>Confirmar nova senha</span>
+            <input type="password" name="confirm_password" autocomplete="new-password" placeholder="Repita a nova senha">
+          </label>
+          <button class="secondary-button" type="submit">Salvar admin</button>
+        </form>
+
+        <form class="product-form compact-form" method="post" action="{{ url_for('save_staff_credentials') }}">
+          <input type="hidden" name="account_action" value="operator_account">
+          <div class="panel-subhead">
+            <strong>Operacao</strong>
+            <p class="muted-note">Conta usada pela equipe no dia a dia.</p>
+          </div>
+          <div class="form-grid-two">
+            <label>
+              <span>Usuario</span>
+              <input type="text" name="operator_username" value="{{ staff_settings.operator.username }}" autocomplete="username" required>
+            </label>
+            <label>
+              <span>Nome exibido</span>
+              <input type="text" name="operator_display_name" value="{{ staff_settings.operator.display_name }}" required>
+            </label>
+          </div>
+          <div class="form-grid-two">
+            <label>
+              <span>Senha</span>
+              <input type="password" name="operator_password" autocomplete="new-password" placeholder="Minimo 8 caracteres">
+            </label>
+            <label class="checkbox-row">
+              <input type="checkbox" name="operator_is_active" {% if staff_settings.operator.is_active %}checked{% endif %}>
+              <span>Conta ativa</span>
+            </label>
+          </div>
+          <button class="secondary-button" type="submit">Salvar operador</button>
+        </form>
+      </div>
+    </article>
+  </section>
+</main>
+{% endblock %}
