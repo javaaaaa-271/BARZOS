@@ -6,6 +6,8 @@ services:
     startCommand: gunicorn app:app --worker-class gthread --workers 2 --threads 4 --timeout 120 --graceful-timeout 30 --keep-alive 5 --bind 0.0.0.0:$PORT
     healthCheckPath: /health
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.11
       - key: BAROS_SECRET_KEY
         generateValue: true
       - key: BAROS_USERNAME
