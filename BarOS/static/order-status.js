@@ -2,6 +2,8 @@ const PUBLIC_ORDER_STORAGE_KEY = "baros_public_order_v1";
 const publicOrderState = {
   order: window.BAROS_PUBLIC_ORDER || null,
   timer: null,
+  isLoading: false,
+  consecutiveFailures: 0,
 };
 
 const publicOrderNumber = document.getElementById("public-order-number");
@@ -105,11 +107,14 @@ function schedulePublicOrderRefresh() {
   if (!order) {
     return;
   }
-  const delay =
+  const baseDelay =
     order.public_state === "awaiting_payment" ? 5000 : order.public_state === "paid" ? 15000 : 30000;
+  const retryDelay = publicOrderState.consecutiveFailures
+    ? Math.min(baseDelay * (publicOrderState.consecutiveFailures + 1), 45000)
+    : baseDelay;
   publicOrderState.timer = window.setTimeout(() => {
-    void refreshPublicOrderStatus();
-  }, delay);
+    void refreshPublicOrderStatus({ silent: true });
+  }, retryDelay);
 }
 
 function renderPublicOrder(order) {
@@ -147,14 +152,16 @@ function renderPublicOrder(order) {
   }
   publicRegenerateButton?.classList.toggle("hidden", !order.can_regenerate_pix);
   renderPublicOrderItems(order.items);
+  publicOrderState.consecutiveFailures = 0;
   schedulePublicOrderRefresh();
 }
 
 async function refreshPublicOrderStatus({ silent = false } = {}) {
   const order = publicOrderState.order;
-  if (!order?.status_url) {
+  if (!order?.status_url || publicOrderState.isLoading) {
     return;
   }
+  publicOrderState.isLoading = true;
   if (!silent) {
     setPublicOrderFeedback("Atualizando status...");
   }
@@ -165,10 +172,22 @@ async function refreshPublicOrderStatus({ silent = false } = {}) {
       throw new Error(data.error || "Nao foi possivel atualizar o status.");
     }
     renderPublicOrder(data.order);
-    setPublicOrderFeedback("Status atualizado.");
+    if (!silent) {
+      setPublicOrderFeedback("Status atualizado.");
+    } else {
+      setPublicOrderFeedback("");
+    }
   } catch (error) {
     console.error(error);
-    setPublicOrderFeedback(error.message || "Nao foi possivel atualizar o status.", true);
+    publicOrderState.consecutiveFailures += 1;
+    if (!silent || publicOrderState.consecutiveFailures >= 2) {
+      setPublicOrderFeedback(error.message || "Nao foi possivel atualizar o status.", true);
+    } else {
+      setPublicOrderFeedback("Conexao instavel. Tentando novamente...");
+    }
+    schedulePublicOrderRefresh();
+  } finally {
+    publicOrderState.isLoading = false;
   }
 }
 
