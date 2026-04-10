@@ -80,7 +80,7 @@
     <div class="order-status-items">
       <p class="eyebrow">Itens do pedido</p>
       <div id="public-order-items" class="summary-list">
-        {% for item in order.items %}
+        {% for item in order.get("items", []) %}
         <div class="summary-line">
           <span>{{ item.quantity }}x {{ item.name }}</span>
           <strong>R$ {{ "%.2f"|format(item.subtotal) }}</strong>
