@@ -358,6 +358,7 @@ SNAPSHOT_CACHE_TTLS = {
     "menu": 10.0,
     "logistics": 45.0,
     "order_summary": 45.0,
+    "public_order_status": 5.0,
     "shift_history": 120.0,
 }
 _SNAPSHOT_CACHE: dict[str, tuple[float, Any]] = {}
@@ -2155,18 +2156,18 @@ def issue_pix_payment_response(code: str, *, regenerate: bool = False) -> tuple[
     if row["status"] == "completed":
         return jsonify({"error": "Esse pedido ja foi entregue."}), 400
     if normalize_payment_status(row["payment_status"], "pending") == "paid":
-        payload = build_public_order_payload(row, fetch_order_items_map([row["id"]]).get(row["id"], []))
+        payload = build_public_order_payload(row, fetch_public_order_items_map([row["id"]]).get(row["id"], []))
         return jsonify({"order": payload}), 200
 
     if not regenerate and row["pix_qr_code"] and not order_is_pix_expired(row):
-        payload = build_public_order_payload(row, fetch_order_items_map([row["id"]]).get(row["id"], []))
+        payload = build_public_order_payload(row, fetch_public_order_items_map([row["id"]]).get(row["id"], []))
         return jsonify({"order": payload}), 200
 
     issue_pix_payment_for_order(row, regenerate=regenerate)
     db.commit()
-    invalidate_snapshot_cache("order-summary", "dashboard-orders", "dashboard-summary", "dashboard-logistics")
+    invalidate_snapshot_cache("order-summary", "dashboard-orders", "dashboard-summary", "dashboard-logistics", "public-order-status")
     updated = fetch_order_row_by_code(code)
-    payload = build_public_order_payload(updated, fetch_order_items_map([updated["id"]]).get(updated["id"], []))
+    payload = build_public_order_payload(updated, fetch_public_order_items_map([updated["id"]]).get(updated["id"], []))
     return jsonify({"order": payload}), 200
 
 
@@ -3334,6 +3335,37 @@ def fetch_public_order_payload(public_token: str) -> dict[str, Any] | None:
         return None
     items = fetch_public_order_items_map([row["id"]]).get(row["id"], [])
     return build_public_order_payload(row, items=items)
+
+
+def fetch_public_order_payload_with_meta(public_token: str) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    cache_key = f"public-order-status:{public_token}"
+    cached_value = read_snapshot_cache(cache_key)
+    if cached_value is not None:
+        return cached_value, {
+            "cache_status": "hit",
+            "db_query_ms": 0.0,
+            "serialization_ms": 0.0,
+        }
+
+    db_started_at = time.perf_counter()
+    payload = fetch_public_order_payload(public_token)
+    db_query_ms = (time.perf_counter() - db_started_at) * 1000
+    if payload is None:
+        return None, {
+            "cache_status": "miss",
+            "db_query_ms": round(db_query_ms, 1),
+            "serialization_ms": 0.0,
+        }
+
+    serialization_started_at = time.perf_counter()
+    cached_payload = dict(payload)
+    serialization_ms = (time.perf_counter() - serialization_started_at) * 1000
+    write_snapshot_cache(cache_key, SNAPSHOT_CACHE_TTLS["public_order_status"], cached_payload)
+    return cached_payload, {
+        "cache_status": "miss",
+        "db_query_ms": round(db_query_ms, 1),
+        "serialization_ms": round(serialization_ms, 1),
+    }
 
 
 def fetch_public_order_items_map(order_ids: list[int]) -> dict[int, list[DbRow]]:
@@ -6010,6 +6042,7 @@ def create_order():
             "dashboard-orders",
             "dashboard-summary",
             "dashboard-logistics",
+            "public-order-status",
         )
         current_db_step = "build_summary_response"
         response_summary = fetch_dashboard_summary_payload(turno_id)["summary"]
@@ -6078,31 +6111,35 @@ def get_public_order_status(public_token: str):
     db_query_ms = 0.0
     serialization_ms = 0.0
     order_found = False
+    cache_status = "miss"
     try:
-        db_started_at = time.perf_counter()
-        order = fetch_public_order_payload(public_token)
-        db_query_ms = (time.perf_counter() - db_started_at) * 1000
+        order, route_meta = fetch_public_order_payload_with_meta(public_token)
+        db_query_ms = route_meta["db_query_ms"]
+        serialization_ms = route_meta["serialization_ms"]
+        cache_status = route_meta["cache_status"]
         profiler.mark("fetch_order")
         if not order:
             status = "not_found"
             app.logger.warning(
-                "public_order_status not_found public_token=%s db_query_ms=%.1f",
+                "public_order_status not_found public_token=%s cache_status=%s db_query_ms=%.1f",
                 public_token,
+                cache_status,
                 db_query_ms,
             )
             return jsonify({"error": "Pedido nao encontrado."}), 404
         order_found = True
         serialization_started_at = time.perf_counter()
         response = jsonify({"order": order})
-        serialization_ms = (time.perf_counter() - serialization_started_at) * 1000
+        serialization_ms += (time.perf_counter() - serialization_started_at) * 1000
         profiler.mark("serialization/jsonify")
         return response
     except Exception:
         status = "error"
         app.logger.exception(
-            "public_order_status unexpected_error public_token=%s order_found=%s db_query_ms=%.1f serialization_ms=%.1f",
+            "public_order_status unexpected_error public_token=%s order_found=%s cache_status=%s db_query_ms=%.1f serialization_ms=%.1f",
             public_token,
             order_found,
+            cache_status,
             db_query_ms,
             serialization_ms,
         )
@@ -6110,7 +6147,7 @@ def get_public_order_status(public_token: str):
     finally:
         profiler.log(
             status=status,
-            cache_status="no_cache",
+            cache_status=cache_status,
             db_query_ms=round(db_query_ms, 1),
             serialization_ms=round(serialization_ms, 1),
             public_token=public_token,
@@ -6300,7 +6337,7 @@ def handle_payment_webhook(provider: str):
                 confirmed_by=f"webhook:{provider}",
                 webhook_received_at=received_at,
             )
-            invalidate_snapshot_cache("order-summary", "dashboard-orders", "dashboard-summary", "dashboard-logistics")
+            invalidate_snapshot_cache("order-summary", "dashboard-orders", "dashboard-summary", "dashboard-logistics", "public-order-status")
 
         record_webhook_event(
             provider=provider,
@@ -6366,7 +6403,7 @@ def pay_order(code: str):
         )
         db_query_ms = (time.perf_counter() - db_started_at) * 1000
         profiler.mark("mark_paid")
-        invalidate_snapshot_cache("catalog-context", "order-summary", "dashboard-orders", "dashboard-summary")
+        invalidate_snapshot_cache("catalog-context", "order-summary", "dashboard-orders", "dashboard-summary", "public-order-status")
         profiler.mark("invalidate_cache")
         serialization_started_at = time.perf_counter()
         response = jsonify({"order": order})
@@ -6461,7 +6498,7 @@ def complete_order(code: str):
         )
         db.commit()
         db_query_ms = (time.perf_counter() - db_started_at) * 1000
-        invalidate_snapshot_cache("catalog-context", "order-summary", "dashboard-orders", "dashboard-summary")
+        invalidate_snapshot_cache("catalog-context", "order-summary", "dashboard-orders", "dashboard-summary", "public-order-status")
         profiler.mark("invalidate_cache")
         serialization_started_at = time.perf_counter()
         response = jsonify({"order": serialize_dashboard_order(updated)})
