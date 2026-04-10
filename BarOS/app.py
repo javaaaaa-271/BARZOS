@@ -26,17 +26,18 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from storage import (
+    DEFAULT_PRODUCT_IMAGE_URL,
+    MAX_PRODUCT_IMAGE_SIZE_BYTES,
+    delete_product_image,
+    upload_product_image,
+)
 from werkzeug.security import check_password_hash, generate_password_hash
-from werkzeug.utils import secure_filename
 
 
 load_dotenv(override=False)
 
 BASE_DIR = Path(__file__).resolve().parent
-PRODUCT_IMAGE_UPLOAD_DIR = BASE_DIR / "static" / "uploads" / "products"
-PRODUCT_IMAGE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-ALLOWED_PRODUCT_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
-ALLOWED_PRODUCT_IMAGE_MIMETYPES = {"image/png", "image/jpeg", "image/webp"}
 
 INSTANCE_DIR = BASE_DIR / "instance"
 INSTANCE_DIR.mkdir(exist_ok=True)
@@ -399,7 +400,7 @@ if SENTRY_DSN:
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = build_runtime_secret_key()
-app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = MAX_PRODUCT_IMAGE_SIZE_BYTES
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_SECURE"] = (
@@ -407,6 +408,11 @@ app.config["SESSION_COOKIE_SECURE"] = (
     if BAROS_COOKIE_SECURE is not None
     else IS_PRODUCTION
 )
+
+
+@app.context_processor
+def inject_template_defaults():
+    return {"default_product_image_url": DEFAULT_PRODUCT_IMAGE_URL}
 
 
 @app.get("/health")
@@ -635,39 +641,52 @@ def normalize_product_image(value: str | None) -> str:
     return cleaned
 
 
+def build_product_image_src(value: str | None) -> str:
+    return normalize_product_image(value) or DEFAULT_PRODUCT_IMAGE_URL
+
+
+def get_submitted_product_image() -> Any | None:
+    uploaded_file = request.files.get("image")
+    if uploaded_file is None:
+        return None
+    if not (uploaded_file.filename or "").strip():
+        return None
+    return uploaded_file
+
+
+def resolve_product_image_submission(*, current_image_url: str | None = None) -> tuple[str, str | None, str | None]:
+    uploaded_file = get_submitted_product_image()
+    if uploaded_file is None:
+        submitted_image_url = normalize_product_image(request.form.get("image_url"))
+        previous_image_url = normalize_product_image(current_image_url)
+        previous_to_delete = previous_image_url if submitted_image_url != previous_image_url else None
+        return submitted_image_url, None, previous_to_delete
+
+    new_image_url = upload_product_image(uploaded_file)
+    previous_image_url = normalize_product_image(current_image_url)
+    return new_image_url, new_image_url, previous_image_url or None
+
+
+def queue_product_image_deletion(image_url: str | None) -> None:
+    if not image_url:
+        return
+
+    pending_deletions = getattr(g, "pending_product_image_deletions", [])
+    pending_deletions.append(image_url)
+    g.pending_product_image_deletions = pending_deletions
+
+
+def flush_product_image_deletions() -> None:
+    for image_url in getattr(g, "pending_product_image_deletions", []):
+        delete_product_image(image_url)
+    g.pending_product_image_deletions = []
+
+
 def normalize_customer_identification_mode(value: str | None, *, default: str = "optional") -> str:
     cleaned = (value or "").strip().lower()
     if cleaned in CUSTOMER_IDENTIFICATION_MODES:
         return cleaned
     return default
-
-
-def is_allowed_product_image(filename: str) -> bool:
-    return Path(filename).suffix.lower() in ALLOWED_PRODUCT_IMAGE_EXTENSIONS
-
-
-def save_uploaded_product_image(uploaded_file) -> str:
-    raw_filename = (uploaded_file.filename or "").strip()
-    if not raw_filename:
-        raise ValueError("Selecione uma imagem PNG, JPG, JPEG ou WEBP.")
-
-    safe_name = secure_filename(raw_filename)
-    if not safe_name or not is_allowed_product_image(safe_name):
-        raise ValueError("Formato invalido. Use PNG, JPG, JPEG ou WEBP.")
-    if uploaded_file.mimetype and uploaded_file.mimetype not in ALLOWED_PRODUCT_IMAGE_MIMETYPES:
-        raise ValueError("Arquivo invalido. Envie uma imagem PNG, JPG, JPEG ou WEBP.")
-
-    extension = Path(safe_name).suffix.lower()
-    base_name = Path(safe_name).stem[:80] or "produto"
-    filename = f"{base_name}-{secrets.token_hex(8)}{extension}"
-    destination = PRODUCT_IMAGE_UPLOAD_DIR / filename
-
-    try:
-        uploaded_file.save(destination)
-    except Exception as error:
-        raise OSError("Nao foi possivel salvar a imagem agora.") from error
-
-    return url_for("static", filename=f"uploads/products/{filename}")
 
 
 def build_initials(value: str | None) -> str:
@@ -2144,7 +2163,7 @@ def get_beverage_display_data(row: sqlite3.Row | dict) -> dict:
     if row_data["is_combo"] and not prep_time:
         prep_time = "4 min"
     description = row_data["descricao"] if row_data["descricao"] else fallback.get("description", "")
-    image_url = normalize_product_image(row_data["imagem_url"])
+    image_url = build_product_image_src(row_data["imagem_url"])
     return {
         "id": row_data["id"],
         "name": row_data["nome"],
@@ -4155,7 +4174,6 @@ def upsert_product_from_form(product_id: int | None = None) -> str:
     cost = parse_decimal_input(request.form.get("cost"), "Custo estimado", minimum=0.0)
     category = normalize_product_category(request.form.get("category"))
     description = sanitize_optional_text(request.form.get("description"), limit=280)
-    image_url = normalize_product_image(request.form.get("image_url"))
     is_active = 1 if checkbox_to_bool(request.form.get("is_active")) else 0
     max_active_orders = parse_optional_integer_input(
         request.form.get("max_active_orders"),
@@ -4166,7 +4184,7 @@ def upsert_product_from_form(product_id: int | None = None) -> str:
     if product_id:
         row = db.execute(
             """
-            SELECT id, categoria, tempo_preparo
+            SELECT id, categoria, tempo_preparo, imagem_url
             FROM bebidas
             WHERE id = ? AND is_combo = 0
             """,
@@ -4174,35 +4192,57 @@ def upsert_product_from_form(product_id: int | None = None) -> str:
         ).fetchone()
         if not row:
             raise ValueError("Produto nao encontrado.")
-        db.execute(
-            """
-            UPDATE bebidas
-            SET nome = ?, preco_venda = ?, custo_estimado = ?, categoria = ?, descricao = ?, imagem_url = ?, is_active = ?, max_active_orders = ?
-            WHERE id = ?
-            """,
-            (name, price, cost, category, description, image_url, is_active, max_active_orders, product_id),
-        )
+
+        uploaded_image_url = None
+        previous_image_url = None
+
+        try:
+            image_url, uploaded_image_url, previous_image_url = resolve_product_image_submission(
+                current_image_url=row["imagem_url"]
+            )
+            db.execute(
+                """
+                UPDATE bebidas
+                SET nome = ?, preco_venda = ?, custo_estimado = ?, categoria = ?, descricao = ?, imagem_url = ?, is_active = ?, max_active_orders = ?
+                WHERE id = ?
+                """,
+                (name, price, cost, category, description, image_url, is_active, max_active_orders, product_id),
+            )
+        except Exception:
+            if uploaded_image_url:
+                delete_product_image(uploaded_image_url)
+            raise
+
         refresh_combo_costs_for_component(product_id)
+        if previous_image_url:
+            queue_product_image_deletion(previous_image_url)
         return "Produto atualizado com sucesso."
 
-    db.execute(
-        """
-        INSERT INTO bebidas (
-            nome,
-            preco_venda,
-            custo_estimado,
-            categoria,
-            descricao,
-            tempo_preparo,
-            imagem_url,
-            is_active,
-            is_combo,
-            max_active_orders
+    uploaded_image_url = None
+    try:
+        image_url, uploaded_image_url, _ = resolve_product_image_submission()
+        db.execute(
+            """
+            INSERT INTO bebidas (
+                nome,
+                preco_venda,
+                custo_estimado,
+                categoria,
+                descricao,
+                tempo_preparo,
+                imagem_url,
+                is_active,
+                is_combo,
+                max_active_orders
+            )
+            VALUES (?, ?, ?, ?, ?, '3 min', ?, ?, 0, ?)
+            """,
+            (name, price, cost, category, description, image_url, is_active, max_active_orders),
         )
-        VALUES (?, ?, ?, ?, ?, '3 min', ?, ?, 0, ?)
-        """,
-        (name, price, cost, category, description, image_url, is_active, max_active_orders),
-    )
+    except Exception:
+        if uploaded_image_url:
+            delete_product_image(uploaded_image_url)
+        raise
     return "Produto criado com sucesso."
 
 
@@ -4214,7 +4254,6 @@ def upsert_combo_from_form(combo_id: int | None = None) -> str:
 
     price = parse_decimal_input(request.form.get("price"), "Preco do combo", minimum=0.01)
     description = sanitize_optional_text(request.form.get("description"), limit=280)
-    image_url = normalize_product_image(request.form.get("image_url"))
     is_active = 1 if checkbox_to_bool(request.form.get("is_active")) else 0
     max_active_orders = parse_optional_integer_input(
         request.form.get("max_active_orders"),
@@ -4232,42 +4271,64 @@ def upsert_combo_from_form(combo_id: int | None = None) -> str:
 
     if combo_id:
         row = db.execute(
-            "SELECT id FROM bebidas WHERE id = ? AND is_combo = 1",
+            "SELECT id, imagem_url FROM bebidas WHERE id = ? AND is_combo = 1",
             (combo_id,),
         ).fetchone()
         if not row:
             raise ValueError("Combo nao encontrado.")
-        db.execute(
-            """
-            UPDATE bebidas
-            SET nome = ?, preco_venda = ?, custo_estimado = ?, descricao = ?, imagem_url = ?, is_active = ?, max_active_orders = ?
-            WHERE id = ?
-            """,
-            (name, price, estimated_cost, description, image_url, is_active, max_active_orders, combo_id),
-        )
+
+        uploaded_image_url = None
+        previous_image_url = None
+
+        try:
+            image_url, uploaded_image_url, previous_image_url = resolve_product_image_submission(
+                current_image_url=row["imagem_url"]
+            )
+            db.execute(
+                """
+                UPDATE bebidas
+                SET nome = ?, preco_venda = ?, custo_estimado = ?, descricao = ?, imagem_url = ?, is_active = ?, max_active_orders = ?
+                WHERE id = ?
+                """,
+                (name, price, estimated_cost, description, image_url, is_active, max_active_orders, combo_id),
+            )
+        except Exception:
+            if uploaded_image_url:
+                delete_product_image(uploaded_image_url)
+            raise
+
         db.execute("DELETE FROM combo_items WHERE combo_beverage_id = ?", (combo_id,))
+        if previous_image_url:
+            queue_product_image_deletion(previous_image_url)
         target_combo_id = combo_id
         success_message = "Combo atualizado com sucesso."
     else:
-        row = db.execute(
-            """
-            INSERT INTO bebidas (
-                nome,
-                preco_venda,
-                custo_estimado,
-                categoria,
-                descricao,
-                tempo_preparo,
-                imagem_url,
-                is_active,
-                is_combo,
-                max_active_orders
-            )
-            VALUES (?, ?, ?, 'Combo', ?, '4 min', ?, ?, 1, ?)
-            RETURNING id
-            """,
-            (name, price, estimated_cost, description, image_url, is_active, max_active_orders),
-        ).fetchone()
+        uploaded_image_url = None
+        try:
+            image_url, uploaded_image_url, _ = resolve_product_image_submission()
+            row = db.execute(
+                """
+                INSERT INTO bebidas (
+                    nome,
+                    preco_venda,
+                    custo_estimado,
+                    categoria,
+                    descricao,
+                    tempo_preparo,
+                    imagem_url,
+                    is_active,
+                    is_combo,
+                    max_active_orders
+                )
+                VALUES (?, ?, ?, 'Combo', ?, '4 min', ?, ?, 1, ?)
+                RETURNING id
+                """,
+                (name, price, estimated_cost, description, image_url, is_active, max_active_orders),
+            ).fetchone()
+        except Exception:
+            if uploaded_image_url:
+                delete_product_image(uploaded_image_url)
+            raise
         target_combo_id = row["id"]
         success_message = "Combo criado com sucesso."
 
@@ -4464,7 +4525,7 @@ def upload_image():
         return jsonify({"error": "Nenhum arquivo enviado."}), 400
 
     try:
-        image_url = save_uploaded_product_image(uploaded_file)
+        image_url = upload_product_image(uploaded_file)
     except ValueError as error:
         return jsonify({"error": str(error)}), 400
     except OSError as error:
@@ -4498,13 +4559,20 @@ def save_product():
     try:
         message = upsert_product_from_form(product_id)
         get_db().commit()
+        flush_product_image_deletions()
         invalidate_snapshot_cache("catalog-context", "menu", "logistics", "dashboard-logistics")
         return build_products_redirect(message=message)
     except IntegrityError:
         get_db().rollback()
+        g.pending_product_image_deletions = []
         return build_products_redirect(error="Ja existe um produto com esse nome.")
     except ValueError as error:
         get_db().rollback()
+        g.pending_product_image_deletions = []
+        return build_products_redirect(error=str(error))
+    except OSError as error:
+        get_db().rollback()
+        g.pending_product_image_deletions = []
         return build_products_redirect(error=str(error))
 
 
@@ -4517,13 +4585,20 @@ def save_combo():
     try:
         message = upsert_combo_from_form(combo_id)
         get_db().commit()
+        flush_product_image_deletions()
         invalidate_snapshot_cache("catalog-context", "menu", "logistics", "dashboard-logistics")
         return build_products_redirect(message=message)
     except IntegrityError:
         get_db().rollback()
+        g.pending_product_image_deletions = []
         return build_products_redirect(error="Ja existe um item com esse nome.")
     except ValueError as error:
         get_db().rollback()
+        g.pending_product_image_deletions = []
+        return build_products_redirect(error=str(error))
+    except OSError as error:
+        get_db().rollback()
+        g.pending_product_image_deletions = []
         return build_products_redirect(error=str(error))
 
 
@@ -5312,7 +5387,7 @@ def handle_internal_server_error(error):
 @app.errorhandler(413)
 def handle_payload_too_large(error):
     if request.path == "/api/upload-image":
-        return jsonify({"error": "Imagem muito grande. Envie um arquivo de ate 1 MB."}), 413
+        return jsonify({"error": "Imagem muito grande. Envie um arquivo de ate 5 MB."}), 413
     if is_api_request():
         return jsonify({"error": "Arquivo muito grande."}), 413
     return "Arquivo muito grande.", 413
