@@ -1,5 +1,7 @@
 ﻿from __future__ import annotations
 import csv
+import hashlib
+import hmac
 import json
 import io
 import os
@@ -20,7 +22,7 @@ import sentry_sdk
 from dotenv import load_dotenv
 from psycopg import IntegrityError, connect
 from psycopg.rows import dict_row
-from flask import Flask, Response, g, jsonify, redirect, render_template, request, session, url_for
+from flask import Flask, Response, abort, g, jsonify, redirect, render_template, request, session, url_for
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
@@ -68,6 +70,9 @@ LEGACY_SEED_ADMIN_PASSWORD = os.getenv("BAROS_PASSWORD") or ""
 LEGACY_SEED_OPERATOR_USERNAME = (os.getenv("BAROS_OPERATOR_USERNAME") or "").strip()
 LEGACY_SEED_OPERATOR_PASSWORD = os.getenv("BAROS_OPERATOR_PASSWORD") or ""
 DEFAULT_ORDER_SOURCE = "menu-digital"
+BAROS_PIX_PROVIDER = (os.getenv("BAROS_PIX_PROVIDER") or "baros-pix-simulado").strip() or "baros-pix-simulado"
+BAROS_PIX_WEBHOOK_SECRET = (os.getenv("BAROS_PIX_WEBHOOK_SECRET") or "").strip()
+PIX_PAYMENT_TTL_MINUTES = max(1, int((os.getenv("BAROS_PIX_TTL_MINUTES") or "10").strip() or "10"))
 ROLE_LABELS = {
     "admin": "Administrador",
     "operator": "Operacao",
@@ -105,6 +110,7 @@ ORDER_STATUS_LABELS = {
     "pending": "Liberado ao bar",
     "pending_payment": "Aguardando Pix",
     "completed": "Concluido",
+    "expired": "Pix expirado",
 }
 PRODUCT_CATEGORY_OPTIONS = [
     "Bebida",
@@ -1094,6 +1100,36 @@ def create_core_tables(db: DatabaseConnection) -> None:
         )
         """
     )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS payment_webhook_events (
+            id BIGSERIAL PRIMARY KEY,
+            provider TEXT NOT NULL,
+            provider_event_id TEXT NOT NULL,
+            order_id BIGINT REFERENCES pedidos(id) ON DELETE SET NULL,
+            event_type TEXT,
+            status TEXT NOT NULL DEFAULT 'received',
+            suspicious_reason TEXT,
+            payload_json TEXT,
+            headers_json TEXT,
+            received_at TEXT NOT NULL,
+            processed_at TEXT,
+            UNIQUE(provider, provider_event_id)
+        )
+        """
+    )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS order_audit_logs (
+            id BIGSERIAL PRIMARY KEY,
+            order_id BIGINT NOT NULL REFERENCES pedidos(id) ON DELETE CASCADE,
+            event_type TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            details_json TEXT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
 
 
 def apply_schema_updates(db: DatabaseConnection) -> None:
@@ -1122,11 +1158,20 @@ def apply_schema_updates(db: DatabaseConnection) -> None:
         ("pedidos", "payment_status", "ALTER TABLE pedidos ADD COLUMN payment_status TEXT"),
         ("pedidos", "payment_provider", "ALTER TABLE pedidos ADD COLUMN payment_provider TEXT"),
         ("pedidos", "payment_provider_id", "ALTER TABLE pedidos ADD COLUMN payment_provider_id TEXT"),
+        ("pedidos", "provider_payment_id", "ALTER TABLE pedidos ADD COLUMN provider_payment_id TEXT"),
+        ("pedidos", "provider_status", "ALTER TABLE pedidos ADD COLUMN provider_status TEXT"),
         ("pedidos", "paid_at", "ALTER TABLE pedidos ADD COLUMN paid_at TEXT"),
+        ("pedidos", "delivered_at", "ALTER TABLE pedidos ADD COLUMN delivered_at TEXT"),
+        ("pedidos", "expires_at", "ALTER TABLE pedidos ADD COLUMN expires_at TEXT"),
         ("pedidos", "pix_qr_code", "ALTER TABLE pedidos ADD COLUMN pix_qr_code TEXT"),
         ("pedidos", "pix_copy_paste", "ALTER TABLE pedidos ADD COLUMN pix_copy_paste TEXT"),
+        ("pedidos", "pix_expires_at", "ALTER TABLE pedidos ADD COLUMN pix_expires_at TEXT"),
         ("pedidos", "request_id", "ALTER TABLE pedidos ADD COLUMN request_id TEXT"),
         ("pedidos", "order_type", "ALTER TABLE pedidos ADD COLUMN order_type TEXT"),
+        ("pedidos", "public_token", "ALTER TABLE pedidos ADD COLUMN public_token TEXT"),
+        ("pedidos", "pickup_code", "ALTER TABLE pedidos ADD COLUMN pickup_code TEXT"),
+        ("pedidos", "webhook_received_at", "ALTER TABLE pedidos ADD COLUMN webhook_received_at TEXT"),
+        ("pedidos", "payment_confirmed_by", "ALTER TABLE pedidos ADD COLUMN payment_confirmed_by TEXT"),
         ("itens_pedido", "item_name_snapshot", "ALTER TABLE itens_pedido ADD COLUMN item_name_snapshot TEXT"),
         ("itens_pedido", "item_type_snapshot", "ALTER TABLE itens_pedido ADD COLUMN item_type_snapshot TEXT"),
         ("itens_pedido", "unit_price_snapshot", "ALTER TABLE itens_pedido ADD COLUMN unit_price_snapshot DOUBLE PRECISION"),
@@ -1146,6 +1191,7 @@ def apply_schema_updates(db: DatabaseConnection) -> None:
         "pedidos": get_table_indexes(db, "pedidos"),
         "turnos": get_table_indexes(db, "turnos"),
         "itens_pedido": get_table_indexes(db, "itens_pedido"),
+        "payment_webhook_events": get_table_indexes(db, "payment_webhook_events"),
     }
     index_updates = [
         ("pedidos", "idx_pedidos_request_id", "CREATE UNIQUE INDEX idx_pedidos_request_id ON pedidos(request_id)"),
@@ -1162,8 +1208,20 @@ def apply_schema_updates(db: DatabaseConnection) -> None:
         ),
         ("pedidos", "idx_pedidos_status", "CREATE INDEX idx_pedidos_status ON pedidos(status)"),
         ("pedidos", "idx_pedidos_codigo_turno", "CREATE INDEX idx_pedidos_codigo_turno ON pedidos(codigo_retirada, turno_id)"),
+        ("pedidos", "idx_pedidos_public_token", "CREATE UNIQUE INDEX idx_pedidos_public_token ON pedidos(public_token)"),
+        ("pedidos", "idx_pedidos_pickup_code", "CREATE INDEX idx_pedidos_pickup_code ON pedidos(pickup_code)"),
+        (
+            "pedidos",
+            "idx_pedidos_provider_payment_id",
+            "CREATE INDEX idx_pedidos_provider_payment_id ON pedidos(provider_payment_id)",
+        ),
         ("turnos", "idx_turnos_status_id", "CREATE INDEX idx_turnos_status_id ON turnos(status, id DESC)"),
         ("itens_pedido", "idx_itens_pedido_pedido_id", "CREATE INDEX idx_itens_pedido_pedido_id ON itens_pedido(pedido_id)"),
+        (
+            "payment_webhook_events",
+            "idx_payment_webhook_events_provider_event",
+            "CREATE UNIQUE INDEX idx_payment_webhook_events_provider_event ON payment_webhook_events(provider, provider_event_id)",
+        ),
     ]
     for table_name, index_name, sql in index_updates:
         if index_name not in table_indexes[table_name]:
@@ -1675,8 +1733,42 @@ def generate_order_number(code: str) -> str:
     return code
 
 
-def build_fake_pix_payload(order_code: str, total: float) -> dict:
-    provider_id = f"PIX-{secrets.token_hex(4).upper()}"
+def add_minutes_to_iso(value: str, minutes: int) -> str:
+    return (datetime.fromisoformat(value) + timedelta(minutes=minutes)).isoformat(timespec="seconds")
+
+
+def generate_public_order_token() -> str:
+    db = get_db()
+    while True:
+        token = secrets.token_urlsafe(24)
+        exists = db.execute("SELECT 1 FROM pedidos WHERE public_token = ?", (token,)).fetchone()
+        if not exists:
+            return token
+
+
+def generate_pickup_code() -> str:
+    alphabet = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+    db = get_db()
+    while True:
+        code = "".join(secrets.choice(alphabet) for _ in range(6))
+        exists = db.execute(
+            "SELECT 1 FROM pedidos WHERE pickup_code = ? AND status != 'completed'",
+            (code,),
+        ).fetchone()
+        if not exists:
+            return code
+
+
+def build_public_order_url(public_token: str) -> str:
+    return url_for("public_order_page", public_token=public_token)
+
+
+def build_public_order_status_url(public_token: str) -> str:
+    return url_for("get_public_order_status", public_token=public_token)
+
+
+def build_fake_pix_payload(order_code: str, total: float, *, expires_at: str) -> dict:
+    provider_id = f"PIX-{secrets.token_hex(8).upper()}"
     amount = f"{float(total or 0):.2f}"
     copy_paste = (
         f"00020126580014BR.GOV.BCB.PIX0136BAROS-SIMULADO-{order_code}"
@@ -1701,11 +1793,326 @@ def build_fake_pix_payload(order_code: str, total: float) -> dict:
     </svg>
     """.strip()
     return {
-        "payment_provider": "baros-pix-simulado",
+        "payment_provider": BAROS_PIX_PROVIDER,
         "payment_provider_id": provider_id,
+        "provider_payment_id": provider_id,
+        "provider_status": "pending",
         "pix_copy_paste": copy_paste,
         "pix_qr_code": f"data:image/svg+xml;charset=utf-8,{quote(qr_svg)}",
+        "pix_expires_at": expires_at,
     }
+
+
+def order_is_pix_expired(row: DbRow | dict | None) -> bool:
+    if not row:
+        return False
+    payment_method = normalize_payment_method(row.get("payment_method") if isinstance(row, dict) else row["payment_method"])
+    if payment_method != "pix":
+        return False
+    raw_expires_at = row.get("pix_expires_at") if isinstance(row, dict) else row["pix_expires_at"]
+    if not raw_expires_at:
+        return False
+    if normalize_payment_status(row.get("payment_status") if isinstance(row, dict) else row["payment_status"], "pending") == "paid":
+        return False
+    if (row.get("status") if isinstance(row, dict) else row["status"]) == "completed":
+        return False
+    return datetime.fromisoformat(raw_expires_at) <= datetime.now(timezone.utc)
+
+
+def get_public_order_state(row: DbRow | dict) -> str:
+    status = row.get("status") if isinstance(row, dict) else row["status"]
+    payment_method = normalize_payment_method(row.get("payment_method") if isinstance(row, dict) else row["payment_method"]) or "counter"
+    payment_status = normalize_payment_status(
+        row.get("payment_status") if isinstance(row, dict) else row["payment_status"],
+        "pending",
+    )
+    if status == "completed":
+        return "delivered"
+    if payment_method == "pix":
+        if status == "expired" or order_is_pix_expired(row):
+            return "expired"
+        if payment_status == "paid":
+            return "paid"
+        return "awaiting_payment"
+    return "paid" if payment_status == "paid" else "awaiting_payment"
+
+
+def get_public_order_state_label(state: str) -> str:
+    return {
+        "awaiting_payment": "Aguardando pagamento",
+        "paid": "Pagamento confirmado",
+        "delivered": "Pedido entregue",
+        "expired": "Pix expirado",
+    }.get(state, "Pedido em andamento")
+
+
+def build_public_order_message(row: DbRow | dict, state: str) -> str:
+    payment_method = normalize_payment_method(row.get("payment_method") if isinstance(row, dict) else row["payment_method"]) or "counter"
+    if state == "awaiting_payment":
+        return "Finalize o Pix para liberar seu pedido ao bar." if payment_method == "pix" else "Seu pedido foi registrado e aguarda pagamento no balcao."
+    if state == "paid":
+        return "Pagamento confirmado. Apresente o codigo de retirada quando o bar chamar." if payment_method == "pix" else "Pedido confirmado. Aguarde a retirada no local informado."
+    if state == "delivered":
+        return "Pedido finalizado. Se precisar, voce ainda pode usar este link como comprovante."
+    if state == "expired":
+        return "O Pix expirou. Gere um novo QR code para concluir o pagamento sem recriar o pedido."
+    return "Acompanhe o status do seu pedido nesta pagina."
+
+
+def create_order_audit_log(order_id: int, event_type: str, actor: str, details: dict[str, Any] | None = None) -> None:
+    get_db().execute(
+        """
+        INSERT INTO order_audit_logs (order_id, event_type, actor, details_json, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            order_id,
+            event_type,
+            actor,
+            json.dumps(details or {}, ensure_ascii=True),
+            utc_now_iso(),
+        ),
+    )
+
+
+def expire_pending_pix_order(order_id: int) -> DbRow | None:
+    db = get_db()
+    expired_at = utc_now_iso()
+    updated = db.execute(
+        """
+        UPDATE pedidos
+        SET status = 'expired',
+            payment_status = 'cancelled',
+            provider_status = 'expired',
+            expires_at = COALESCE(expires_at, pix_expires_at),
+            webhook_received_at = COALESCE(webhook_received_at, ?)
+        WHERE id = ?
+          AND payment_method = 'pix'
+          AND status != 'completed'
+          AND COALESCE(payment_status, 'pending') != 'paid'
+        RETURNING id
+        """,
+        (expired_at, order_id),
+    ).fetchone()
+    if updated:
+        create_order_audit_log(order_id, "pix_expired", "system", {"expired_at": expired_at})
+    return updated
+
+
+def issue_pix_payment_for_order(order_row: DbRow | dict, *, regenerate: bool = False) -> dict[str, Any]:
+    created_at = utc_now_iso()
+    expires_at = add_minutes_to_iso(created_at, PIX_PAYMENT_TTL_MINUTES)
+    payload = build_fake_pix_payload(order_row["codigo_retirada"], float(order_row["valor_total"] or 0), expires_at=expires_at)
+    db = get_db()
+    updated = db.execute(
+        """
+        UPDATE pedidos
+        SET status = ?,
+            payment_status = 'pending',
+            payment_provider = ?,
+            payment_provider_id = ?,
+            provider_payment_id = ?,
+            provider_status = ?,
+            pix_qr_code = ?,
+            pix_copy_paste = ?,
+            pix_expires_at = ?,
+            expires_at = ?,
+            paid_at = NULL,
+            webhook_received_at = NULL,
+            payment_confirmed_by = NULL
+        WHERE id = ?
+        RETURNING *
+        """,
+        (
+            AWAITING_PAYMENT_STATUS,
+            payload["payment_provider"],
+            payload["payment_provider_id"],
+            payload["provider_payment_id"],
+            payload["provider_status"],
+            payload["pix_qr_code"],
+            payload["pix_copy_paste"],
+            payload["pix_expires_at"],
+            payload["pix_expires_at"],
+            order_row["id"],
+        ),
+    ).fetchone()
+    if updated:
+        create_order_audit_log(
+            updated["id"],
+            "pix_regenerated" if regenerate else "pix_created",
+            "system",
+            {
+                "provider": payload["payment_provider"],
+                "provider_payment_id": payload["provider_payment_id"],
+                "pix_expires_at": payload["pix_expires_at"],
+            },
+        )
+    return payload
+
+
+def build_public_order_payload(row: DbRow | dict, items: list[DbRow] | None = None) -> dict[str, Any]:
+    order_payload = serialize_order(row, items=items)
+    public_state = get_public_order_state(row)
+    payment_method = normalize_payment_method(row.get("payment_method") if isinstance(row, dict) else row["payment_method"]) or "counter"
+    pix_expires_at = row.get("pix_expires_at") if isinstance(row, dict) else row["pix_expires_at"]
+    delivered_at = row.get("delivered_at") if isinstance(row, dict) else row["delivered_at"]
+    public_token = row.get("public_token") if isinstance(row, dict) else row["public_token"]
+    pickup_code = row.get("pickup_code") if isinstance(row, dict) else row["pickup_code"]
+    order_payload.update(
+        {
+            "public_token": public_token,
+            "public_url": build_public_order_url(public_token) if public_token else None,
+            "status_url": build_public_order_status_url(public_token) if public_token else None,
+            "public_state": public_state,
+            "public_state_label": get_public_order_state_label(public_state),
+            "public_message": build_public_order_message(row, public_state),
+            "pickup_code": pickup_code if public_state == "paid" else None,
+            "can_regenerate_pix": payment_method == "pix" and public_state == "expired",
+            "can_refresh_status": public_state in {"awaiting_payment", "paid"},
+            "pix_expires_at": pix_expires_at,
+            "expires_at": row.get("expires_at") if isinstance(row, dict) else row["expires_at"],
+            "provider_status": row.get("provider_status") if isinstance(row, dict) else row["provider_status"],
+            "webhook_received_at": display_datetime(
+                row.get("webhook_received_at") if isinstance(row, dict) else row["webhook_received_at"]
+            )
+            if (row.get("webhook_received_at") if isinstance(row, dict) else row["webhook_received_at"])
+            else None,
+            "webhook_received_at_iso": row.get("webhook_received_at") if isinstance(row, dict) else row["webhook_received_at"],
+            "delivered_at": display_datetime(delivered_at) if delivered_at else None,
+            "delivered_at_iso": delivered_at,
+            "created_at_iso": row.get("horario_pedido") if isinstance(row, dict) else row["horario_pedido"],
+            "paid_at_iso": row.get("paid_at") if isinstance(row, dict) else row["paid_at"],
+        }
+    )
+    return order_payload
+
+
+def refresh_order_payment_state(row: DbRow | None) -> DbRow | None:
+    if not row:
+        return None
+    if order_is_pix_expired(row):
+        expire_pending_pix_order(row["id"])
+        get_db().commit()
+        return fetch_order_row_by_code(row["codigo_retirada"])
+    return row
+
+
+def can_access_order_publicly(row: DbRow | None, public_token: str | None) -> bool:
+    if not row or not public_token:
+        return False
+    expected_token = row["public_token"] if "public_token" in row.keys() else None
+    return bool(expected_token and secrets.compare_digest(expected_token, public_token))
+
+
+def extract_public_token_from_request() -> str | None:
+    payload = request.get_json(silent=True)
+    if isinstance(payload, dict):
+        token = sanitize_optional_text(payload.get("public_token"), limit=255)
+        if token:
+            return token
+    token = sanitize_optional_text(request.args.get("public_token"), limit=255)
+    return token or None
+
+
+def validate_webhook_signature(provider: str, raw_body: bytes) -> bool:
+    if provider != BAROS_PIX_PROVIDER:
+        return False
+    if not BAROS_PIX_WEBHOOK_SECRET:
+        return False
+
+    supplied_signature = (request.headers.get("X-BarOS-Signature") or "").strip()
+    supplied_token = (request.headers.get("X-Webhook-Token") or "").strip()
+    expected_signature = hmac.new(
+        BAROS_PIX_WEBHOOK_SECRET.encode("utf-8"),
+        raw_body,
+        hashlib.sha256,
+    ).hexdigest()
+    if supplied_signature:
+        return secrets.compare_digest(supplied_signature, expected_signature)
+    if supplied_token:
+        return secrets.compare_digest(supplied_token, BAROS_PIX_WEBHOOK_SECRET)
+    return False
+
+
+def record_webhook_event(
+    *,
+    provider: str,
+    provider_event_id: str,
+    order_id: int | None,
+    event_type: str,
+    status: str,
+    payload: dict[str, Any],
+    suspicious_reason: str | None = None,
+    processed_at: str | None = None,
+) -> None:
+    get_db().execute(
+        """
+        INSERT INTO payment_webhook_events (
+            provider,
+            provider_event_id,
+            order_id,
+            event_type,
+            status,
+            suspicious_reason,
+            payload_json,
+            headers_json,
+            received_at,
+            processed_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (provider, provider_event_id)
+        DO UPDATE SET
+            order_id = COALESCE(EXCLUDED.order_id, payment_webhook_events.order_id),
+            event_type = COALESCE(EXCLUDED.event_type, payment_webhook_events.event_type),
+            status = EXCLUDED.status,
+            suspicious_reason = EXCLUDED.suspicious_reason,
+            payload_json = EXCLUDED.payload_json,
+            headers_json = EXCLUDED.headers_json,
+            processed_at = EXCLUDED.processed_at
+        """,
+        (
+            provider,
+            provider_event_id,
+            order_id,
+            event_type,
+            status,
+            suspicious_reason,
+            json.dumps(payload, ensure_ascii=True),
+            json.dumps(dict(request.headers), ensure_ascii=True),
+            utc_now_iso(),
+            processed_at,
+        ),
+    )
+
+
+def issue_pix_payment_response(code: str, *, regenerate: bool = False) -> tuple[Response, int]:
+    db = get_db()
+    row = refresh_order_payment_state(fetch_order_row_by_code(code))
+    if not row:
+        return jsonify({"error": "Pedido nao encontrado."}), 404
+
+    provided_public_token = extract_public_token_from_request()
+    if not is_staff_authenticated() and not can_access_order_publicly(row, provided_public_token):
+        return jsonify({"error": "Token publico invalido para este pedido."}), 403
+
+    if normalize_payment_method(row["payment_method"]) != "pix":
+        return jsonify({"error": "Esse pedido nao usa Pix."}), 400
+    if row["status"] == "completed":
+        return jsonify({"error": "Esse pedido ja foi entregue."}), 400
+    if normalize_payment_status(row["payment_status"], "pending") == "paid":
+        payload = build_public_order_payload(row, fetch_order_items_map([row["id"]]).get(row["id"], []))
+        return jsonify({"order": payload}), 200
+
+    if not regenerate and row["pix_qr_code"] and not order_is_pix_expired(row):
+        payload = build_public_order_payload(row, fetch_order_items_map([row["id"]]).get(row["id"], []))
+        return jsonify({"order": payload}), 200
+
+    issue_pix_payment_for_order(row, regenerate=regenerate)
+    db.commit()
+    invalidate_snapshot_cache("order-summary", "dashboard-orders", "dashboard-summary", "dashboard-logistics")
+    updated = fetch_order_row_by_code(code)
+    payload = build_public_order_payload(updated, fetch_order_items_map([updated["id"]]).get(updated["id"], []))
+    return jsonify({"order": payload}), 200
 
 
 def normalize_payment_method(raw_value: str | None) -> str | None:
@@ -1795,9 +2202,18 @@ def fetch_order_row_by_code(code: str, shift_id: int | None = None) -> sqlite3.R
             order_type,
             payment_provider,
             payment_provider_id,
+            provider_payment_id,
+            provider_status,
             paid_at,
+            delivered_at,
+            expires_at,
             pix_qr_code,
-            pix_copy_paste
+            pix_copy_paste,
+            pix_expires_at,
+            public_token,
+            pickup_code,
+            webhook_received_at,
+            payment_confirmed_by
         FROM pedidos
         WHERE codigo_retirada = ?
     """
@@ -1828,9 +2244,18 @@ def fetch_order_row_by_request_id(request_id: str) -> sqlite3.Row | None:
             order_type,
             payment_provider,
             payment_provider_id,
+            provider_payment_id,
+            provider_status,
             paid_at,
+            delivered_at,
+            expires_at,
             pix_qr_code,
-            pix_copy_paste
+            pix_copy_paste,
+            pix_expires_at,
+            public_token,
+            pickup_code,
+            webhook_received_at,
+            payment_confirmed_by
         FROM pedidos
         WHERE request_id = ?
         """,
@@ -1838,10 +2263,66 @@ def fetch_order_row_by_request_id(request_id: str) -> sqlite3.Row | None:
     ).fetchone()
 
 
-def mark_as_paid(code: str, shift_id: int | None = None) -> dict:
+def fetch_order_row_by_public_token(public_token: str) -> sqlite3.Row | None:
+    return get_db().execute(
+        """
+        SELECT
+            id,
+            codigo_retirada,
+            turno_id,
+            horario_pedido,
+            status,
+            valor_total,
+            customer_name,
+            table_label,
+            source,
+            completed_at,
+            order_number,
+            payment_method,
+            payment_status,
+            order_type,
+            payment_provider,
+            payment_provider_id,
+            provider_payment_id,
+            provider_status,
+            paid_at,
+            delivered_at,
+            expires_at,
+            pix_qr_code,
+            pix_copy_paste,
+            pix_expires_at,
+            public_token,
+            pickup_code,
+            webhook_received_at,
+            payment_confirmed_by
+        FROM pedidos
+        WHERE public_token = ?
+        """,
+        (public_token,),
+    ).fetchone()
+
+
+def fetch_order_row_by_provider_payment_id(provider_payment_id: str) -> sqlite3.Row | None:
+    return get_db().execute(
+        """
+        SELECT *
+        FROM pedidos
+        WHERE provider_payment_id = ?
+        """,
+        (provider_payment_id,),
+    ).fetchone()
+
+
+def mark_as_paid(
+    code: str,
+    shift_id: int | None = None,
+    *,
+    confirmed_by: str | None = None,
+    webhook_received_at: str | None = None,
+) -> dict:
     db = get_db()
     current_shift_id = shift_id or get_current_shift_id()
-    row = fetch_order_row_by_code(code, current_shift_id)
+    row = refresh_order_payment_state(fetch_order_row_by_code(code, current_shift_id))
     if not row:
         raise LookupError("Pedido nao encontrado.")
 
@@ -1853,7 +2334,10 @@ def mark_as_paid(code: str, shift_id: int | None = None) -> dict:
         """
         UPDATE pedidos
         SET payment_status = 'paid',
+            provider_status = 'paid',
             paid_at = ?,
+            webhook_received_at = COALESCE(?, webhook_received_at),
+            payment_confirmed_by = COALESCE(?, payment_confirmed_by),
             status = CASE
                 WHEN payment_method = 'pix' AND status = ? THEN 'new'
                 ELSE status
@@ -1873,11 +2357,17 @@ def mark_as_paid(code: str, shift_id: int | None = None) -> dict:
             payment_status,
             order_type
         """,
-        (paid_at, AWAITING_PAYMENT_STATUS, row["id"]),
+        (paid_at, webhook_received_at, confirmed_by, AWAITING_PAYMENT_STATUS, row["id"]),
     ).fetchone()
-    db.commit()
     if not updated:
         raise LookupError("Pedido nao encontrado.")
+    create_order_audit_log(
+        row["id"],
+        "payment_confirmed",
+        confirmed_by or "staff",
+        {"paid_at": paid_at, "webhook_received_at": webhook_received_at},
+    )
+    db.commit()
     return serialize_dashboard_order(updated)
 
 
@@ -2785,6 +3275,14 @@ def fetch_order_items_map(order_ids: list[int]) -> dict[int, list[DbRow]]:
     return items_by_order_id
 
 
+def fetch_public_order_payload(public_token: str) -> dict[str, Any] | None:
+    row = refresh_order_payment_state(fetch_order_row_by_public_token(public_token))
+    if not row:
+        return None
+    items = fetch_order_items_map([row["id"]]).get(row["id"], [])
+    return build_public_order_payload(row, items=items)
+
+
 def fetch_dashboard_order_items_map(order_ids: list[int]) -> dict[int, list[DbRow]]:
     if not order_ids:
         return {}
@@ -2881,8 +3379,25 @@ def serialize_order(row: sqlite3.Row, items: list[DbRow] | None = None) -> dict:
         ),
         "payment_provider": row["payment_provider"] if "payment_provider" in row.keys() and row["payment_provider"] else None,
         "payment_provider_id": row["payment_provider_id"] if "payment_provider_id" in row.keys() and row["payment_provider_id"] else None,
+        "provider_payment_id": row["provider_payment_id"] if "provider_payment_id" in row.keys() and row["provider_payment_id"] else None,
+        "provider_status": row["provider_status"] if "provider_status" in row.keys() and row["provider_status"] else None,
         "pix_qr_code": row["pix_qr_code"] if "pix_qr_code" in row.keys() and row["pix_qr_code"] else None,
         "pix_copy_paste": row["pix_copy_paste"] if "pix_copy_paste" in row.keys() and row["pix_copy_paste"] else None,
+        "pix_expires_at": row["pix_expires_at"] if "pix_expires_at" in row.keys() and row["pix_expires_at"] else None,
+        "expires_at": row["expires_at"] if "expires_at" in row.keys() and row["expires_at"] else None,
+        "public_token": row["public_token"] if "public_token" in row.keys() and row["public_token"] else None,
+        "pickup_code": row["pickup_code"] if "pickup_code" in row.keys() and row["pickup_code"] else None,
+        "payment_confirmed_by": row["payment_confirmed_by"]
+        if "payment_confirmed_by" in row.keys() and row["payment_confirmed_by"]
+        else None,
+        "webhook_received_at": display_datetime(row["webhook_received_at"])
+        if "webhook_received_at" in row.keys() and row["webhook_received_at"]
+        else None,
+        "webhook_received_at_iso": row["webhook_received_at"]
+        if "webhook_received_at" in row.keys() and row["webhook_received_at"]
+        else None,
+        "delivered_at": display_datetime(row["delivered_at"]) if "delivered_at" in row.keys() and row["delivered_at"] else None,
+        "delivered_at_iso": row["delivered_at"] if "delivered_at" in row.keys() and row["delivered_at"] else None,
         "items": [
             {
                 "id": item["bebida_id"],
@@ -2913,8 +3428,14 @@ def build_created_order_response(
     order_type: str,
     payment_provider: str | None,
     payment_provider_id: str | None,
+    provider_payment_id: str | None,
+    provider_status: str | None,
     pix_qr_code: str | None,
     pix_copy_paste: str | None,
+    pix_expires_at: str | None,
+    expires_at: str | None,
+    public_token: str | None,
+    pickup_code: str | None,
     items: list[dict],
 ) -> dict:
     row = {
@@ -2933,9 +3454,18 @@ def build_created_order_response(
         "order_type": order_type,
         "payment_provider": payment_provider,
         "payment_provider_id": payment_provider_id,
+        "provider_payment_id": provider_payment_id,
+        "provider_status": provider_status,
         "paid_at": None,
+        "delivered_at": None,
+        "expires_at": expires_at,
         "pix_qr_code": pix_qr_code,
         "pix_copy_paste": pix_copy_paste,
+        "pix_expires_at": pix_expires_at,
+        "public_token": public_token,
+        "pickup_code": pickup_code,
+        "webhook_received_at": None,
+        "payment_confirmed_by": None,
     }
     serialized_items = [
         {
@@ -2951,7 +3481,7 @@ def build_created_order_response(
         }
         for item in items
     ]
-    return serialize_order(row, serialized_items)
+    return build_public_order_payload(row, serialized_items)
 
 
 def fetch_orders(status: str | None = None, limit: int | None = None, shift_id: int | None = None) -> list[dict]:
@@ -3004,8 +3534,9 @@ def fetch_orders(status: str | None = None, limit: int | None = None, shift_id: 
     return [serialize_order(row, items_by_order_id.get(row["id"], [])) for row in rows]
 
 
-def fetch_dashboard_orders(shift_id: int | None = None, completed_limit: int = 20) -> dict[str, list[dict]]:
+def build_dashboard_orders_payload(shift_id: int | None = None, completed_limit: int = 20) -> tuple[dict, dict[str, Any]]:
     current_shift_id = shift_id or get_current_shift_id()
+    db_started_at = time.perf_counter()
     rows = get_db().execute(
         """
         WITH dashboard_orders AS (
@@ -3075,14 +3606,35 @@ def fetch_dashboard_orders(shift_id: int | None = None, completed_limit: int = 2
         "pending": [],
         "completed": [],
     }
-    if not rows:
-        return grouped_orders
-
-    items_by_order_id = fetch_dashboard_order_items_map([row["id"] for row in rows])
+    items_by_order_id: dict[int, list[dict]] = {}
+    if rows:
+        items_by_order_id = fetch_dashboard_order_items_map([row["id"] for row in rows])
+    db_query_ms = (time.perf_counter() - db_started_at) * 1000
+    serialization_started_at = time.perf_counter()
     for row in rows:
         grouped_orders[row["dashboard_bucket"]].append(
             serialize_dashboard_order(row, items_by_order_id.get(row["id"], []))
         )
+    payload = {
+        "current_shift_id": current_shift_id,
+        **grouped_orders,
+        "generated_at": display_datetime(utc_now_iso()),
+    }
+    serialization_ms = (time.perf_counter() - serialization_started_at) * 1000
+    return payload, {
+        "db_query_ms": round(db_query_ms, 1),
+        "serialization_ms": round(serialization_ms, 1),
+        "order_count": len(rows),
+    }
+
+
+def fetch_dashboard_orders(shift_id: int | None = None, completed_limit: int = 20) -> dict[str, list[dict]]:
+    payload, _ = build_dashboard_orders_payload(shift_id, completed_limit=completed_limit)
+    grouped_orders: dict[str, list[dict]] = {
+        "awaiting_payment": payload["awaiting_payment"],
+        "pending": payload["pending"],
+        "completed": payload["completed"],
+    }
     return grouped_orders
 
 
@@ -3092,12 +3644,24 @@ def fetch_dashboard_orders_payload(shift_id: int | None = None, completed_limit:
     return get_or_compute_snapshot(
         cache_key,
         SNAPSHOT_CACHE_TTLS["dashboard_orders"],
-        lambda: {
-            "current_shift_id": current_shift_id,
-            **fetch_dashboard_orders(current_shift_id, completed_limit=completed_limit),
-            "generated_at": display_datetime(utc_now_iso()),
-        },
+        lambda: build_dashboard_orders_payload(current_shift_id, completed_limit=completed_limit)[0],
     )
+
+
+def fetch_dashboard_orders_payload_with_meta(shift_id: int | None = None, completed_limit: int = 20) -> tuple[dict, dict[str, Any]]:
+    current_shift_id = shift_id or get_current_shift_id()
+    cache_key = f"dashboard-orders:{current_shift_id}:{completed_limit}"
+    cached_value = read_snapshot_cache(cache_key)
+    if cached_value is not None:
+        return cached_value, {
+            "cache_status": "hit",
+            "db_query_ms": 0.0,
+            "serialization_ms": 0.0,
+            "order_count": sum(len(cached_value.get(bucket, [])) for bucket in ("awaiting_payment", "pending", "completed")),
+        }
+    payload, meta = build_dashboard_orders_payload(current_shift_id, completed_limit=completed_limit)
+    write_snapshot_cache(cache_key, SNAPSHOT_CACHE_TTLS["dashboard_orders"], payload)
+    return payload, {"cache_status": "miss", **meta}
 
 
 def validate_order_payload(selected_items: list[dict]) -> tuple[list[dict], str | None]:
@@ -3785,6 +4349,31 @@ def fetch_dashboard_summary_payload(shift_id: int | None = None) -> dict:
     )
 
 
+def fetch_dashboard_summary_payload_with_meta(shift_id: int | None = None) -> tuple[dict, dict[str, Any]]:
+    current_shift_id = shift_id or get_current_shift_id()
+    cache_key = f"dashboard-summary:{current_shift_id}"
+    cached_value = read_snapshot_cache(cache_key)
+    if cached_value is not None:
+        return cached_value, {"cache_status": "hit", "db_query_ms": 0.0, "serialization_ms": 0.0}
+
+    db_started_at = time.perf_counter()
+    summary_payload = {
+        "current_shift_id": current_shift_id,
+        "summary": build_order_summary(current_shift_id),
+        "generated_at": display_datetime(utc_now_iso()),
+    }
+    db_query_ms = (time.perf_counter() - db_started_at) * 1000
+    serialization_started_at = time.perf_counter()
+    payload = dict(summary_payload)
+    serialization_ms = (time.perf_counter() - serialization_started_at) * 1000
+    write_snapshot_cache(cache_key, SNAPSHOT_CACHE_TTLS["dashboard_summary"], payload)
+    return payload, {
+        "cache_status": "miss",
+        "db_query_ms": round(db_query_ms, 1),
+        "serialization_ms": round(serialization_ms, 1),
+    }
+
+
 def fetch_live_summary_payload(shift_id: int | None = None) -> dict:
     current_shift_id = shift_id or get_current_shift_id()
     summary_payload = fetch_dashboard_summary_payload(current_shift_id)
@@ -3794,6 +4383,47 @@ def fetch_live_summary_payload(shift_id: int | None = None) -> dict:
         "summary": summary_payload["summary"],
         "logistics": logistics_payload["logistics"],
         "generated_at": summary_payload.get("generated_at") or logistics_payload.get("generated_at"),
+    }
+
+
+def fetch_dashboard_logistics_payload_with_meta() -> tuple[dict, dict[str, Any]]:
+    cache_key = "dashboard-logistics"
+    cached_value = read_snapshot_cache(cache_key)
+    if cached_value is not None:
+        return cached_value, {"cache_status": "hit", "db_query_ms": 0.0, "serialization_ms": 0.0}
+
+    db_started_at = time.perf_counter()
+    payload = {
+        "logistics": fetch_logistics_snapshot(),
+        "generated_at": display_datetime(utc_now_iso()),
+    }
+    db_query_ms = (time.perf_counter() - db_started_at) * 1000
+    serialization_started_at = time.perf_counter()
+    serialized_payload = dict(payload)
+    serialization_ms = (time.perf_counter() - serialization_started_at) * 1000
+    write_snapshot_cache(cache_key, SNAPSHOT_CACHE_TTLS["dashboard_logistics"], serialized_payload)
+    return serialized_payload, {
+        "cache_status": "miss",
+        "db_query_ms": round(db_query_ms, 1),
+        "serialization_ms": round(serialization_ms, 1),
+    }
+
+
+def fetch_live_summary_payload_with_meta(shift_id: int | None = None) -> tuple[dict, dict[str, Any]]:
+    current_shift_id = shift_id or get_current_shift_id()
+    summary_payload, summary_meta = fetch_dashboard_summary_payload_with_meta(current_shift_id)
+    logistics_payload, logistics_meta = fetch_dashboard_logistics_payload_with_meta()
+    payload = {
+        "current_shift_id": current_shift_id,
+        "summary": summary_payload["summary"],
+        "logistics": logistics_payload["logistics"],
+        "generated_at": summary_payload.get("generated_at") or logistics_payload.get("generated_at"),
+    }
+    return payload, {
+        "summary_cache": summary_meta["cache_status"],
+        "logistics_cache": logistics_meta["cache_status"],
+        "db_query_ms": round(summary_meta["db_query_ms"] + logistics_meta["db_query_ms"], 1),
+        "serialization_ms": round(summary_meta["serialization_ms"] + logistics_meta["serialization_ms"], 1),
     }
 
 
@@ -4457,6 +5087,18 @@ def index():
         profiler.log(status=status, menu_items=len(menu))
 
 
+@app.get("/pedido/<public_token>")
+def public_order_page(public_token: str):
+    order = fetch_public_order_payload(public_token)
+    if not order:
+        abort(404)
+    return render_template(
+        "order_status.html",
+        order=order,
+        current_time=local_now().strftime("%d/%m/%Y %H:%M"),
+    )
+
+
 def build_dashboard_redirect(message: str | None = None, error: str | None = None):
     params = {}
     if message:
@@ -4731,10 +5373,11 @@ def get_orders():
     profiler = RequestProfiler("GET /api/orders")
     status = "ok"
     current_shift_id = None
+    route_meta: dict[str, Any] = {"cache_status": None, "db_query_ms": None, "serialization_ms": None}
     try:
         current_shift_id = get_current_shift_id()
         profiler.mark("resolve_shift")
-        payload = fetch_dashboard_orders_payload(current_shift_id)
+        payload, route_meta = fetch_dashboard_orders_payload_with_meta(current_shift_id)
         profiler.mark("orders")
         response = jsonify(payload)
         profiler.mark("serialization/jsonify")
@@ -4752,10 +5395,11 @@ def get_dashboard_orders():
     profiler = RequestProfiler("GET /api/dashboard/orders")
     status = "ok"
     current_shift_id = None
+    route_meta: dict[str, Any] = {"cache_status": None, "db_query_ms": None, "serialization_ms": None}
     try:
         current_shift_id = get_current_shift_id()
         profiler.mark("resolve_shift")
-        payload = fetch_dashboard_orders_payload(current_shift_id)
+        payload, route_meta = fetch_dashboard_orders_payload_with_meta(current_shift_id)
         profiler.mark("orders")
         response = jsonify(payload)
         profiler.mark("serialization/jsonify")
@@ -4764,7 +5408,7 @@ def get_dashboard_orders():
         status = "error"
         raise
     finally:
-        profiler.log(status=status, shift_id=current_shift_id)
+        profiler.log(status=status, shift_id=current_shift_id, **route_meta)
 
 
 @app.get("/api/summary")
@@ -4773,10 +5417,11 @@ def get_summary():
     profiler = RequestProfiler("GET /api/summary")
     status = "ok"
     current_shift_id = None
+    route_meta: dict[str, Any] = {"summary_cache": None, "logistics_cache": None, "db_query_ms": None, "serialization_ms": None}
     try:
         current_shift_id = get_current_shift_id()
         profiler.mark("resolve_shift")
-        payload = fetch_live_summary_payload(current_shift_id)
+        payload, route_meta = fetch_live_summary_payload_with_meta(current_shift_id)
         profiler.mark("summary+logistics")
         response = jsonify(payload)
         profiler.mark("serialization/jsonify")
@@ -4785,7 +5430,7 @@ def get_summary():
         status = "error"
         raise
     finally:
-        profiler.log(status=status, shift_id=current_shift_id)
+        profiler.log(status=status, shift_id=current_shift_id, **route_meta)
 
 
 @app.get("/api/dashboard/summary")
@@ -4794,10 +5439,11 @@ def get_dashboard_summary():
     profiler = RequestProfiler("GET /api/dashboard/summary")
     status = "ok"
     current_shift_id = None
+    route_meta: dict[str, Any] = {"summary_cache": None, "logistics_cache": None, "db_query_ms": None, "serialization_ms": None}
     try:
         current_shift_id = get_current_shift_id()
         profiler.mark("resolve_shift")
-        payload = fetch_live_summary_payload(current_shift_id)
+        payload, route_meta = fetch_live_summary_payload_with_meta(current_shift_id)
         profiler.mark("summary+logistics")
         response = jsonify(payload)
         profiler.mark("serialization/jsonify")
@@ -4806,7 +5452,7 @@ def get_dashboard_summary():
         status = "error"
         raise
     finally:
-        profiler.log(status=status, shift_id=current_shift_id)
+        profiler.log(status=status, shift_id=current_shift_id, **route_meta)
 
 
 @app.get("/api/dashboard/logistics")
@@ -4976,16 +5622,26 @@ def create_order():
     order_status = AWAITING_PAYMENT_STATUS if payment_method == "pix" else "new"
     payment_provider = sanitize_optional_text(payload.get("payment_provider"), limit=64) or None
     payment_provider_id = sanitize_optional_text(payload.get("payment_provider_id"), limit=128) or None
+    provider_payment_id = sanitize_optional_text(payload.get("provider_payment_id"), limit=128) or payment_provider_id
+    provider_status = sanitize_optional_text(payload.get("provider_status"), limit=32) or None
     pix_qr_code = sanitize_optional_text(payload.get("pix_qr_code"), limit=4000) or None
     pix_copy_paste = sanitize_optional_text(payload.get("pix_copy_paste"), limit=4000) or None
+    pix_expires_at = sanitize_optional_text(payload.get("pix_expires_at"), limit=64) or None
+    expires_at = sanitize_optional_text(payload.get("expires_at"), limit=64) or None
     if payment_method != "pix":
         payment_provider = None
         payment_provider_id = None
+        provider_payment_id = None
+        provider_status = None
         pix_qr_code = None
         pix_copy_paste = None
+        pix_expires_at = None
+        expires_at = None
 
     pedido_id: int | None = None
     codigo: str | None = None
+    public_token: str | None = None
+    pickup_code: str | None = None
     itens: list[dict] = []
     valor_total = 0.0
     response_order: dict | None = None
@@ -5007,8 +5663,8 @@ def create_order():
             return (
                 jsonify(
                     {
-                        "order": serialize_order(existing_order),
-                        "summary": build_order_summary(existing_order["turno_id"]),
+                        "order": build_public_order_payload(refresh_order_payment_state(existing_order)),
+                        "summary": fetch_dashboard_summary_payload(existing_order["turno_id"])["summary"],
                     }
                 ),
                 200,
@@ -5083,17 +5739,23 @@ def create_order():
 
         codigo = generate_order_code()
         order_number = generate_order_number(codigo)
+        public_token = generate_public_order_token()
+        pickup_code = generate_pickup_code()
         if payment_method == "pix":
-            pix_payload = build_fake_pix_payload(codigo, valor_total)
+            pix_expires_at = add_minutes_to_iso(utc_now_iso(), PIX_PAYMENT_TTL_MINUTES)
+            pix_payload = build_fake_pix_payload(codigo, valor_total, expires_at=pix_expires_at)
             payment_provider = pix_payload["payment_provider"]
             payment_provider_id = pix_payload["payment_provider_id"]
+            provider_payment_id = pix_payload["provider_payment_id"]
+            provider_status = pix_payload["provider_status"]
             pix_qr_code = pix_payload["pix_qr_code"]
             pix_copy_paste = pix_payload["pix_copy_paste"]
+            expires_at = pix_payload["pix_expires_at"]
             app.logger.info(
                 "create_order pix_branch code=%s provider=%s provider_id=%s copy_len=%s has_qr=%s",
                 codigo,
                 payment_provider,
-                payment_provider_id,
+                provider_payment_id,
                 len(pix_copy_paste or ""),
                 bool(pix_qr_code),
             )
@@ -5125,11 +5787,17 @@ def create_order():
                 order_type,
                 payment_provider,
                 payment_provider_id,
+                provider_payment_id,
+                provider_status,
+                expires_at,
                 pix_qr_code,
                 pix_copy_paste,
+                pix_expires_at,
+                public_token,
+                pickup_code,
                 request_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING id
             """,
             (
@@ -5147,13 +5815,29 @@ def create_order():
                 order_type,
                 payment_provider,
                 payment_provider_id,
+                provider_payment_id,
+                provider_status,
+                expires_at,
                 pix_qr_code,
                 pix_copy_paste,
+                pix_expires_at,
+                public_token,
+                pickup_code,
                 request_id,
             ),
         ).fetchone()
         pedido_id = pedido_row["id"]
         profiler.mark("insert_order")
+        create_order_audit_log(
+            pedido_id,
+            "order_created",
+            "customer",
+            {
+                "payment_method": payment_method,
+                "provider_payment_id": provider_payment_id,
+                "public_token": public_token,
+            },
+        )
 
         db.executemany(
             """
@@ -5201,8 +5885,14 @@ def create_order():
             order_type=order_type,
             payment_provider=payment_provider,
             payment_provider_id=payment_provider_id,
+            provider_payment_id=provider_payment_id,
+            provider_status=provider_status,
             pix_qr_code=pix_qr_code,
             pix_copy_paste=pix_copy_paste,
+            pix_expires_at=pix_expires_at,
+            expires_at=expires_at,
+            public_token=public_token,
+            pickup_code=pickup_code,
             items=itens,
         )
         profiler.mark("build_response_order")
@@ -5215,7 +5905,7 @@ def create_order():
             "dashboard-summary",
             "dashboard-logistics",
         )
-        response_summary = build_order_summary(turno_id)
+        response_summary = fetch_dashboard_summary_payload(turno_id)["summary"]
         profiler.mark("build_summary_response")
         status = "created"
     except IntegrityError as exc:
@@ -5226,8 +5916,8 @@ def create_order():
             return (
                 jsonify(
                     {
-                        "order": serialize_order(existing_order),
-                        "summary": build_order_summary(existing_order["turno_id"]),
+                        "order": build_public_order_payload(refresh_order_payment_state(existing_order)),
+                        "summary": fetch_dashboard_summary_payload(existing_order["turno_id"])["summary"],
                     }
                 ),
                 200,
@@ -5252,16 +5942,267 @@ def create_order():
     return jsonify({"order": response_order, "summary": response_summary}), 201
 
 
+@app.get("/api/orders/public/<public_token>/status")
+def get_public_order_status(public_token: str):
+    profiler = RequestProfiler("GET /api/orders/public/<public_token>/status")
+    status = "ok"
+    db_query_ms = 0.0
+    serialization_ms = 0.0
+    try:
+        db_started_at = time.perf_counter()
+        order = fetch_public_order_payload(public_token)
+        db_query_ms = (time.perf_counter() - db_started_at) * 1000
+        profiler.mark("fetch_order")
+        if not order:
+            status = "not_found"
+            return jsonify({"error": "Pedido nao encontrado."}), 404
+        serialization_started_at = time.perf_counter()
+        response = jsonify({"order": order})
+        serialization_ms = (time.perf_counter() - serialization_started_at) * 1000
+        profiler.mark("serialization/jsonify")
+        return response
+    except Exception:
+        status = "error"
+        raise
+    finally:
+        profiler.log(
+            status=status,
+            cache_status="no_cache",
+            db_query_ms=round(db_query_ms, 1),
+            serialization_ms=round(serialization_ms, 1),
+        )
+
+
+@app.post("/api/orders/<code>/payments/pix")
+def create_pix_payment(code: str):
+    profiler = RequestProfiler("POST /api/orders/<code>/payments/pix")
+    status = "ok"
+    db_query_ms = 0.0
+    serialization_ms = 0.0
+    try:
+        db_started_at = time.perf_counter()
+        response, status_code = issue_pix_payment_response(code, regenerate=False)
+        db_query_ms = (time.perf_counter() - db_started_at) * 1000
+        profiler.mark("issue_pix")
+        serialization_started_at = time.perf_counter()
+        _ = response.get_data(as_text=False)
+        serialization_ms = (time.perf_counter() - serialization_started_at) * 1000
+        profiler.mark("serialization/jsonify")
+        if status_code >= 400:
+            status = "error" if status_code >= 500 else "rejected"
+        return response, status_code
+    finally:
+        profiler.log(
+            status=status,
+            cache_status="invalidate_only",
+            db_query_ms=round(db_query_ms, 1),
+            serialization_ms=round(serialization_ms, 1),
+            code=code,
+        )
+
+
+@app.post("/api/orders/<code>/pix/regenerate")
+def regenerate_pix_payment(code: str):
+    profiler = RequestProfiler("POST /api/orders/<code>/pix/regenerate")
+    status = "ok"
+    db_query_ms = 0.0
+    serialization_ms = 0.0
+    try:
+        db_started_at = time.perf_counter()
+        response, status_code = issue_pix_payment_response(code, regenerate=True)
+        db_query_ms = (time.perf_counter() - db_started_at) * 1000
+        profiler.mark("regenerate_pix")
+        serialization_started_at = time.perf_counter()
+        _ = response.get_data(as_text=False)
+        serialization_ms = (time.perf_counter() - serialization_started_at) * 1000
+        profiler.mark("serialization/jsonify")
+        if status_code >= 400:
+            status = "error" if status_code >= 500 else "rejected"
+        return response, status_code
+    finally:
+        profiler.log(
+            status=status,
+            cache_status="invalidate_only",
+            db_query_ms=round(db_query_ms, 1),
+            serialization_ms=round(serialization_ms, 1),
+            code=code,
+        )
+
+
+@app.post("/api/webhooks/<provider>")
+def handle_payment_webhook(provider: str):
+    profiler = RequestProfiler("POST /api/webhooks/<provider>")
+    status = "ok"
+    db = get_db()
+    db_query_ms = 0.0
+    serialization_ms = 0.0
+    suspicious_reason = None
+    provider_event_id = None
+    try:
+        raw_body = request.get_data(cache=True)
+        payload = request.get_json(silent=True) or {}
+        provider_event_id = sanitize_optional_text(
+            payload.get("event_id") or payload.get("id") or payload.get("provider_event_id"),
+            limit=128,
+        ) or f"{provider}-missing-event-{secrets.token_hex(4)}"
+        provider_payment_id = sanitize_optional_text(
+            payload.get("provider_payment_id") or payload.get("payment_id") or payload.get("provider_id"),
+            limit=128,
+        )
+        provider_status = sanitize_optional_text(payload.get("status"), limit=32).lower() or "unknown"
+        event_type = sanitize_optional_text(payload.get("event_type") or payload.get("type"), limit=64) or "payment.updated"
+        amount = payload.get("amount")
+
+        if not validate_webhook_signature(provider, raw_body):
+            suspicious_reason = "invalid_signature"
+            record_webhook_event(
+                provider=provider,
+                provider_event_id=provider_event_id,
+                order_id=None,
+                event_type=event_type,
+                status="rejected",
+                payload=payload,
+                suspicious_reason=suspicious_reason,
+            )
+            db.commit()
+            status = "invalid_signature"
+            return jsonify({"error": "Webhook invalido."}), 403
+
+        existing_event = db.execute(
+            """
+            SELECT id, status
+            FROM payment_webhook_events
+            WHERE provider = ? AND provider_event_id = ?
+            """,
+            (provider, provider_event_id),
+        ).fetchone()
+        if existing_event and existing_event["status"] == "processed":
+            status = "duplicate"
+            return jsonify({"ok": True, "duplicate": True}), 200
+
+        if not provider_payment_id:
+            suspicious_reason = "missing_provider_payment_id"
+            record_webhook_event(
+                provider=provider,
+                provider_event_id=provider_event_id,
+                order_id=None,
+                event_type=event_type,
+                status="rejected",
+                payload=payload,
+                suspicious_reason=suspicious_reason,
+            )
+            db.commit()
+            status = "invalid_payload"
+            return jsonify({"error": "Webhook sem provider_payment_id."}), 400
+
+        db_started_at = time.perf_counter()
+        order_row = refresh_order_payment_state(fetch_order_row_by_provider_payment_id(provider_payment_id))
+        db_query_ms = (time.perf_counter() - db_started_at) * 1000
+        profiler.mark("lookup_order")
+        if not order_row:
+            suspicious_reason = "order_not_found"
+            record_webhook_event(
+                provider=provider,
+                provider_event_id=provider_event_id,
+                order_id=None,
+                event_type=event_type,
+                status="rejected",
+                payload=payload,
+                suspicious_reason=suspicious_reason,
+            )
+            db.commit()
+            status = "not_found"
+            return jsonify({"error": "Pedido nao encontrado para este pagamento."}), 404
+
+        if provider != order_row["payment_provider"]:
+            suspicious_reason = "provider_mismatch"
+        elif amount is not None and abs(float(amount) - float(order_row["valor_total"] or 0)) > 0.01:
+            suspicious_reason = "amount_mismatch"
+
+        if suspicious_reason:
+            record_webhook_event(
+                provider=provider,
+                provider_event_id=provider_event_id,
+                order_id=order_row["id"],
+                event_type=event_type,
+                status="suspicious",
+                payload=payload,
+                suspicious_reason=suspicious_reason,
+            )
+            create_order_audit_log(
+                order_row["id"],
+                "suspicious_webhook",
+                f"webhook:{provider}",
+                {"reason": suspicious_reason, "provider_event_id": provider_event_id},
+            )
+            db.commit()
+            status = "suspicious"
+            return jsonify({"error": "Webhook inconsistente."}), 400
+
+        received_at = utc_now_iso()
+        db.execute(
+            """
+            UPDATE pedidos
+            SET provider_status = ?, webhook_received_at = ?
+            WHERE id = ?
+            """,
+            (provider_status, received_at, order_row["id"]),
+        )
+        if provider_status in {"paid", "approved", "confirmed"}:
+            mark_as_paid(
+                order_row["codigo_retirada"],
+                order_row["turno_id"],
+                confirmed_by=f"webhook:{provider}",
+                webhook_received_at=received_at,
+            )
+            invalidate_snapshot_cache("order-summary", "dashboard-orders", "dashboard-summary", "dashboard-logistics")
+
+        record_webhook_event(
+            provider=provider,
+            provider_event_id=provider_event_id,
+            order_id=order_row["id"],
+            event_type=event_type,
+            status="processed",
+            payload=payload,
+            processed_at=received_at,
+        )
+        db.commit()
+        profiler.mark("process_webhook")
+        serialization_started_at = time.perf_counter()
+        response = jsonify({"ok": True})
+        serialization_ms = (time.perf_counter() - serialization_started_at) * 1000
+        profiler.mark("serialization/jsonify")
+        return response
+    except Exception as exc:
+        safe_rollback(db)
+        sentry_sdk.capture_exception(exc)
+        status = "error"
+        return jsonify({"error": "Nao foi possivel processar o webhook."}), 500
+    finally:
+        profiler.log(
+            status=status,
+            cache_status="invalidate_only",
+            db_query_ms=round(db_query_ms, 1),
+            serialization_ms=round(serialization_ms, 1),
+            provider=provider,
+            provider_event_id=provider_event_id,
+            suspicious_reason=suspicious_reason,
+        )
+
+
 @app.post("/api/orders/<code>/pay")
 @login_required
 def pay_order(code: str):
     profiler = RequestProfiler("POST /api/orders/<code>/pay")
     status = "ok"
     current_shift_id = None
+    db_query_ms = 0.0
+    serialization_ms = 0.0
     try:
         current_shift_id = get_current_shift_id()
         attach_order_context(order_code=code, shift_id=current_shift_id)
         profiler.mark("resolve_shift")
+        db_started_at = time.perf_counter()
         row = fetch_order_row_by_code(code, current_shift_id)
         profiler.mark("lookup_order")
         if not row:
@@ -5273,10 +6214,20 @@ def pay_order(code: str):
             payment_method=normalize_payment_method(row["payment_method"]) or "counter",
             shift_id=current_shift_id,
         )
-        order = mark_as_paid(code, current_shift_id)
+        order = mark_as_paid(
+            code,
+            current_shift_id,
+            confirmed_by=f"staff:{session.get('bar_user_id')}",
+        )
+        db_query_ms = (time.perf_counter() - db_started_at) * 1000
         profiler.mark("mark_paid")
         invalidate_snapshot_cache("catalog-context", "order-summary", "dashboard-orders", "dashboard-summary")
         profiler.mark("invalidate_cache")
+        serialization_started_at = time.perf_counter()
+        response = jsonify({"order": order})
+        serialization_ms = (time.perf_counter() - serialization_started_at) * 1000
+        profiler.mark("serialization/jsonify")
+        return response
     except LookupError:
         status = "not_found"
         return jsonify({"error": "Pedido nao encontrado."}), 404
@@ -5285,8 +6236,14 @@ def pay_order(code: str):
         sentry_sdk.capture_exception(exc)
         return jsonify({"error": "Nao foi possivel confirmar o pagamento agora. Tente novamente."}), 500
     finally:
-        profiler.log(status=status, shift_id=current_shift_id, code=code)
-    return jsonify({"order": order})
+        profiler.log(
+            status=status,
+            shift_id=current_shift_id,
+            code=code,
+            cache_status="invalidate_only",
+            db_query_ms=round(db_query_ms, 1),
+            serialization_ms=round(serialization_ms, 1),
+        )
 
 
 @app.post("/api/orders/<code>/complete")
@@ -5296,10 +6253,13 @@ def complete_order(code: str):
     status = "ok"
     db = get_db()
     current_shift_id = None
+    db_query_ms = 0.0
+    serialization_ms = 0.0
     try:
         current_shift_id = get_current_shift_id()
         attach_order_context(order_code=code, shift_id=current_shift_id)
         profiler.mark("resolve_shift")
+        db_started_at = time.perf_counter()
         row = fetch_order_row_by_code(code, current_shift_id)
         profiler.mark("lookup_order")
         if not row:
@@ -5325,7 +6285,7 @@ def complete_order(code: str):
         updated = db.execute(
             """
             UPDATE pedidos
-            SET status = 'completed', completed_at = ?, completed_by_user_id = ?
+            SET status = 'completed', completed_at = ?, delivered_at = ?, completed_by_user_id = ?
             WHERE codigo_retirada = ? AND turno_id = ?
             RETURNING
                 id,
@@ -5336,25 +6296,47 @@ def complete_order(code: str):
                 customer_name,
                 table_label,
                 completed_at,
+                delivered_at,
                 order_number,
                 payment_method,
                 payment_status,
                 order_type
             """,
-            (utc_now_iso(), session.get("bar_user_id"), code, current_shift_id),
+            (utc_now_iso(), utc_now_iso(), session.get("bar_user_id"), code, current_shift_id),
         ).fetchone()
         profiler.mark("complete_order")
+        if not updated:
+            status = "not_found"
+            return jsonify({"error": "Pedido nao encontrado."}), 404
+        create_order_audit_log(
+            updated["id"],
+            "order_delivered",
+            f"staff:{session.get('bar_user_id')}",
+            {"code": code},
+        )
         db.commit()
+        db_query_ms = (time.perf_counter() - db_started_at) * 1000
         invalidate_snapshot_cache("catalog-context", "order-summary", "dashboard-orders", "dashboard-summary")
         profiler.mark("invalidate_cache")
-        return jsonify({"order": serialize_dashboard_order(updated)})
+        serialization_started_at = time.perf_counter()
+        response = jsonify({"order": serialize_dashboard_order(updated)})
+        serialization_ms = (time.perf_counter() - serialization_started_at) * 1000
+        profiler.mark("serialization/jsonify")
+        return response
     except Exception as exc:
         status = "error"
         safe_rollback(db)
         sentry_sdk.capture_exception(exc)
         return jsonify({"error": "Nao foi possivel concluir o pedido agora. Tente novamente."}), 500
     finally:
-        profiler.log(status=status, shift_id=current_shift_id, code=code)
+        profiler.log(
+            status=status,
+            shift_id=current_shift_id,
+            code=code,
+            cache_status="invalidate_only",
+            db_query_ms=round(db_query_ms, 1),
+            serialization_ms=round(serialization_ms, 1),
+        )
 
 
 @app.post("/api/reports/closeout")
