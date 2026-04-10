@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+
+{% block title %}BarOS | Acompanhar Pedido{% endblock %}
+{% block body_class %}customer-body{% endblock %}
+
+{% block content %}
+<main class="customer-shell customer-shell-premium">
+  <section class="hero-panel hero-panel-premium order-status-shell">
+    <div class="hero-copy">
+      <p class="eyebrow">Acompanhar pedido</p>
+      <h1>Pedido <span id="public-order-number">{{ order.order_number or order.code }}</span></h1>
+      <p class="hero-text" id="public-order-message">{{ order.public_message }}</p>
+      <div class="hero-meta">
+        <span>Status: <strong id="public-order-state">{{ order.public_state_label }}</strong></span>
+        <span>Atualizado em <strong id="public-order-generated-at">{{ current_time }}</strong></span>
+      </div>
+    </div>
+    <div class="hero-card service-card order-status-card">
+      <p class="mini-label">Resumo</p>
+      <div class="order-status-grid">
+        <div>
+          <span class="mini-label">Codigo do pedido</span>
+          <strong id="public-order-code">{{ order.order_number or order.code }}</strong>
+        </div>
+        <div>
+          <span class="mini-label">Pagamento</span>
+          <strong id="public-payment-status">{{ order.payment_status_label }}</strong>
+        </div>
+        <div id="pickup-code-shell" class="{% if not order.pickup_code %}hidden{% endif %}">
+          <span class="mini-label">Codigo de retirada</span>
+          <strong id="public-pickup-code">{{ order.pickup_code or '------' }}</strong>
+        </div>
+        <div id="public-countdown-shell" class="{% if not order.pix_expires_at or order.public_state != 'awaiting_payment' %}hidden{% endif %}">
+          <span class="mini-label">Expira em</span>
+          <strong id="public-countdown">--:--</strong>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="menu-section menu-section-premium">
+    <div class="section-heading section-heading-compact">
+      <div>
+        <p class="eyebrow">Pagamento</p>
+        <h2>Pix e status em tempo real</h2>
+      </div>
+    </div>
+
+    <div class="order-status-layout">
+      <article class="pix-preview-card order-status-payment-card">
+        <div class="pix-preview-copy">
+          <p class="mini-label">QR code Pix</p>
+          <strong id="public-pix-status">{{ order.public_state_label }}</strong>
+          <p id="public-pix-instruction" class="checkout-instruction">{{ order.public_message }}</p>
+        </div>
+        <div class="pix-qr-wrapper">
+          <img
+            id="public-pix-qr"
+            class="pix-qr-image {% if not order.pix_qr_code %}hidden{% endif %}"
+            src="{{ order.pix_qr_code or '' }}"
+            alt="QR code Pix do pedido"
+          >
+          <div id="public-pix-placeholder" class="pix-qr-placeholder {% if order.pix_qr_code %}hidden{% endif %}">PIX</div>
+        </div>
+      </article>
+
+      <article class="checkout-panel order-status-sidebar">
+        <p class="mini-label">Pix copia e cola</p>
+        <textarea id="public-pix-copy-paste" class="pix-copy-text" rows="4" readonly>{{ order.pix_copy_paste or '' }}</textarea>
+        <p id="public-order-feedback" class="alert hidden"></p>
+        <div class="order-status-actions">
+          <button class="secondary-button full-width" type="button" id="public-copy-pix">Copiar Pix</button>
+          <button class="secondary-button full-width" type="button" id="public-refresh-order">Ja paguei / atualizar status</button>
+          <button class="secondary-button full-width {% if not order.can_regenerate_pix %}hidden{% endif %}" type="button" id="public-regenerate-pix">Gerar novo Pix</button>
+          <a class="primary-button full-width" href="{{ url_for('index') }}">Voltar ao cardapio</a>
+        </div>
+      </article>
+    </div>
+
+    <div class="order-status-items">
+      <p class="eyebrow">Itens do pedido</p>
+      <div id="public-order-items" class="summary-list">
+        {% for item in order.items %}
+        <div class="summary-line">
+          <span>{{ item.quantity }}x {{ item.name }}</span>
+          <strong>R$ {{ "%.2f"|format(item.subtotal) }}</strong>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </section>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  window.BAROS_PUBLIC_ORDER = {{ order|tojson }};
+</script>
+<script src="{{ url_for('static', filename='order-status.js') }}"></script>
+{% endblock %}
