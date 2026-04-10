@@ -5605,9 +5605,10 @@ def create_order():
     raw_payment_method = payload.get("payment_method")
     payment_method = normalize_payment_method(raw_payment_method)
     app.logger.info(
-        "create_order raw_payment_method=%s normalized_payment_method=%s source=%s customer=%s",
+        "create_order incoming raw_payment_method=%s normalized_payment_method=%s order_type=%s source=%s customer=%s",
         raw_payment_method,
         payment_method,
+        order_type,
         source,
         customer_name,
     )
@@ -5647,6 +5648,8 @@ def create_order():
     response_order: dict | None = None
     response_summary: dict | None = None
     turno_id: int | None = None
+    current_db_step = "start"
+    pix_specific_generated = False
     try:
         turno_id = get_current_shift_id()
         attach_order_context(
@@ -5655,6 +5658,7 @@ def create_order():
             shift_id=turno_id,
         )
         profiler.mark("resolve_shift")
+        current_db_step = "idempotency_lookup"
         existing_order = fetch_order_row_by_request_id(request_id)
         profiler.mark("idempotency_lookup")
         if existing_order:
@@ -5721,6 +5725,7 @@ def create_order():
             status = "invalid_items"
             return jsonify({"error": "Itens invalidos."}), 400
 
+        current_db_step = "reserve_stock"
         shortages = reserve_stock_deductions(itens, bebidas_por_id, combo_components_map)
         profiler.mark("reserve_stock")
         if shortages:
@@ -5742,6 +5747,7 @@ def create_order():
         public_token = generate_public_order_token()
         pickup_code = generate_pickup_code()
         if payment_method == "pix":
+            pix_specific_generated = True
             pix_expires_at = add_minutes_to_iso(utc_now_iso(), PIX_PAYMENT_TTL_MINUTES)
             pix_payload = build_fake_pix_payload(codigo, valor_total, expires_at=pix_expires_at)
             payment_provider = pix_payload["payment_provider"]
@@ -5770,6 +5776,21 @@ def create_order():
             shift_id=turno_id,
         )
 
+        current_db_step = "insert_order"
+        app.logger.info(
+            "create_order insert_order payment_method=%s order_type=%s pix_specific_generated=%s "
+            "has_public_token=%s has_pickup_code=%s has_provider_payment_id=%s has_provider_status=%s "
+            "has_expires_at=%s has_pix_expires_at=%s",
+            payment_method,
+            order_type,
+            pix_specific_generated,
+            bool(public_token),
+            bool(pickup_code),
+            bool(provider_payment_id),
+            bool(provider_status),
+            bool(expires_at),
+            bool(pix_expires_at),
+        )
         pedido_row = db.execute(
             """
             INSERT INTO pedidos (
@@ -5797,7 +5818,7 @@ def create_order():
                 pickup_code,
                 request_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING id
             """,
             (
@@ -5828,6 +5849,7 @@ def create_order():
         ).fetchone()
         pedido_id = pedido_row["id"]
         profiler.mark("insert_order")
+        current_db_step = "audit_order_created"
         create_order_audit_log(
             pedido_id,
             "order_created",
@@ -5839,6 +5861,7 @@ def create_order():
             },
         )
 
+        current_db_step = "insert_items"
         db.executemany(
             """
             INSERT INTO itens_pedido (
@@ -5868,8 +5891,10 @@ def create_order():
             ],
         )
         profiler.mark("insert_items")
+        current_db_step = "commit"
         db.commit()
         profiler.mark("commit")
+        current_db_step = "build_response_order"
         response_order = build_created_order_response(
             order_id=pedido_id,
             code=codigo,
@@ -5896,6 +5921,7 @@ def create_order():
             items=itens,
         )
         profiler.mark("build_response_order")
+        current_db_step = "invalidate_cache"
         invalidate_snapshot_cache(
             "catalog-context",
             "menu",
@@ -5905,11 +5931,23 @@ def create_order():
             "dashboard-summary",
             "dashboard-logistics",
         )
+        current_db_step = "build_summary_response"
         response_summary = fetch_dashboard_summary_payload(turno_id)["summary"]
         profiler.mark("build_summary_response")
         status = "created"
     except IntegrityError as exc:
         safe_rollback(db)
+        app.logger.exception(
+            "create_order integrity_error step=%s payment_method=%s order_type=%s pix_specific_generated=%s "
+            "request_id=%s turno_id=%s code=%s",
+            current_db_step,
+            payment_method,
+            order_type,
+            pix_specific_generated,
+            request_id,
+            turno_id,
+            codigo,
+        )
         existing_order = fetch_order_row_by_request_id(request_id)
         if existing_order:
             status = "integrity_idempotent_hit"
@@ -5927,6 +5965,17 @@ def create_order():
         return jsonify({"error": "Nao foi possivel registrar o pedido agora. Tente novamente."}), 500
     except Exception as exc:
         safe_rollback(db)
+        app.logger.exception(
+            "create_order unexpected_error step=%s payment_method=%s order_type=%s pix_specific_generated=%s "
+            "request_id=%s turno_id=%s code=%s",
+            current_db_step,
+            payment_method,
+            order_type,
+            pix_specific_generated,
+            request_id,
+            turno_id,
+            codigo,
+        )
         sentry_sdk.capture_exception(exc)
         status = "error"
         return jsonify({"error": "Nao foi possivel criar o pedido agora. Tente novamente."}), 500
