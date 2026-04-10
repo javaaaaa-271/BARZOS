@@ -65,13 +65,7 @@
           {% if item.is_combo %}
           <span class="menu-badge-combo">Combo</span>
           {% endif %}
-          {% if item.image_src %}
-          <img class="menu-card-image" src="{{ item.image_src }}" alt="{{ item.name }}">
-          {% else %}
-          <div class="menu-card-placeholder">
-            <span>{{ item.placeholder }}</span>
-          </div>
-          {% endif %}
+          <img class="menu-card-image" src="{{ item.image_src or default_product_image_url }}" alt="{{ item.name }}">
         </div>
         <div class="menu-card-top menu-card-meta-row">
           <span class="tag">{{ item.category }}</span>

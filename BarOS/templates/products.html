@@ -160,11 +160,7 @@
             {% for product in products %}
             <article class="managed-product-card">
               <div class="managed-product-preview">
-                {% if product.image_src %}
-                <img class="managed-product-thumb" src="{{ product.image_src }}" alt="{{ product.name }}">
-                {% else %}
-                <div class="managed-product-placeholder">{{ product.placeholder }}</div>
-                {% endif %}
+                <img class="managed-product-thumb" src="{{ product.image_src or default_product_image_url }}" alt="{{ product.name }}">
                 <div>
                   <strong>{{ product.name }}</strong>
                   <p>{{ product.description }}</p>
@@ -252,11 +248,7 @@
             {% for combo in combos %}
             <article class="managed-product-card">
               <div class="managed-product-preview">
-                {% if combo.image_src %}
-                <img class="managed-product-thumb" src="{{ combo.image_src }}" alt="{{ combo.name }}">
-                {% else %}
-                <div class="managed-product-placeholder">{{ combo.placeholder }}</div>
-                {% endif %}
+                <img class="managed-product-thumb" src="{{ combo.image_src or default_product_image_url }}" alt="{{ combo.name }}">
                 <div>
                   <strong>{{ combo.name }}</strong>
                   <p>{{ combo.description }}</p>
