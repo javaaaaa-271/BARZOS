@@ -345,13 +345,13 @@ DbRow = dict[str, Any]
 SNAPSHOT_CACHE_TTLS = {
     "catalog_context": 3.0,
     "current_shift": 60.0,
-    "dashboard_orders": 10.0,
-    "dashboard_summary": 20.0,
-    "dashboard_logistics": 30.0,
+    "dashboard_orders": 5.0,
+    "dashboard_summary": 45.0,
+    "dashboard_logistics": 45.0,
     "dashboard_shifts": 120.0,
     "menu": 10.0,
-    "logistics": 30.0,
-    "order_summary": 20.0,
+    "logistics": 45.0,
+    "order_summary": 45.0,
     "shift_history": 120.0,
 }
 _SNAPSHOT_CACHE: dict[str, tuple[float, Any]] = {}
@@ -1160,6 +1160,7 @@ def apply_schema_updates(db: DatabaseConnection) -> None:
             "idx_pedidos_turno_payment_status",
             "CREATE INDEX idx_pedidos_turno_payment_status ON pedidos(turno_id, payment_status)",
         ),
+        ("pedidos", "idx_pedidos_status", "CREATE INDEX idx_pedidos_status ON pedidos(status)"),
         ("pedidos", "idx_pedidos_codigo_turno", "CREATE INDEX idx_pedidos_codigo_turno ON pedidos(codigo_retirada, turno_id)"),
         ("turnos", "idx_turnos_status_id", "CREATE INDEX idx_turnos_status_id ON turnos(status, id DESC)"),
         ("itens_pedido", "idx_itens_pedido_pedido_id", "CREATE INDEX idx_itens_pedido_pedido_id ON itens_pedido(pedido_id)"),
@@ -1845,10 +1846,10 @@ def mark_as_paid(code: str, shift_id: int | None = None) -> dict:
         raise LookupError("Pedido nao encontrado.")
 
     if normalize_payment_status(row["payment_status"], "pending") == "paid":
-        return serialize_order(row)
+        return serialize_dashboard_order(row)
 
     paid_at = utc_now_iso()
-    db.execute(
+    updated = db.execute(
         """
         UPDATE pedidos
         SET payment_status = 'paid',
@@ -1858,14 +1859,26 @@ def mark_as_paid(code: str, shift_id: int | None = None) -> dict:
                 ELSE status
             END
         WHERE id = ?
+        RETURNING
+            id,
+            codigo_retirada,
+            horario_pedido,
+            status,
+            valor_total,
+            customer_name,
+            table_label,
+            completed_at,
+            order_number,
+            payment_method,
+            payment_status,
+            order_type
         """,
         (paid_at, AWAITING_PAYMENT_STATUS, row["id"]),
-    )
+    ).fetchone()
     db.commit()
-    updated = fetch_order_row_by_code(code, current_shift_id)
     if not updated:
         raise LookupError("Pedido nao encontrado.")
-    return serialize_order(updated)
+    return serialize_dashboard_order(updated)
 
 
 def build_ticket(order: dict) -> dict:
@@ -2772,6 +2785,70 @@ def fetch_order_items_map(order_ids: list[int]) -> dict[int, list[DbRow]]:
     return items_by_order_id
 
 
+def fetch_dashboard_order_items_map(order_ids: list[int]) -> dict[int, list[DbRow]]:
+    if not order_ids:
+        return {}
+
+    placeholders = ",".join("?" for _ in order_ids)
+    rows = get_db().execute(
+        """
+        SELECT
+            ip.pedido_id,
+            ip.id,
+            ip.quantidade,
+            ip.subtotal,
+            COALESCE(NULLIF(ip.item_name_snapshot, ''), b.nome) AS item_name
+        FROM itens_pedido ip
+        LEFT JOIN bebidas b ON b.id = ip.bebida_id
+        WHERE ip.pedido_id IN ("""
+        + placeholders
+        + """)
+        ORDER BY ip.pedido_id ASC, ip.id ASC
+        """,
+        order_ids,
+    ).fetchall()
+    items_by_order_id: dict[int, list[DbRow]] = {}
+    for item_row in rows:
+        items_by_order_id.setdefault(item_row["pedido_id"], []).append(item_row)
+    return items_by_order_id
+
+
+def serialize_dashboard_order(row: sqlite3.Row | DbRow, items: list[DbRow] | None = None) -> dict:
+    if items is None:
+        items = fetch_dashboard_order_items_map([row["id"]]).get(row["id"], [])
+
+    payment_method = row["payment_method"] if "payment_method" in row.keys() and row["payment_method"] else "counter"
+    payment_status = row["payment_status"] if "payment_status" in row.keys() and row["payment_status"] else "pending"
+    order_type = normalize_order_type(row["order_type"] if "order_type" in row.keys() else "pista") or "pista"
+
+    return {
+        "id": row["id"],
+        "code": row["codigo_retirada"],
+        "order_number": row["order_number"] if "order_number" in row.keys() and row["order_number"] else row["codigo_retirada"],
+        "status": row["status"],
+        "status_label": get_order_status_label(row["status"] if "status" in row.keys() else None),
+        "created_at": display_datetime(row["horario_pedido"]),
+        "completed_at": display_datetime(row["completed_at"]) if "completed_at" in row.keys() and row["completed_at"] else None,
+        "total": row["valor_total"],
+        "customer_name": row["customer_name"] if "customer_name" in row.keys() and row["customer_name"] else "Cliente",
+        "table_label": row["table_label"] if "table_label" in row.keys() and row["table_label"] else "Retirada",
+        "payment_method": payment_method,
+        "payment_method_label": get_payment_method_label(payment_method),
+        "payment_status": payment_status,
+        "payment_status_label": get_payment_status_label(payment_status),
+        "order_type": order_type,
+        "order_type_label": get_order_type_label(order_type),
+        "items": [
+            {
+                "name": item["item_name"],
+                "quantity": int(item["quantidade"] or 0),
+                "subtotal": item["subtotal"],
+            }
+            for item in items
+        ],
+    }
+
+
 def serialize_order(row: sqlite3.Row, items: list[DbRow] | None = None) -> dict:
     if items is None:
         items = fetch_order_items_map([row["id"]]).get(row["id"], [])
@@ -2940,17 +3017,11 @@ def fetch_dashboard_orders(shift_id: int | None = None, completed_limit: int = 2
                 valor_total,
                 customer_name,
                 table_label,
-                source,
                 completed_at,
                 order_number,
                 payment_method,
                 payment_status,
                 order_type,
-                payment_provider,
-                payment_provider_id,
-                paid_at,
-                pix_qr_code,
-                pix_copy_paste,
                 CASE
                     WHEN status = ? THEN 'awaiting_payment'
                     WHEN status IN (?, ?) THEN 'pending'
@@ -2973,17 +3044,11 @@ def fetch_dashboard_orders(shift_id: int | None = None, completed_limit: int = 2
             valor_total,
             customer_name,
             table_label,
-            source,
             completed_at,
             order_number,
             payment_method,
             payment_status,
             order_type,
-            payment_provider,
-            payment_provider_id,
-            paid_at,
-            pix_qr_code,
-            pix_copy_paste,
             dashboard_bucket
         FROM dashboard_orders
         WHERE dashboard_bucket IS NOT NULL
@@ -3013,9 +3078,11 @@ def fetch_dashboard_orders(shift_id: int | None = None, completed_limit: int = 2
     if not rows:
         return grouped_orders
 
-    items_by_order_id = fetch_order_items_map([row["id"] for row in rows])
+    items_by_order_id = fetch_dashboard_order_items_map([row["id"] for row in rows])
     for row in rows:
-        grouped_orders[row["dashboard_bucket"]].append(serialize_order(row, items_by_order_id.get(row["id"], [])))
+        grouped_orders[row["dashboard_bucket"]].append(
+            serialize_dashboard_order(row, items_by_order_id.get(row["id"], []))
+        )
     return grouped_orders
 
 
@@ -3716,6 +3783,18 @@ def fetch_dashboard_summary_payload(shift_id: int | None = None) -> dict:
             "generated_at": display_datetime(utc_now_iso()),
         },
     )
+
+
+def fetch_live_summary_payload(shift_id: int | None = None) -> dict:
+    current_shift_id = shift_id or get_current_shift_id()
+    summary_payload = fetch_dashboard_summary_payload(current_shift_id)
+    logistics_payload = fetch_dashboard_logistics_payload()
+    return {
+        "current_shift_id": current_shift_id,
+        "summary": summary_payload["summary"],
+        "logistics": logistics_payload["logistics"],
+        "generated_at": summary_payload.get("generated_at") or logistics_payload.get("generated_at"),
+    }
 
 
 def build_closeout_report(shift_id: int | None = None) -> dict:
@@ -4655,16 +4734,8 @@ def get_orders():
     try:
         current_shift_id = get_current_shift_id()
         profiler.mark("resolve_shift")
-        include_shift_history = request.args.get("include_shift_history", "").strip().lower() in {"1", "true", "yes"}
-        payload = {
-            "current_shift_id": current_shift_id,
-            **build_dashboard_snapshot(
-                current_shift_id,
-                shift_history_limit=5,
-                include_shift_history=include_shift_history,
-                profiler=profiler,
-            ),
-        }
+        payload = fetch_dashboard_orders_payload(current_shift_id)
+        profiler.mark("orders")
         response = jsonify(payload)
         profiler.mark("serialization/jsonify")
         return response
@@ -4686,7 +4757,27 @@ def get_dashboard_orders():
         profiler.mark("resolve_shift")
         payload = fetch_dashboard_orders_payload(current_shift_id)
         profiler.mark("orders")
-        profiler.mark("generated_at")
+        response = jsonify(payload)
+        profiler.mark("serialization/jsonify")
+        return response
+    except Exception:
+        status = "error"
+        raise
+    finally:
+        profiler.log(status=status, shift_id=current_shift_id)
+
+
+@app.get("/api/summary")
+@login_required
+def get_summary():
+    profiler = RequestProfiler("GET /api/summary")
+    status = "ok"
+    current_shift_id = None
+    try:
+        current_shift_id = get_current_shift_id()
+        profiler.mark("resolve_shift")
+        payload = fetch_live_summary_payload(current_shift_id)
+        profiler.mark("summary+logistics")
         response = jsonify(payload)
         profiler.mark("serialization/jsonify")
         return response
@@ -4706,9 +4797,8 @@ def get_dashboard_summary():
     try:
         current_shift_id = get_current_shift_id()
         profiler.mark("resolve_shift")
-        payload = fetch_dashboard_summary_payload(current_shift_id)
-        profiler.mark("summary")
-        profiler.mark("generated_at")
+        payload = fetch_live_summary_payload(current_shift_id)
+        profiler.mark("summary+logistics")
         response = jsonify(payload)
         profiler.mark("serialization/jsonify")
         return response
@@ -5165,11 +5255,17 @@ def create_order():
 @app.post("/api/orders/<code>/pay")
 @login_required
 def pay_order(code: str):
+    profiler = RequestProfiler("POST /api/orders/<code>/pay")
+    status = "ok"
+    current_shift_id = None
     try:
         current_shift_id = get_current_shift_id()
         attach_order_context(order_code=code, shift_id=current_shift_id)
+        profiler.mark("resolve_shift")
         row = fetch_order_row_by_code(code, current_shift_id)
+        profiler.mark("lookup_order")
         if not row:
+            status = "not_found"
             return jsonify({"error": "Pedido nao encontrado."}), 404
         attach_order_context(
             order_code=code,
@@ -5178,24 +5274,36 @@ def pay_order(code: str):
             shift_id=current_shift_id,
         )
         order = mark_as_paid(code, current_shift_id)
+        profiler.mark("mark_paid")
         invalidate_snapshot_cache("catalog-context", "order-summary", "dashboard-orders", "dashboard-summary")
+        profiler.mark("invalidate_cache")
     except LookupError:
+        status = "not_found"
         return jsonify({"error": "Pedido nao encontrado."}), 404
     except Exception as exc:
+        status = "error"
         sentry_sdk.capture_exception(exc)
         return jsonify({"error": "Nao foi possivel confirmar o pagamento agora. Tente novamente."}), 500
-    return jsonify({"order": order, "summary": build_order_summary()})
+    finally:
+        profiler.log(status=status, shift_id=current_shift_id, code=code)
+    return jsonify({"order": order})
 
 
 @app.post("/api/orders/<code>/complete")
 @login_required
 def complete_order(code: str):
+    profiler = RequestProfiler("POST /api/orders/<code>/complete")
+    status = "ok"
     db = get_db()
+    current_shift_id = None
     try:
         current_shift_id = get_current_shift_id()
         attach_order_context(order_code=code, shift_id=current_shift_id)
+        profiler.mark("resolve_shift")
         row = fetch_order_row_by_code(code, current_shift_id)
+        profiler.mark("lookup_order")
         if not row:
+            status = "not_found"
             return jsonify({"error": "Pedido nao encontrado."}), 404
         attach_order_context(
             order_code=code,
@@ -5204,30 +5312,49 @@ def complete_order(code: str):
             shift_id=current_shift_id,
         )
         if row["status"] == "completed":
-            return jsonify({"order": serialize_order(row), "summary": build_order_summary()})
+            status = "already_completed"
+            return jsonify({"order": serialize_dashboard_order(row)})
         if row["status"] == AWAITING_PAYMENT_STATUS:
+            status = "awaiting_payment"
             return jsonify({"error": "Esse pedido ainda aguarda confirmacao do Pix antes de ser liberado para o bar."}), 400
 
         if row["payment_method"] == "pix" and normalize_payment_status(row["payment_status"], "pending") != "paid":
+            status = "pix_not_paid"
             return jsonify({"error": "Pedidos com Pix so podem ser concluidos depois da confirmacao de pagamento."}), 400
 
-        db.execute(
+        updated = db.execute(
             """
             UPDATE pedidos
             SET status = 'completed', completed_at = ?, completed_by_user_id = ?
             WHERE codigo_retirada = ? AND turno_id = ?
+            RETURNING
+                id,
+                codigo_retirada,
+                horario_pedido,
+                status,
+                valor_total,
+                customer_name,
+                table_label,
+                completed_at,
+                order_number,
+                payment_method,
+                payment_status,
+                order_type
             """,
             (utc_now_iso(), session.get("bar_user_id"), code, current_shift_id),
-        )
+        ).fetchone()
+        profiler.mark("complete_order")
         db.commit()
         invalidate_snapshot_cache("catalog-context", "order-summary", "dashboard-orders", "dashboard-summary")
-
-        updated = fetch_order_row_by_code(code, current_shift_id)
-        return jsonify({"order": serialize_order(updated), "summary": build_order_summary()})
+        profiler.mark("invalidate_cache")
+        return jsonify({"order": serialize_dashboard_order(updated)})
     except Exception as exc:
+        status = "error"
         safe_rollback(db)
         sentry_sdk.capture_exception(exc)
         return jsonify({"error": "Nao foi possivel concluir o pedido agora. Tente novamente."}), 500
+    finally:
+        profiler.log(status=status, shift_id=current_shift_id, code=code)
 
 
 @app.post("/api/reports/closeout")
