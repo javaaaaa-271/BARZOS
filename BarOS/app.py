@@ -2616,7 +2616,7 @@ def build_products_redirect(message: str | None = None, error: str | None = None
         params["message"] = message
     if error:
         params["error"] = error
-    return redirect(url_for("products_page", **params))
+    return redirect(url_for("products_page", **params), code=303)
 
 
 def build_preorder_redirect(message: str | None = None, error: str | None = None):
