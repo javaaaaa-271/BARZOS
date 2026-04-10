@@ -1951,9 +1951,64 @@ def issue_pix_payment_for_order(order_row: DbRow | dict, *, regenerate: bool = F
 
 
 def build_public_order_payload(row: DbRow | dict, items: list[DbRow] | None = None) -> dict[str, Any]:
-    order_payload = serialize_order(row, items=items)
-    public_state = get_public_order_state(row)
+    normalized_items = []
+    for item in items or []:
+        if isinstance(item, dict):
+            item_name = item.get("item_name") or item.get("item_name_snapshot") or item.get("name") or item.get("nome") or "Item"
+            quantity = int(item.get("quantidade") or item.get("quantity") or 0)
+            subtotal = item.get("subtotal") or 0
+        else:
+            item_name = item["item_name"] if "item_name" in item.keys() else (item["item_name_snapshot"] or item["nome"])
+            quantity = int(item["quantidade"] or 0)
+            subtotal = item["subtotal"] or 0
+        normalized_items.append(
+            {
+                "name": item_name,
+                "quantity": quantity,
+                "subtotal": subtotal,
+            }
+        )
+
     payment_method = normalize_payment_method(row.get("payment_method") if isinstance(row, dict) else row["payment_method"]) or "counter"
+    payment_status = normalize_payment_status(
+        row.get("payment_status") if isinstance(row, dict) else row["payment_status"],
+        "pending",
+    )
+    order_type = normalize_order_type(row.get("order_type") if isinstance(row, dict) else row["order_type"]) or "pista"
+    order_payload = {
+        "id": row.get("id") if isinstance(row, dict) else row["id"],
+        "code": row.get("codigo_retirada") if isinstance(row, dict) else row["codigo_retirada"],
+        "order_number": (row.get("order_number") if isinstance(row, dict) else row["order_number"])
+        or (row.get("codigo_retirada") if isinstance(row, dict) else row["codigo_retirada"]),
+        "status": row.get("status") if isinstance(row, dict) else row["status"],
+        "status_label": get_order_status_label(row.get("status") if isinstance(row, dict) else row["status"]),
+        "released_to_bar": (row.get("status") if isinstance(row, dict) else row["status"]) in (*ACTIVE_ORDER_STATUSES, "completed"),
+        "created_at": display_datetime(row.get("horario_pedido") if isinstance(row, dict) else row["horario_pedido"]),
+        "completed_at": display_datetime(row.get("completed_at") if isinstance(row, dict) else row["completed_at"])
+        if (row.get("completed_at") if isinstance(row, dict) else row["completed_at"])
+        else None,
+        "paid_at": display_datetime(row.get("paid_at") if isinstance(row, dict) else row["paid_at"])
+        if (row.get("paid_at") if isinstance(row, dict) else row["paid_at"])
+        else None,
+        "total": row.get("valor_total") if isinstance(row, dict) else row["valor_total"],
+        "customer_name": (row.get("customer_name") if isinstance(row, dict) else row["customer_name"]) or "Cliente",
+        "table_label": (row.get("table_label") if isinstance(row, dict) else row["table_label"]) or "Retirada",
+        "source": (row.get("source") if isinstance(row, dict) else row["source"]) or DEFAULT_ORDER_SOURCE,
+        "payment_method": payment_method,
+        "payment_method_label": get_payment_method_label(payment_method),
+        "payment_status": payment_status,
+        "payment_status_label": get_payment_status_label(payment_status),
+        "order_type": order_type,
+        "order_type_label": get_order_type_label(order_type),
+        "payment_provider": row.get("payment_provider") if isinstance(row, dict) else row["payment_provider"],
+        "payment_provider_id": row.get("payment_provider_id") if isinstance(row, dict) else row["payment_provider_id"],
+        "provider_payment_id": row.get("provider_payment_id") if isinstance(row, dict) else row["provider_payment_id"],
+        "provider_status": row.get("provider_status") if isinstance(row, dict) else row["provider_status"],
+        "pix_qr_code": row.get("pix_qr_code") if isinstance(row, dict) else row["pix_qr_code"],
+        "pix_copy_paste": row.get("pix_copy_paste") if isinstance(row, dict) else row["pix_copy_paste"],
+        "items": normalized_items,
+    }
+    public_state = get_public_order_state(row)
     pix_expires_at = row.get("pix_expires_at") if isinstance(row, dict) else row["pix_expires_at"]
     delivered_at = row.get("delivered_at") if isinstance(row, dict) else row["delivered_at"]
     public_token = row.get("public_token") if isinstance(row, dict) else row["public_token"]
@@ -1987,10 +2042,10 @@ def build_public_order_payload(row: DbRow | dict, items: list[DbRow] | None = No
     return order_payload
 
 
-def refresh_order_payment_state(row: DbRow | None) -> DbRow | None:
+def refresh_order_payment_state(row: DbRow | None, *, persist_expiration: bool = True) -> DbRow | None:
     if not row:
         return None
-    if order_is_pix_expired(row):
+    if persist_expiration and order_is_pix_expired(row):
         expire_pending_pix_order(row["id"])
         get_db().commit()
         return fetch_order_row_by_code(row["codigo_retirada"])
@@ -2269,7 +2324,6 @@ def fetch_order_row_by_public_token(public_token: str) -> sqlite3.Row | None:
         SELECT
             id,
             codigo_retirada,
-            turno_id,
             horario_pedido,
             status,
             valor_total,
@@ -2293,8 +2347,7 @@ def fetch_order_row_by_public_token(public_token: str) -> sqlite3.Row | None:
             pix_expires_at,
             public_token,
             pickup_code,
-            webhook_received_at,
-            payment_confirmed_by
+            webhook_received_at
         FROM pedidos
         WHERE public_token = ?
         """,
@@ -3276,11 +3329,38 @@ def fetch_order_items_map(order_ids: list[int]) -> dict[int, list[DbRow]]:
 
 
 def fetch_public_order_payload(public_token: str) -> dict[str, Any] | None:
-    row = refresh_order_payment_state(fetch_order_row_by_public_token(public_token))
+    row = refresh_order_payment_state(fetch_order_row_by_public_token(public_token), persist_expiration=False)
     if not row:
         return None
-    items = fetch_order_items_map([row["id"]]).get(row["id"], [])
+    items = fetch_public_order_items_map([row["id"]]).get(row["id"], [])
     return build_public_order_payload(row, items=items)
+
+
+def fetch_public_order_items_map(order_ids: list[int]) -> dict[int, list[DbRow]]:
+    if not order_ids:
+        return {}
+
+    placeholders = ",".join("?" for _ in order_ids)
+    rows = get_db().execute(
+        """
+        SELECT
+            ip.pedido_id,
+            ip.quantidade,
+            ip.subtotal,
+            COALESCE(NULLIF(ip.item_name_snapshot, ''), b.nome) AS item_name
+        FROM itens_pedido ip
+        LEFT JOIN bebidas b ON b.id = ip.bebida_id
+        WHERE ip.pedido_id IN ("""
+        + placeholders
+        + """)
+        ORDER BY ip.pedido_id ASC, ip.id ASC
+        """,
+        order_ids,
+    ).fetchall()
+    items_by_order_id: dict[int, list[DbRow]] = {}
+    for item_row in rows:
+        items_by_order_id.setdefault(item_row["pedido_id"], []).append(item_row)
+    return items_by_order_id
 
 
 def fetch_dashboard_order_items_map(order_ids: list[int]) -> dict[int, list[DbRow]]:
@@ -5997,6 +6077,7 @@ def get_public_order_status(public_token: str):
     status = "ok"
     db_query_ms = 0.0
     serialization_ms = 0.0
+    order_found = False
     try:
         db_started_at = time.perf_counter()
         order = fetch_public_order_payload(public_token)
@@ -6004,7 +6085,13 @@ def get_public_order_status(public_token: str):
         profiler.mark("fetch_order")
         if not order:
             status = "not_found"
+            app.logger.warning(
+                "public_order_status not_found public_token=%s db_query_ms=%.1f",
+                public_token,
+                db_query_ms,
+            )
             return jsonify({"error": "Pedido nao encontrado."}), 404
+        order_found = True
         serialization_started_at = time.perf_counter()
         response = jsonify({"order": order})
         serialization_ms = (time.perf_counter() - serialization_started_at) * 1000
@@ -6012,13 +6099,22 @@ def get_public_order_status(public_token: str):
         return response
     except Exception:
         status = "error"
-        raise
+        app.logger.exception(
+            "public_order_status unexpected_error public_token=%s order_found=%s db_query_ms=%.1f serialization_ms=%.1f",
+            public_token,
+            order_found,
+            db_query_ms,
+            serialization_ms,
+        )
+        return jsonify({"error": "Nao foi possivel atualizar o status."}), 500
     finally:
         profiler.log(
             status=status,
             cache_status="no_cache",
             db_query_ms=round(db_query_ms, 1),
             serialization_ms=round(serialization_ms, 1),
+            public_token=public_token,
+            order_found=order_found,
         )
 
 
