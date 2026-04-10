@@ -18,26 +18,26 @@ const closeoutDrinks = document.getElementById("closeout-drinks");
 const closeoutExportLink = document.getElementById("closeout-export-link");
 const closeCloseoutModalButton = document.getElementById("close-closeout-modal");
 const closeCloseoutModalTopButton = document.getElementById("close-closeout-modal-top");
-const ORDERS_REFRESH_VISIBLE_MS = 10000;
-const ORDERS_REFRESH_HIDDEN_MS = 30000;
-const SUMMARY_REFRESH_VISIBLE_MS = 20000;
+const ORDERS_REFRESH_VISIBLE_MS = 5000;
+const ORDERS_REFRESH_HIDDEN_MS = 10000;
+const SUMMARY_REFRESH_VISIBLE_MS = 45000;
 const SUMMARY_REFRESH_HIDDEN_MS = 60000;
-const LOGISTICS_REFRESH_VISIBLE_MS = 30000;
-const LOGISTICS_REFRESH_HIDDEN_MS = 90000;
 
 let latestClosedShiftId = null;
 let currentShiftId = dashboardConfig.currentShiftId || null;
 let closeoutRequestInFlight = false;
 let resetRequestInFlight = false;
+let ordersState = {
+  awaiting_payment: [],
+  pending: [],
+  completed: [],
+};
+const orderActionInFlight = new Set();
 let isLoadingOrders = false;
-let pendingOrdersRefresh = false;
-let ordersRefreshTimer = null;
 let isLoadingSummary = false;
-let pendingSummaryRefresh = false;
-let summaryRefreshTimer = null;
-let isLoadingLogistics = false;
-let pendingLogisticsRefresh = false;
-let logisticsRefreshTimer = null;
+let pendingDashboardRefresh = false;
+let dashboardRefreshTimer = null;
+let nextSummaryRefreshAt = 0;
 let isLoadingShiftHistory = false;
 
 const brl = new Intl.NumberFormat("pt-BR", {
@@ -119,6 +119,27 @@ function renderMoneySpan(value, className = "") {
   return `<span class="${classes}" data-money-value="${normalizedValue}">${renderMoneyValue(normalizedValue)}</span>`;
 }
 
+function formatPeakTimeMarkup(rawLabel) {
+  const label = String(rawLabel || "").trim();
+  if (!label || label.toLowerCase() === "sem dados") {
+    return "Sem dados";
+  }
+
+  if (label.includes(" - ")) {
+    const [start, end] = label.split(" - ", 2).map((part) => part.trim());
+    return `${start}<span class="kpi-separator">–</span><span class="kpi-peak-end">${end}</span>`;
+  }
+
+  return label.replace(" - ", "–");
+}
+
+function setPeakTimeValue(element, rawLabel) {
+  if (!element) {
+    return;
+  }
+  element.innerHTML = formatPeakTimeMarkup(rawLabel);
+}
+
 function setCloseoutModalState(isOpen) {
   if (!closeoutModal) {
     return;
@@ -135,6 +156,61 @@ function renderOrderItems(items) {
   return items
     .map((item) => `<li>${item.quantity}x ${item.name} <strong class="money-display" data-money-value="${Number(item.subtotal || 0)}">${renderMoneyValue(item.subtotal)}</strong></li>`)
     .join("");
+}
+
+function cloneOrder(order) {
+  return {
+    ...order,
+    items: Array.isArray(order.items) ? order.items.map((item) => ({ ...item })) : [],
+  };
+}
+
+function cloneOrdersState() {
+  return {
+    awaiting_payment: ordersState.awaiting_payment.map(cloneOrder),
+    pending: ordersState.pending.map(cloneOrder),
+    completed: ordersState.completed.map(cloneOrder),
+  };
+}
+
+function setOrdersState(nextState) {
+  ordersState = {
+    awaiting_payment: Array.isArray(nextState.awaiting_payment) ? nextState.awaiting_payment : [],
+    pending: Array.isArray(nextState.pending) ? nextState.pending : [],
+    completed: Array.isArray(nextState.completed) ? nextState.completed : [],
+  };
+}
+
+function renderOrdersState() {
+  renderAwaitingPayment(ordersState.awaiting_payment);
+  renderPending(ordersState.pending);
+  renderCompleted(ordersState.completed);
+  hydrateMoneyDisplays();
+}
+
+function isOrderBusy(code) {
+  return orderActionInFlight.has(code);
+}
+
+function getOrderActionAttrs(code) {
+  return isOrderBusy(code) ? ' disabled aria-busy="true"' : "";
+}
+
+function getOrderActionLabel(code, idleLabel) {
+  return isOrderBusy(code) ? "Processando..." : idleLabel;
+}
+
+function formatDashboardTimestamp(date = new Date()) {
+  return new Intl.DateTimeFormat("pt-BR", {
+    timeZone: "America/Sao_Paulo",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  })
+    .format(date)
+    .replace(",", "");
 }
 
 function renderOrderBadges(order) {
@@ -171,11 +247,11 @@ function renderPending(orders) {
           <div class="order-actions-group">
             ${
               order.payment_status !== "paid"
-                ? `<button class="ghost-button small-button" data-pay="${order.code}" type="button">Marcar pago</button>`
+                ? `<button class="ghost-button small-button" data-pay="${order.code}" type="button"${getOrderActionAttrs(order.code)}>${getOrderActionLabel(order.code, "Marcar pago")}</button>`
                 : ""
             }
             <a class="ghost-button small-button" href="/pedidos/${order.code}/imprimir" target="_blank" rel="noopener">Imprimir</a>
-            <button class="primary-button" data-complete="${order.code}" type="button">Marcar como entregue</button>
+            <button class="primary-button" data-complete="${order.code}" type="button"${getOrderActionAttrs(order.code)}>${getOrderActionLabel(order.code, "Marcar como entregue")}</button>
           </div>
         </div>
       </article>
@@ -207,7 +283,7 @@ function renderCompleted(orders) {
           <div class="order-actions-group">
             ${
               order.payment_status !== "paid"
-                ? `<button class="ghost-button small-button" data-pay="${order.code}" type="button">Marcar pago</button>`
+                ? `<button class="ghost-button small-button" data-pay="${order.code}" type="button"${getOrderActionAttrs(order.code)}>${getOrderActionLabel(order.code, "Marcar pago")}</button>`
                 : ""
             }
             <a class="ghost-button small-button" href="/pedidos/${order.code}/imprimir" target="_blank" rel="noopener">Imprimir</a>
@@ -243,7 +319,7 @@ function renderAwaitingPayment(orders) {
         <div class="order-actions">
           <span class="muted-note">Aguardando confirmacao do Pix para liberar ao bar.</span>
           <div class="order-actions-group">
-            <button class="ghost-button small-button" data-pay="${order.code}" type="button">Confirmar pagamento</button>
+            <button class="ghost-button small-button" data-pay="${order.code}" type="button"${getOrderActionAttrs(order.code)}>${getOrderActionLabel(order.code, "Confirmar pagamento")}</button>
           </div>
         </div>
       </article>
@@ -447,7 +523,7 @@ function updateSummary(summary) {
   }
   const peakTime = document.getElementById("peak-time");
   if (peakTime) {
-    peakTime.textContent = summary.peak_time_label || "Sem dados";
+    setPeakTimeValue(peakTime, summary.peak_time_label || "Sem dados");
   }
 }
 
@@ -460,16 +536,22 @@ function updateLogistics(logistics) {
 }
 
 function applyOrdersSnapshot(data) {
+  const previousShiftId = currentShiftId;
   if (Number.isInteger(Number(data.current_shift_id))) {
     currentShiftId = Number(data.current_shift_id);
+  }
+  if (previousShiftId !== currentShiftId) {
+    nextSummaryRefreshAt = 0;
   }
   if (data.generated_at) {
     refreshStatus.textContent = `Atualizado ${data.generated_at}`;
   }
-  renderAwaitingPayment(data.awaiting_payment || []);
-  renderPending(data.pending || []);
-  renderCompleted(data.completed || []);
-  hydrateMoneyDisplays();
+  setOrdersState({
+    awaiting_payment: data.awaiting_payment || [],
+    pending: data.pending || [],
+    completed: data.completed || [],
+  });
+  renderOrdersState();
 }
 
 function applySummarySnapshot(data) {
@@ -482,6 +564,9 @@ function applySummarySnapshot(data) {
   updateSummary(data.summary);
   renderTopItems(data.summary.top_items || []);
   renderTopTables(data.summary.top_tables || []);
+  if (data.logistics) {
+    updateLogistics(data.logistics);
+  }
   hydrateMoneyDisplays();
 }
 
@@ -529,124 +614,89 @@ function clearRefreshTimer(timerId) {
   return null;
 }
 
-function scheduleOrdersRefresh(delay = document.hidden ? ORDERS_REFRESH_HIDDEN_MS : ORDERS_REFRESH_VISIBLE_MS) {
-  ordersRefreshTimer = clearRefreshTimer(ordersRefreshTimer);
-  ordersRefreshTimer = window.setTimeout(() => {
-    void refreshOrders();
+function getOrdersRefreshDelay() {
+  return document.hidden ? ORDERS_REFRESH_HIDDEN_MS : ORDERS_REFRESH_VISIBLE_MS;
+}
+
+function getSummaryRefreshDelay() {
+  return document.hidden ? SUMMARY_REFRESH_HIDDEN_MS : SUMMARY_REFRESH_VISIBLE_MS;
+}
+
+function scheduleDashboardRefresh(delay = getOrdersRefreshDelay()) {
+  dashboardRefreshTimer = clearRefreshTimer(dashboardRefreshTimer);
+  dashboardRefreshTimer = window.setTimeout(() => {
+    void refreshDashboard();
   }, delay);
 }
 
-function scheduleSummaryRefresh(delay = document.hidden ? SUMMARY_REFRESH_HIDDEN_MS : SUMMARY_REFRESH_VISIBLE_MS) {
-  summaryRefreshTimer = clearRefreshTimer(summaryRefreshTimer);
-  summaryRefreshTimer = window.setTimeout(() => {
-    void refreshSummary();
-  }, delay);
-}
-
-function scheduleLogisticsRefresh(delay = document.hidden ? LOGISTICS_REFRESH_HIDDEN_MS : LOGISTICS_REFRESH_VISIBLE_MS) {
-  logisticsRefreshTimer = clearRefreshTimer(logisticsRefreshTimer);
-  logisticsRefreshTimer = window.setTimeout(() => {
-    void refreshLogistics();
-  }, delay);
-}
-
-async function refreshOrders({ queueIfBusy = false } = {}) {
+async function refreshOrders() {
   if (isLoadingOrders) {
-    if (queueIfBusy) {
-      pendingOrdersRefresh = true;
-    }
     return;
   }
 
-  ordersRefreshTimer = clearRefreshTimer(ordersRefreshTimer);
   isLoadingOrders = true;
   try {
-    const response = await fetch("/api/dashboard/orders");
+    const response = await fetch("/api/orders");
     if (!response.ok) {
       refreshStatus.textContent = "Falha ao atualizar";
-      return;
+      return false;
     }
 
     const data = await response.json();
     applyOrdersSnapshot(data);
+    return true;
   } catch (error) {
     refreshStatus.textContent = "Falha ao atualizar";
+    return false;
   } finally {
     isLoadingOrders = false;
-
-    if (pendingOrdersRefresh) {
-      pendingOrdersRefresh = false;
-      scheduleOrdersRefresh(0);
-      return;
-    }
-
-    scheduleOrdersRefresh();
   }
 }
 
-async function refreshSummary({ queueIfBusy = false } = {}) {
+async function refreshSummary() {
   if (isLoadingSummary) {
-    if (queueIfBusy) {
-      pendingSummaryRefresh = true;
-    }
     return;
   }
 
-  summaryRefreshTimer = clearRefreshTimer(summaryRefreshTimer);
   isLoadingSummary = true;
   try {
-    const response = await fetch("/api/dashboard/summary");
+    const response = await fetch("/api/summary");
     if (!response.ok) {
       refreshStatus.textContent = "Falha ao atualizar";
       return;
     }
 
     applySummarySnapshot(await response.json());
+    nextSummaryRefreshAt = Date.now() + getSummaryRefreshDelay();
   } catch (error) {
     refreshStatus.textContent = "Falha ao atualizar";
   } finally {
     isLoadingSummary = false;
-
-    if (pendingSummaryRefresh) {
-      pendingSummaryRefresh = false;
-      scheduleSummaryRefresh(0);
-      return;
-    }
-
-    scheduleSummaryRefresh();
   }
 }
 
-async function refreshLogistics({ queueIfBusy = false } = {}) {
-  if (isLoadingLogistics) {
+async function refreshDashboard({ forceSummary = false, queueIfBusy = false } = {}) {
+  if (isLoadingOrders) {
     if (queueIfBusy) {
-      pendingLogisticsRefresh = true;
+      pendingDashboardRefresh = true;
     }
     return;
   }
 
-  logisticsRefreshTimer = clearRefreshTimer(logisticsRefreshTimer);
-  isLoadingLogistics = true;
+  dashboardRefreshTimer = clearRefreshTimer(dashboardRefreshTimer);
   try {
-    const response = await fetch("/api/dashboard/logistics");
-    if (!response.ok) {
-      refreshStatus.textContent = "Falha ao atualizar";
-      return;
+    await refreshOrders();
+    if (forceSummary || Date.now() >= nextSummaryRefreshAt) {
+      await refreshSummary();
     }
-
-    applyLogisticsSnapshot(await response.json());
-  } catch (error) {
-    refreshStatus.textContent = "Falha ao atualizar";
   } finally {
-    isLoadingLogistics = false;
-
-    if (pendingLogisticsRefresh) {
-      pendingLogisticsRefresh = false;
-      scheduleLogisticsRefresh(0);
+    if (pendingDashboardRefresh) {
+      pendingDashboardRefresh = false;
+      scheduleDashboardRefresh(0);
       return;
     }
 
-    scheduleLogisticsRefresh();
+    scheduleDashboardRefresh();
   }
 }
 
@@ -671,30 +721,121 @@ async function refreshShiftHistory() {
   }
 }
 
+function findAndRemoveOrder(stateBucket, code) {
+  const index = stateBucket.findIndex((order) => order.code === code);
+  if (index === -1) {
+    return null;
+  }
+  return stateBucket.splice(index, 1)[0];
+}
+
+function optimisticallyMarkOrderPaid(code) {
+  const nextState = cloneOrdersState();
+  let updated = false;
+
+  const awaitingOrder = findAndRemoveOrder(nextState.awaiting_payment, code);
+  if (awaitingOrder) {
+    awaitingOrder.payment_status = "paid";
+    awaitingOrder.payment_status_label = "Pago";
+    awaitingOrder.status = "new";
+    awaitingOrder.status_label = "Liberado ao bar";
+    nextState.pending.unshift(awaitingOrder);
+    updated = true;
+  }
+
+  for (const bucketName of ["pending", "completed"]) {
+    const bucket = nextState[bucketName];
+    const order = bucket.find((entry) => entry.code === code);
+    if (!order) {
+      continue;
+    }
+    order.payment_status = "paid";
+    order.payment_status_label = "Pago";
+    updated = true;
+  }
+
+  if (updated) {
+    setOrdersState(nextState);
+    renderOrdersState();
+  }
+
+  return updated;
+}
+
+function optimisticallyCompleteOrder(code) {
+  const nextState = cloneOrdersState();
+  const order = findAndRemoveOrder(nextState.pending, code);
+  if (!order) {
+    return false;
+  }
+
+  order.status = "completed";
+  order.status_label = "Concluido";
+  order.completed_at = formatDashboardTimestamp();
+  nextState.completed.unshift(order);
+  setOrdersState(nextState);
+  renderOrdersState();
+  return true;
+}
+
 async function completeOrder(code) {
-  const response = await fetch(`/api/orders/${code}/complete`, { method: "POST" });
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    refreshStatus.textContent = data.error || "Nao foi possivel concluir";
+  if (isOrderBusy(code)) {
     return;
   }
-  await Promise.all([
-    refreshOrders({ queueIfBusy: true }),
-    refreshSummary({ queueIfBusy: true }),
-  ]);
+
+  orderActionInFlight.add(code);
+  renderOrdersState();
+  const wasOptimistic = optimisticallyCompleteOrder(code);
+
+  try {
+    const response = await fetch(`/api/orders/${code}/complete`, { method: "POST" });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      refreshStatus.textContent = data.error || "Nao foi possivel concluir";
+      nextSummaryRefreshAt = 0;
+      void refreshDashboard({ forceSummary: true, queueIfBusy: true });
+      return;
+    }
+
+    nextSummaryRefreshAt = 0;
+    scheduleDashboardRefresh(0);
+    if (!wasOptimistic) {
+      void refreshDashboard({ forceSummary: true, queueIfBusy: true });
+    }
+  } finally {
+    orderActionInFlight.delete(code);
+    renderOrdersState();
+  }
 }
 
 async function payOrder(code) {
-  const response = await fetch(`/api/orders/${code}/pay`, { method: "POST" });
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    refreshStatus.textContent = data.error || "Nao foi possivel registrar o pagamento";
+  if (isOrderBusy(code)) {
     return;
   }
-  await Promise.all([
-    refreshOrders({ queueIfBusy: true }),
-    refreshSummary({ queueIfBusy: true }),
-  ]);
+
+  orderActionInFlight.add(code);
+  renderOrdersState();
+  const wasOptimistic = optimisticallyMarkOrderPaid(code);
+
+  try {
+    const response = await fetch(`/api/orders/${code}/pay`, { method: "POST" });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      refreshStatus.textContent = data.error || "Nao foi possivel registrar o pagamento";
+      nextSummaryRefreshAt = 0;
+      void refreshDashboard({ forceSummary: true, queueIfBusy: true });
+      return;
+    }
+
+    nextSummaryRefreshAt = 0;
+    scheduleDashboardRefresh(0);
+    if (!wasOptimistic) {
+      void refreshDashboard({ forceSummary: true, queueIfBusy: true });
+    }
+  } finally {
+    orderActionInFlight.delete(code);
+    renderOrdersState();
+  }
 }
 
 async function updateInventoryRequest(itemId, payload) {
@@ -912,21 +1053,13 @@ document.addEventListener("keydown", (event) => {
 
 setCloseoutExportLink(null);
 hydrateMoneyDisplays();
-void refreshOrders();
-void refreshSummary();
-void refreshLogistics();
+setPeakTimeValue(document.getElementById("peak-time"), document.getElementById("peak-time")?.textContent || "Sem dados");
+nextSummaryRefreshAt = 0;
+void refreshDashboard({ forceSummary: true });
 void refreshShiftHistory();
 
 document.addEventListener("visibilitychange", () => {
-  if (!isLoadingOrders) {
-    scheduleOrdersRefresh();
-  }
-  if (!isLoadingSummary) {
-    scheduleSummaryRefresh();
-  }
-  if (!isLoadingLogistics) {
-    scheduleLogisticsRefresh();
-  }
+  scheduleDashboardRefresh();
 });
 
 window.addEventListener("resize", () => {
