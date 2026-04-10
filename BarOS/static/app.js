@@ -42,6 +42,8 @@ const pixQrPlaceholder = document.getElementById("pix-qr-placeholder");
 const pixCopyPaste = document.getElementById("pix-copy-paste");
 const pixError = document.getElementById("pix-error");
 const copyPixCodeButton = document.getElementById("copy-pix-code");
+const trackOrderLink = document.getElementById("track-order-link");
+const viewMyOrderLink = document.getElementById("view-my-order");
 
 let checkoutCollapsed = false;
 let checkoutPanelWasCollapsedBeforeModal = false;
@@ -64,6 +66,7 @@ const paymentMethodInstructions = {
 };
 const PENDING_ORDER_STORAGE_KEY = "baros_pending_order_v1";
 const PENDING_ORDER_MAX_AGE_MS = 30 * 60 * 1000;
+const PUBLIC_ORDER_STORAGE_KEY = "baros_public_order_v1";
 
 function isCustomerIdentificationRequired() {
   return Boolean(orderFlowSettings.customerIdentificationRequired);
@@ -174,6 +177,57 @@ function clearPendingOrderDraft() {
     window.sessionStorage?.removeItem(PENDING_ORDER_STORAGE_KEY);
   } catch (error) {
     console.error(error);
+  }
+}
+
+function readPublicOrderRecord() {
+  try {
+    const raw = window.localStorage?.getItem(PUBLIC_ORDER_STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+    const record = JSON.parse(raw);
+    if (!record?.public_token || !record?.public_url) {
+      window.localStorage?.removeItem(PUBLIC_ORDER_STORAGE_KEY);
+      return null;
+    }
+    return record;
+  } catch (error) {
+    console.error(error);
+    return null;
+  }
+}
+
+function savePublicOrderRecord(order) {
+  if (!order?.public_token || !order?.public_url) {
+    return;
+  }
+  try {
+    window.localStorage?.setItem(
+      PUBLIC_ORDER_STORAGE_KEY,
+      JSON.stringify({
+        public_token: order.public_token,
+        public_url: order.public_url,
+        code: order.code,
+        order_number: order.order_number,
+        updated_at: Date.now(),
+      }),
+    );
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+function syncOrderRecoveryLink(order = null) {
+  const record = order?.public_url ? order : readPublicOrderRecord();
+  const href = record?.public_url || "#";
+  trackOrderLink?.classList.toggle("hidden", !record?.public_url);
+  viewMyOrderLink?.classList.toggle("hidden", !record?.public_url);
+  if (trackOrderLink) {
+    trackOrderLink.href = href;
+  }
+  if (viewMyOrderLink) {
+    viewMyOrderLink.href = href;
   }
 }
 
@@ -507,6 +561,7 @@ function populatePixConfirmation(order) {
     pixQrPlaceholder.textContent = "PIX";
   }
   toggleConfirmationPayment(true);
+  syncOrderRecoveryLink(order);
 }
 
 async function submitOrder() {
@@ -595,6 +650,8 @@ async function submitOrder() {
   }
 
   clearPendingOrderDraft();
+  savePublicOrderRecord(data.order);
+  syncOrderRecoveryLink(data.order);
   closeCheckoutModal({ restorePanel: false });
   resetCart();
 
@@ -698,6 +755,7 @@ document.addEventListener("keydown", (event) => {
 });
 
 restorePendingOrderDraft();
+syncOrderRecoveryLink();
 applyResponsiveCheckoutMode();
 buildSummary();
 updateCheckoutInstruction();
