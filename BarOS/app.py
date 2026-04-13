@@ -405,7 +405,7 @@ if SENTRY_DSN:
     )
 
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder="static")
 app.config["SECRET_KEY"] = build_runtime_secret_key()
 app.config["MAX_CONTENT_LENGTH"] = MAX_PRODUCT_IMAGE_SIZE_BYTES
 app.config["SESSION_COOKIE_HTTPONLY"] = True
@@ -422,7 +422,7 @@ def inject_template_defaults():
     return {"default_product_image_url": DEFAULT_PRODUCT_IMAGE_URL}
 
 
-@app.get("/favicon.ico")
+@app.route("/favicon.ico")
 def favicon():
     return send_from_directory(app.static_folder, "favicon.ico", mimetype="image/vnd.microsoft.icon")
 
