@@ -22,7 +22,7 @@ import sentry_sdk
 from dotenv import load_dotenv
 from psycopg import IntegrityError, connect
 from psycopg.rows import dict_row
-from flask import Flask, Response, abort, g, jsonify, redirect, render_template, request, session, url_for
+from flask import Flask, Response, abort, g, jsonify, redirect, render_template, request, send_from_directory, session, url_for
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
@@ -420,6 +420,11 @@ app.config["SESSION_COOKIE_SECURE"] = (
 @app.context_processor
 def inject_template_defaults():
     return {"default_product_image_url": DEFAULT_PRODUCT_IMAGE_URL}
+
+
+@app.get("/favicon.ico")
+def favicon():
+    return send_from_directory(app.static_folder, "favicon.ico", mimetype="image/vnd.microsoft.icon")
 
 
 @app.get("/health")
