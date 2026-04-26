@@ -263,6 +263,9 @@
     "customerIdentificationRequired": order_flow_settings.customer_identification_required,
     "customerIdentificationVisible": order_flow_settings.customer_identification_visible
   }|tojson }};
+  window.BAROS_ENDPOINTS = {{ {
+    "createOrder": create_order_url
+  }|tojson }};
   window.BAROS_MENU = {{ menu|tojson }};
 </script>
 <script src="{{ url_for('static', filename='app.js') }}"></script>

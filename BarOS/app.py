@@ -70,6 +70,10 @@ LEGACY_SEED_ADMIN_PASSWORD = os.getenv("BAROS_PASSWORD") or ""
 LEGACY_SEED_OPERATOR_USERNAME = (os.getenv("BAROS_OPERATOR_USERNAME") or "").strip()
 LEGACY_SEED_OPERATOR_PASSWORD = os.getenv("BAROS_OPERATOR_PASSWORD") or ""
 DEFAULT_ORDER_SOURCE = "menu-digital"
+DEFAULT_TENANT_NAME = "Default BarOS"
+DEFAULT_TENANT_SLUG = "default"
+DEFAULT_TENANT_STATUS = "active"
+DEFAULT_TENANT_PLAN = "legacy"
 BAROS_PIX_PROVIDER = (os.getenv("BAROS_PIX_PROVIDER") or "baros-pix-simulado").strip() or "baros-pix-simulado"
 BAROS_PIX_WEBHOOK_SECRET = (os.getenv("BAROS_PIX_WEBHOOK_SECRET") or "").strip()
 PIX_PAYMENT_TTL_MINUTES = max(1, int((os.getenv("BAROS_PIX_TTL_MINUTES") or "10").strip() or "10"))
@@ -554,7 +558,11 @@ def invalidate_snapshot_cache(*prefixes: str) -> None:
         if not prefixes:
             _SNAPSHOT_CACHE.clear()
             return
-        stale_keys = [key for key in _SNAPSHOT_CACHE if any(key.startswith(prefix) for prefix in prefixes)]
+        stale_keys = [
+            key
+            for key in _SNAPSHOT_CACHE
+            if any(key.startswith(prefix) or re.match(rf"^tenant:\d+:{re.escape(prefix)}", key) for prefix in prefixes)
+        ]
         for key in stale_keys:
             _SNAPSHOT_CACHE.pop(key, None)
 
@@ -848,6 +856,109 @@ def safe_rollback(db: DatabaseConnection) -> None:
         pass
 
 
+def normalize_tenant_slug(raw_value: str | None) -> str:
+    value = sanitize_optional_text(raw_value, limit=64).lower()
+    if not value:
+        return DEFAULT_TENANT_SLUG
+    normalized = re.sub(r"[^a-z0-9-]+", "-", value).strip("-")
+    return normalized or DEFAULT_TENANT_SLUG
+
+
+def get_tenant_by_slug(slug: str, db: DatabaseConnection | None = None) -> DbRow | None:
+    connection = db or get_db()
+    return connection.execute(
+        """
+        SELECT id, name, slug, status, plan, created_at
+        FROM tenants
+        WHERE slug = ?
+        """,
+        (normalize_tenant_slug(slug),),
+    ).fetchone()
+
+
+def get_tenant_by_id(tenant_id: int, db: DatabaseConnection | None = None) -> DbRow | None:
+    connection = db or get_db()
+    return connection.execute(
+        """
+        SELECT id, name, slug, status, plan, created_at
+        FROM tenants
+        WHERE id = ?
+        """,
+        (tenant_id,),
+    ).fetchone()
+
+
+def ensure_default_tenant(db: DatabaseConnection) -> DbRow:
+    row = db.execute(
+        """
+        INSERT INTO tenants (name, slug, status, plan, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT (slug) DO UPDATE SET
+            name = COALESCE(NULLIF(TRIM(tenants.name), ''), EXCLUDED.name),
+            status = COALESCE(NULLIF(TRIM(tenants.status), ''), EXCLUDED.status),
+            plan = COALESCE(NULLIF(TRIM(tenants.plan), ''), EXCLUDED.plan)
+        RETURNING id, name, slug, status, plan, created_at
+        """,
+        (
+            DEFAULT_TENANT_NAME,
+            DEFAULT_TENANT_SLUG,
+            DEFAULT_TENANT_STATUS,
+            DEFAULT_TENANT_PLAN,
+            utc_now_iso(),
+        ),
+    ).fetchone()
+    if not row:
+        raise RuntimeError("Nao foi possivel garantir o tenant padrao.")
+    return row
+
+
+def get_default_tenant(db: DatabaseConnection | None = None) -> DbRow:
+    connection = db or get_db()
+    return ensure_default_tenant(connection)
+
+
+def resolve_current_tenant() -> DbRow:
+    cached_tenant = getattr(g, "current_tenant", None)
+    if cached_tenant is not None:
+        return cached_tenant
+
+    slug = None
+    if request.view_args:
+        slug = request.view_args.get("tenant_slug")
+    if not slug and is_staff_authenticated():
+        slug = session.get("bar_tenant_slug")
+    g.current_tenant_route_slug = normalize_tenant_slug(slug) if slug else None
+    tenant = get_tenant_by_slug(slug or DEFAULT_TENANT_SLUG)
+    if tenant is None or tenant["status"] != "active":
+        abort(404)
+    g.current_tenant = tenant
+    return tenant
+
+
+def current_tenant_id() -> int:
+    return int(resolve_current_tenant()["id"])
+
+
+def current_tenant_slug() -> str:
+    return resolve_current_tenant()["slug"]
+
+
+def current_tenant_url_slug() -> str | None:
+    resolve_current_tenant()
+    return getattr(g, "current_tenant_route_slug", None)
+
+
+def bind_staff_tenant_context() -> DbRow:
+    tenant = resolve_current_tenant()
+    if is_staff_authenticated():
+        session["bar_tenant_slug"] = tenant["slug"]
+    return tenant
+
+
+def tenant_cache_key(cache_key: str) -> str:
+    return f"tenant:{current_tenant_id()}:{cache_key}"
+
+
 def sqlite_table_exists(db: sqlite3.Connection, table_name: str) -> bool:
     row = db.execute(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
@@ -1003,8 +1114,21 @@ def validate_staff_bootstrap(db: DatabaseConnection) -> None:
 def create_core_tables(db: DatabaseConnection) -> None:
     db.execute(
         """
+        CREATE TABLE IF NOT EXISTS tenants (
+            id BIGSERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            slug TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL DEFAULT 'active',
+            plan TEXT NOT NULL DEFAULT 'legacy',
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    db.execute(
+        """
         CREATE TABLE IF NOT EXISTS bebidas (
             id BIGSERIAL PRIMARY KEY,
+            tenant_id BIGINT REFERENCES tenants(id),
             nome TEXT NOT NULL UNIQUE,
             preco_venda DOUBLE PRECISION NOT NULL,
             custo_estimado DOUBLE PRECISION NOT NULL
@@ -1015,6 +1139,7 @@ def create_core_tables(db: DatabaseConnection) -> None:
         """
         CREATE TABLE IF NOT EXISTS pedidos (
             id BIGSERIAL PRIMARY KEY,
+            tenant_id BIGINT REFERENCES tenants(id),
             codigo_retirada TEXT NOT NULL UNIQUE,
             horario_pedido TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'pending',
@@ -1026,6 +1151,7 @@ def create_core_tables(db: DatabaseConnection) -> None:
         """
         CREATE TABLE IF NOT EXISTS turnos (
             id BIGSERIAL PRIMARY KEY,
+            tenant_id BIGINT REFERENCES tenants(id),
             aberto_em TEXT NOT NULL,
             fechado_em TEXT,
             status TEXT NOT NULL DEFAULT 'open',
@@ -1037,6 +1163,7 @@ def create_core_tables(db: DatabaseConnection) -> None:
         """
         CREATE TABLE IF NOT EXISTS itens_pedido (
             id BIGSERIAL PRIMARY KEY,
+            tenant_id BIGINT REFERENCES tenants(id),
             pedido_id BIGINT NOT NULL REFERENCES pedidos(id) ON DELETE CASCADE,
             bebida_id BIGINT NOT NULL REFERENCES bebidas(id),
             quantidade INTEGER NOT NULL,
@@ -1048,6 +1175,7 @@ def create_core_tables(db: DatabaseConnection) -> None:
         """
         CREATE TABLE IF NOT EXISTS combo_items (
             id BIGSERIAL PRIMARY KEY,
+            tenant_id BIGINT REFERENCES tenants(id),
             combo_beverage_id BIGINT NOT NULL REFERENCES bebidas(id) ON DELETE CASCADE,
             component_beverage_id BIGINT NOT NULL REFERENCES bebidas(id),
             quantity INTEGER NOT NULL DEFAULT 1,
@@ -1059,6 +1187,7 @@ def create_core_tables(db: DatabaseConnection) -> None:
         """
         CREATE TABLE IF NOT EXISTS inventory_items (
             id BIGSERIAL PRIMARY KEY,
+            tenant_id BIGINT REFERENCES tenants(id),
             name TEXT NOT NULL UNIQUE,
             category TEXT NOT NULL,
             unit TEXT NOT NULL,
@@ -1073,6 +1202,7 @@ def create_core_tables(db: DatabaseConnection) -> None:
         """
         CREATE TABLE IF NOT EXISTS shift_notes (
             id BIGSERIAL PRIMARY KEY,
+            tenant_id BIGINT REFERENCES tenants(id),
             title TEXT NOT NULL,
             body TEXT NOT NULL,
             priority TEXT NOT NULL DEFAULT 'media',
@@ -1099,6 +1229,7 @@ def create_core_tables(db: DatabaseConnection) -> None:
         """
         CREATE TABLE IF NOT EXISTS preorder_settings (
             id INTEGER PRIMARY KEY CHECK (id = 1),
+            tenant_id BIGINT REFERENCES tenants(id),
             preorder_start_time TEXT,
             preorder_end_time TEXT,
             customer_identification_mode TEXT NOT NULL DEFAULT 'optional',
@@ -1143,9 +1274,14 @@ def apply_schema_updates(db: DatabaseConnection) -> None:
         "bebidas": set(get_table_columns(db, "bebidas")),
         "pedidos": set(get_table_columns(db, "pedidos")),
         "itens_pedido": set(get_table_columns(db, "itens_pedido")),
+        "turnos": set(get_table_columns(db, "turnos")),
+        "combo_items": set(get_table_columns(db, "combo_items")),
+        "inventory_items": set(get_table_columns(db, "inventory_items")),
+        "shift_notes": set(get_table_columns(db, "shift_notes")),
         "preorder_settings": set(get_table_columns(db, "preorder_settings")),
     }
     column_updates = [
+        ("bebidas", "tenant_id", "ALTER TABLE bebidas ADD COLUMN tenant_id BIGINT REFERENCES tenants(id)"),
         ("bebidas", "categoria", "ALTER TABLE bebidas ADD COLUMN categoria TEXT"),
         ("bebidas", "descricao", "ALTER TABLE bebidas ADD COLUMN descricao TEXT"),
         ("bebidas", "tempo_preparo", "ALTER TABLE bebidas ADD COLUMN tempo_preparo TEXT"),
@@ -1153,6 +1289,7 @@ def apply_schema_updates(db: DatabaseConnection) -> None:
         ("bebidas", "is_active", "ALTER TABLE bebidas ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1"),
         ("bebidas", "is_combo", "ALTER TABLE bebidas ADD COLUMN is_combo INTEGER NOT NULL DEFAULT 0"),
         ("bebidas", "max_active_orders", "ALTER TABLE bebidas ADD COLUMN max_active_orders INTEGER"),
+        ("pedidos", "tenant_id", "ALTER TABLE pedidos ADD COLUMN tenant_id BIGINT REFERENCES tenants(id)"),
         ("pedidos", "turno_id", "ALTER TABLE pedidos ADD COLUMN turno_id BIGINT"),
         ("pedidos", "customer_name", "ALTER TABLE pedidos ADD COLUMN customer_name TEXT"),
         ("pedidos", "table_label", "ALTER TABLE pedidos ADD COLUMN table_label TEXT"),
@@ -1178,10 +1315,16 @@ def apply_schema_updates(db: DatabaseConnection) -> None:
         ("pedidos", "pickup_code", "ALTER TABLE pedidos ADD COLUMN pickup_code TEXT"),
         ("pedidos", "webhook_received_at", "ALTER TABLE pedidos ADD COLUMN webhook_received_at TEXT"),
         ("pedidos", "payment_confirmed_by", "ALTER TABLE pedidos ADD COLUMN payment_confirmed_by TEXT"),
+        ("itens_pedido", "tenant_id", "ALTER TABLE itens_pedido ADD COLUMN tenant_id BIGINT REFERENCES tenants(id)"),
         ("itens_pedido", "item_name_snapshot", "ALTER TABLE itens_pedido ADD COLUMN item_name_snapshot TEXT"),
         ("itens_pedido", "item_type_snapshot", "ALTER TABLE itens_pedido ADD COLUMN item_type_snapshot TEXT"),
         ("itens_pedido", "unit_price_snapshot", "ALTER TABLE itens_pedido ADD COLUMN unit_price_snapshot DOUBLE PRECISION"),
         ("itens_pedido", "unit_cost_snapshot", "ALTER TABLE itens_pedido ADD COLUMN unit_cost_snapshot DOUBLE PRECISION"),
+        ("turnos", "tenant_id", "ALTER TABLE turnos ADD COLUMN tenant_id BIGINT REFERENCES tenants(id)"),
+        ("combo_items", "tenant_id", "ALTER TABLE combo_items ADD COLUMN tenant_id BIGINT REFERENCES tenants(id)"),
+        ("inventory_items", "tenant_id", "ALTER TABLE inventory_items ADD COLUMN tenant_id BIGINT REFERENCES tenants(id)"),
+        ("shift_notes", "tenant_id", "ALTER TABLE shift_notes ADD COLUMN tenant_id BIGINT REFERENCES tenants(id)"),
+        ("preorder_settings", "tenant_id", "ALTER TABLE preorder_settings ADD COLUMN tenant_id BIGINT REFERENCES tenants(id)"),
         (
             "preorder_settings",
             "customer_identification_mode",
@@ -1194,12 +1337,29 @@ def apply_schema_updates(db: DatabaseConnection) -> None:
             table_columns[table_name].add(column_name)
 
     table_indexes = {
+        "tenants": get_table_indexes(db, "tenants"),
+        "bebidas": get_table_indexes(db, "bebidas"),
         "pedidos": get_table_indexes(db, "pedidos"),
         "turnos": get_table_indexes(db, "turnos"),
         "itens_pedido": get_table_indexes(db, "itens_pedido"),
+        "combo_items": get_table_indexes(db, "combo_items"),
+        "inventory_items": get_table_indexes(db, "inventory_items"),
+        "shift_notes": get_table_indexes(db, "shift_notes"),
+        "preorder_settings": get_table_indexes(db, "preorder_settings"),
         "payment_webhook_events": get_table_indexes(db, "payment_webhook_events"),
     }
     index_updates = [
+        ("tenants", "idx_tenants_slug", "CREATE UNIQUE INDEX idx_tenants_slug ON tenants(slug)"),
+        ("bebidas", "idx_bebidas_tenant_active", "CREATE INDEX idx_bebidas_tenant_active ON bebidas(tenant_id, is_active, is_combo, nome)"),
+        ("bebidas", "idx_bebidas_tenant_id", "CREATE INDEX idx_bebidas_tenant_id ON bebidas(tenant_id, id)"),
+        ("pedidos", "idx_pedidos_tenant_codigo", "CREATE INDEX idx_pedidos_tenant_codigo ON pedidos(tenant_id, codigo_retirada)"),
+        ("pedidos", "idx_pedidos_tenant_request_id", "CREATE INDEX idx_pedidos_tenant_request_id ON pedidos(tenant_id, request_id)"),
+        ("pedidos", "idx_pedidos_tenant_public_token", "CREATE INDEX idx_pedidos_tenant_public_token ON pedidos(tenant_id, public_token)"),
+        (
+            "pedidos",
+            "idx_pedidos_tenant_shift_status",
+            "CREATE INDEX idx_pedidos_tenant_shift_status ON pedidos(tenant_id, turno_id, status, horario_pedido DESC)",
+        ),
         ("pedidos", "idx_pedidos_request_id", "CREATE UNIQUE INDEX idx_pedidos_request_id ON pedidos(request_id)"),
         (
             "pedidos",
@@ -1221,8 +1381,14 @@ def apply_schema_updates(db: DatabaseConnection) -> None:
             "idx_pedidos_provider_payment_id",
             "CREATE INDEX idx_pedidos_provider_payment_id ON pedidos(provider_payment_id)",
         ),
+        ("turnos", "idx_turnos_tenant_status_id", "CREATE INDEX idx_turnos_tenant_status_id ON turnos(tenant_id, status, id DESC)"),
         ("turnos", "idx_turnos_status_id", "CREATE INDEX idx_turnos_status_id ON turnos(status, id DESC)"),
+        ("itens_pedido", "idx_itens_pedido_tenant_pedido", "CREATE INDEX idx_itens_pedido_tenant_pedido ON itens_pedido(tenant_id, pedido_id)"),
         ("itens_pedido", "idx_itens_pedido_pedido_id", "CREATE INDEX idx_itens_pedido_pedido_id ON itens_pedido(pedido_id)"),
+        ("combo_items", "idx_combo_items_tenant_combo", "CREATE INDEX idx_combo_items_tenant_combo ON combo_items(tenant_id, combo_beverage_id)"),
+        ("inventory_items", "idx_inventory_items_tenant_name", "CREATE INDEX idx_inventory_items_tenant_name ON inventory_items(tenant_id, name)"),
+        ("shift_notes", "idx_shift_notes_tenant_status", "CREATE INDEX idx_shift_notes_tenant_status ON shift_notes(tenant_id, status, created_at DESC)"),
+        ("preorder_settings", "idx_preorder_settings_tenant", "CREATE INDEX idx_preorder_settings_tenant ON preorder_settings(tenant_id)"),
         (
             "payment_webhook_events",
             "idx_payment_webhook_events_provider_event",
@@ -1236,15 +1402,17 @@ def apply_schema_updates(db: DatabaseConnection) -> None:
 
 
 def seed_bootstrap_data(db: DatabaseConnection) -> None:
-    beverages_total = db.execute("SELECT COUNT(*) AS total FROM bebidas").fetchone()["total"]
-    inventory_total = db.execute("SELECT COUNT(*) AS total FROM inventory_items").fetchone()["total"]
-    notes_total = db.execute("SELECT COUNT(*) AS total FROM shift_notes").fetchone()["total"]
+    tenant_id = get_default_tenant(db)["id"]
+    beverages_total = db.execute("SELECT COUNT(*) AS total FROM bebidas WHERE tenant_id = ?", (tenant_id,)).fetchone()["total"]
+    inventory_total = db.execute("SELECT COUNT(*) AS total FROM inventory_items WHERE tenant_id = ?", (tenant_id,)).fetchone()["total"]
+    notes_total = db.execute("SELECT COUNT(*) AS total FROM shift_notes WHERE tenant_id = ?", (tenant_id,)).fetchone()["total"]
 
     if ENABLE_BOOTSTRAP_SEED and beverages_total == 0:
         for beverage in BEVERAGE_SEED:
             db.execute(
                 """
                 INSERT INTO bebidas (
+                    tenant_id,
                     nome,
                     preco_venda,
                     custo_estimado,
@@ -1256,6 +1424,7 @@ def seed_bootstrap_data(db: DatabaseConnection) -> None:
                     is_combo
                 )
                 VALUES (
+                    :tenant_id,
                     :nome,
                     :preco_venda,
                     :custo_estimado,
@@ -1267,13 +1436,13 @@ def seed_bootstrap_data(db: DatabaseConnection) -> None:
                     0
                 )
                 """,
-                {**beverage, "image_url": ""},
+                {**beverage, "tenant_id": tenant_id, "image_url": ""},
             )
 
     for beverage in BEVERAGE_SEED:
         exists = db.execute(
-            "SELECT id, categoria, descricao, tempo_preparo, is_active, is_combo FROM bebidas WHERE nome = ?",
-            (beverage["nome"],),
+            "SELECT id, categoria, descricao, tempo_preparo, is_active, is_combo FROM bebidas WHERE tenant_id = ? AND nome = ?",
+            (tenant_id, beverage["nome"]),
         ).fetchone()
         if not exists:
             continue
@@ -1286,13 +1455,14 @@ def seed_bootstrap_data(db: DatabaseConnection) -> None:
                 tempo_preparo = COALESCE(NULLIF(TRIM(tempo_preparo), ''), ?),
                 is_active = COALESCE(is_active, 1),
                 is_combo = COALESCE(is_combo, 0)
-            WHERE id = ?
+            WHERE id = ? AND tenant_id = ?
             """,
             (
                 beverage["category"],
                 beverage["description"],
                 beverage["prep_time"],
                 exists["id"],
+                tenant_id,
             ),
         )
 
@@ -1300,20 +1470,20 @@ def seed_bootstrap_data(db: DatabaseConnection) -> None:
         for item in LOGISTICS_SEED:
             db.execute(
                 """
-                INSERT INTO inventory_items (name, category, unit, stock_level, par_level, status, updated_at)
-                VALUES (:name, :category, :unit, :stock_level, :par_level, :status, :updated_at)
+                INSERT INTO inventory_items (tenant_id, name, category, unit, stock_level, par_level, status, updated_at)
+                VALUES (:tenant_id, :name, :category, :unit, :stock_level, :par_level, :status, :updated_at)
                 """,
-                {**item, "updated_at": utc_now_iso()},
+                {**item, "tenant_id": tenant_id, "updated_at": utc_now_iso()},
             )
 
     if ENABLE_BOOTSTRAP_SEED and notes_total == 0:
         for note in SHIFT_NOTES_SEED:
             db.execute(
                 """
-                INSERT INTO shift_notes (title, body, priority, status, created_at)
-                VALUES (:title, :body, :priority, :status, :created_at)
+                INSERT INTO shift_notes (tenant_id, title, body, priority, status, created_at)
+                VALUES (:tenant_id, :title, :body, :priority, :status, :created_at)
                 """,
-                {**note, "created_at": utc_now_iso()},
+                {**note, "tenant_id": tenant_id, "created_at": utc_now_iso()},
             )
 
     for account in build_seed_staff_accounts():
@@ -1326,66 +1496,96 @@ def seed_bootstrap_data(db: DatabaseConnection) -> None:
         )
 
 
-def ensure_open_shift(db: DatabaseConnection) -> int:
-    open_shift = db.execute("SELECT id FROM turnos WHERE status = 'open' ORDER BY id DESC LIMIT 1").fetchone()
+def ensure_open_shift(db: DatabaseConnection, tenant_id: int | None = None) -> int:
+    tenant_id = tenant_id or current_tenant_id()
+    open_shift = db.execute(
+        "SELECT id FROM turnos WHERE tenant_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1",
+        (tenant_id,),
+    ).fetchone()
     if open_shift:
         return open_shift["id"]
 
     created_shift = db.execute(
         """
-        INSERT INTO turnos (aberto_em, status)
-        VALUES (?, 'open')
+        INSERT INTO turnos (tenant_id, aberto_em, status)
+        VALUES (?, ?, 'open')
         RETURNING id
         """,
-        (utc_now_iso(),),
+        (tenant_id, utc_now_iso()),
     ).fetchone()
     return created_shift["id"]
 
 
-def backfill_existing_rows(db: DatabaseConnection, open_shift_id: int) -> None:
+def backfill_existing_rows(db: DatabaseConnection, open_shift_id: int, tenant_id: int) -> None:
+    for table_name in (
+        "bebidas",
+        "pedidos",
+        "itens_pedido",
+        "turnos",
+        "combo_items",
+        "inventory_items",
+        "shift_notes",
+        "preorder_settings",
+    ):
+        db.execute(
+            f"UPDATE {table_name} SET tenant_id = ? WHERE tenant_id IS NULL",
+            (tenant_id,),
+        )
     db.execute(
-        "UPDATE pedidos SET turno_id = ? WHERE turno_id IS NULL",
-        (open_shift_id,),
+        "UPDATE pedidos SET turno_id = ? WHERE tenant_id = ? AND turno_id IS NULL",
+        (open_shift_id, tenant_id),
     )
     db.execute(
-        "UPDATE pedidos SET customer_name = 'Cliente' WHERE customer_name IS NULL OR TRIM(customer_name) = ''"
+        "UPDATE pedidos SET customer_name = 'Cliente' WHERE tenant_id = ? AND (customer_name IS NULL OR TRIM(customer_name) = '')",
+        (tenant_id,),
     )
     db.execute(
-        "UPDATE pedidos SET table_label = 'Retirada' WHERE table_label IS NULL OR TRIM(table_label) = ''"
+        "UPDATE pedidos SET table_label = 'Retirada' WHERE tenant_id = ? AND (table_label IS NULL OR TRIM(table_label) = '')",
+        (tenant_id,),
     )
     db.execute(
-        "UPDATE pedidos SET source = ? WHERE source IS NULL OR TRIM(source) = ''",
-        (DEFAULT_ORDER_SOURCE,),
+        "UPDATE pedidos SET source = ? WHERE tenant_id = ? AND (source IS NULL OR TRIM(source) = '')",
+        (DEFAULT_ORDER_SOURCE, tenant_id),
     )
     db.execute(
-        "UPDATE pedidos SET status = 'new' WHERE status IS NULL OR status = '' OR status = 'pending'"
+        "UPDATE pedidos SET status = 'new' WHERE tenant_id = ? AND (status IS NULL OR status = '' OR status = 'pending')",
+        (tenant_id,),
     )
     db.execute(
-        "UPDATE pedidos SET payment_method = 'counter' WHERE payment_method IS NULL OR TRIM(payment_method) = ''"
+        "UPDATE pedidos SET payment_method = 'counter' WHERE tenant_id = ? AND (payment_method IS NULL OR TRIM(payment_method) = '')",
+        (tenant_id,),
     )
     db.execute(
-        "UPDATE pedidos SET payment_status = 'pending' WHERE payment_status IS NULL OR TRIM(payment_status) = ''"
+        "UPDATE pedidos SET payment_status = 'pending' WHERE tenant_id = ? AND (payment_status IS NULL OR TRIM(payment_status) = '')",
+        (tenant_id,),
     )
     db.execute(
-        "UPDATE pedidos SET order_type = 'pista' WHERE order_type IS NULL OR TRIM(order_type) = '' OR order_type = 'bistro'"
+        "UPDATE pedidos SET order_type = 'pista' WHERE tenant_id = ? AND (order_type IS NULL OR TRIM(order_type) = '' OR order_type = 'bistro')",
+        (tenant_id,),
     )
     db.execute(
         f"""
         UPDATE pedidos
         SET status = '{AWAITING_PAYMENT_STATUS}'
-        WHERE payment_method = 'pix'
+        WHERE tenant_id = ?
+          AND payment_method = 'pix'
           AND COALESCE(payment_status, 'pending') != 'paid'
           AND status IN ('new', 'pending')
-        """
+        """,
+        (tenant_id,),
     )
     db.execute(
         """
         UPDATE pedidos
         SET order_number = codigo_retirada
-        WHERE order_number IS NULL
-           OR TRIM(order_number) = ''
-           OR order_number != codigo_retirada
-        """
+        WHERE tenant_id = ?
+          AND (
+              order_number IS NULL
+              OR TRIM(order_number) = ''
+              OR order_number != codigo_retirada
+          )
+        """,
+        (tenant_id,),
     )
     db.execute(
         """
@@ -1396,7 +1596,9 @@ def backfill_existing_rows(db: DatabaseConnection, open_shift_id: int) -> None:
             imagem_url = COALESCE(imagem_url, ''),
             is_active = COALESCE(is_active, 1),
             is_combo = COALESCE(is_combo, 0)
-        """
+        WHERE tenant_id = ?
+        """,
+        (tenant_id,),
     )
     db.execute(
         """
@@ -1405,9 +1607,12 @@ def backfill_existing_rows(db: DatabaseConnection, open_shift_id: int) -> None:
             SELECT bebidas.nome
             FROM bebidas
             WHERE bebidas.id = itens_pedido.bebida_id
+              AND bebidas.tenant_id = itens_pedido.tenant_id
         )
-        WHERE item_name_snapshot IS NULL OR TRIM(item_name_snapshot) = ''
-        """
+        WHERE tenant_id = ?
+          AND (item_name_snapshot IS NULL OR TRIM(item_name_snapshot) = '')
+        """,
+        (tenant_id,),
     )
     db.execute(
         """
@@ -1418,12 +1623,15 @@ def backfill_existing_rows(db: DatabaseConnection, open_shift_id: int) -> None:
                     SELECT bebidas.is_combo
                     FROM bebidas
                     WHERE bebidas.id = itens_pedido.bebida_id
+                      AND bebidas.tenant_id = itens_pedido.tenant_id
                 ) = 1 THEN 'combo'
                 ELSE 'product'
             END
         )
-        WHERE item_type_snapshot IS NULL OR TRIM(item_type_snapshot) = ''
-        """
+        WHERE tenant_id = ?
+          AND (item_type_snapshot IS NULL OR TRIM(item_type_snapshot) = '')
+        """,
+        (tenant_id,),
     )
     db.execute(
         """
@@ -1432,8 +1640,10 @@ def backfill_existing_rows(db: DatabaseConnection, open_shift_id: int) -> None:
             CAST((subtotal / CASE WHEN quantidade > 0 THEN quantidade ELSE 1 END) AS numeric),
             2
         )
-        WHERE unit_price_snapshot IS NULL
-        """
+        WHERE tenant_id = ?
+          AND unit_price_snapshot IS NULL
+        """,
+        (tenant_id,),
     )
     db.execute(
         """
@@ -1442,9 +1652,12 @@ def backfill_existing_rows(db: DatabaseConnection, open_shift_id: int) -> None:
             SELECT bebidas.custo_estimado
             FROM bebidas
             WHERE bebidas.id = itens_pedido.bebida_id
+              AND bebidas.tenant_id = itens_pedido.tenant_id
         )
-        WHERE unit_cost_snapshot IS NULL
-        """
+        WHERE tenant_id = ?
+          AND unit_cost_snapshot IS NULL
+        """,
+        (tenant_id,),
     )
 
 
@@ -1453,10 +1666,11 @@ def init_db() -> None:
     try:
         create_core_tables(db)
         apply_schema_updates(db)
+        default_tenant = ensure_default_tenant(db)
         import_legacy_sqlite_if_needed(db)
+        open_shift_id = ensure_open_shift(db, default_tenant["id"])
+        backfill_existing_rows(db, open_shift_id, default_tenant["id"])
         seed_bootstrap_data(db)
-        open_shift_id = ensure_open_shift(db)
-        backfill_existing_rows(db, open_shift_id)
         validate_staff_bootstrap(db)
         db.commit()
     except Exception:
@@ -1725,11 +1939,12 @@ def upsert_operator_account(form_data) -> str:
 def generate_order_code() -> str:
     alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
     db = get_db()
+    tenant_id = current_tenant_id()
     while True:
         code = "".join(secrets.choice(alphabet) for _ in range(5))
         exists = db.execute(
-            "SELECT 1 FROM pedidos WHERE codigo_retirada = ?",
-            (code,),
+            "SELECT 1 FROM pedidos WHERE tenant_id = ? AND codigo_retirada = ?",
+            (tenant_id, code),
         ).fetchone()
         if not exists:
             return code
@@ -1745,9 +1960,10 @@ def add_minutes_to_iso(value: str, minutes: int) -> str:
 
 def generate_public_order_token() -> str:
     db = get_db()
+    tenant_id = current_tenant_id()
     while True:
         token = secrets.token_urlsafe(24)
-        exists = db.execute("SELECT 1 FROM pedidos WHERE public_token = ?", (token,)).fetchone()
+        exists = db.execute("SELECT 1 FROM pedidos WHERE tenant_id = ? AND public_token = ?", (tenant_id, token)).fetchone()
         if not exists:
             return token
 
@@ -1755,21 +1971,28 @@ def generate_public_order_token() -> str:
 def generate_pickup_code() -> str:
     alphabet = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
     db = get_db()
+    tenant_id = current_tenant_id()
     while True:
         code = "".join(secrets.choice(alphabet) for _ in range(6))
         exists = db.execute(
-            "SELECT 1 FROM pedidos WHERE pickup_code = ? AND status != 'completed'",
-            (code,),
+            "SELECT 1 FROM pedidos WHERE tenant_id = ? AND pickup_code = ? AND status != 'completed'",
+            (tenant_id, code),
         ).fetchone()
         if not exists:
             return code
 
 
 def build_public_order_url(public_token: str) -> str:
+    tenant_url_slug = current_tenant_url_slug()
+    if tenant_url_slug:
+        return url_for("tenant_public_order_page", tenant_slug=tenant_url_slug, public_token=public_token)
     return url_for("public_order_page", public_token=public_token)
 
 
 def build_public_order_status_url(public_token: str) -> str:
+    tenant_url_slug = current_tenant_url_slug()
+    if tenant_url_slug:
+        return url_for("get_tenant_public_order_status", tenant_slug=tenant_url_slug, public_token=public_token)
     return url_for("get_public_order_status", public_token=public_token)
 
 
@@ -1881,9 +2104,10 @@ def create_order_audit_log(order_id: int, event_type: str, actor: str, details: 
     )
 
 
-def expire_pending_pix_order(order_id: int) -> DbRow | None:
+def expire_pending_pix_order(order_id: int, tenant_id: int | None = None) -> DbRow | None:
     db = get_db()
     expired_at = utc_now_iso()
+    tenant_id = tenant_id or current_tenant_id()
     updated = db.execute(
         """
         UPDATE pedidos
@@ -1893,12 +2117,13 @@ def expire_pending_pix_order(order_id: int) -> DbRow | None:
             expires_at = COALESCE(expires_at, pix_expires_at),
             webhook_received_at = COALESCE(webhook_received_at, ?)
         WHERE id = ?
+          AND tenant_id = ?
           AND payment_method = 'pix'
           AND status != 'completed'
           AND COALESCE(payment_status, 'pending') != 'paid'
         RETURNING id
         """,
-        (expired_at, order_id),
+        (expired_at, order_id, tenant_id),
     ).fetchone()
     if updated:
         create_order_audit_log(order_id, "pix_expired", "system", {"expired_at": expired_at})
@@ -1926,7 +2151,7 @@ def issue_pix_payment_for_order(order_row: DbRow | dict, *, regenerate: bool = F
             paid_at = NULL,
             webhook_received_at = NULL,
             payment_confirmed_by = NULL
-        WHERE id = ?
+        WHERE id = ? AND tenant_id = ?
         RETURNING *
         """,
         (
@@ -1940,6 +2165,7 @@ def issue_pix_payment_for_order(order_row: DbRow | dict, *, regenerate: bool = F
             payload["pix_expires_at"],
             payload["pix_expires_at"],
             order_row["id"],
+            current_tenant_id(),
         ),
     ).fetchone()
     if updated:
@@ -2052,9 +2278,13 @@ def refresh_order_payment_state(row: DbRow | None, *, persist_expiration: bool =
     if not row:
         return None
     if persist_expiration and order_is_pix_expired(row):
-        expire_pending_pix_order(row["id"])
+        tenant_id = row["tenant_id"] if "tenant_id" in row.keys() else current_tenant_id()
+        expire_pending_pix_order(row["id"], tenant_id)
         get_db().commit()
-        return fetch_order_row_by_code(row["codigo_retirada"])
+        return get_db().execute(
+            "SELECT * FROM pedidos WHERE id = ? AND tenant_id = ?",
+            (row["id"], tenant_id),
+        ).fetchone()
     return row
 
 
@@ -2245,9 +2475,11 @@ def attach_order_context(
 
 
 def fetch_order_row_by_code(code: str, shift_id: int | None = None) -> sqlite3.Row | None:
+    tenant_id = current_tenant_id()
     query = """
         SELECT
             id,
+            tenant_id,
             codigo_retirada,
             turno_id,
             horario_pedido,
@@ -2276,9 +2508,10 @@ def fetch_order_row_by_code(code: str, shift_id: int | None = None) -> sqlite3.R
             webhook_received_at,
             payment_confirmed_by
         FROM pedidos
-        WHERE codigo_retirada = ?
+        WHERE tenant_id = ?
+          AND codigo_retirada = ?
     """
-    params: list = [code]
+    params: list = [tenant_id, code]
     if shift_id is not None:
         query += " AND turno_id = ?"
         params.append(shift_id)
@@ -2290,6 +2523,7 @@ def fetch_order_row_by_request_id(request_id: str) -> sqlite3.Row | None:
         """
         SELECT
             id,
+            tenant_id,
             codigo_retirada,
             turno_id,
             horario_pedido,
@@ -2318,9 +2552,9 @@ def fetch_order_row_by_request_id(request_id: str) -> sqlite3.Row | None:
             webhook_received_at,
             payment_confirmed_by
         FROM pedidos
-        WHERE request_id = ?
+        WHERE tenant_id = ? AND request_id = ?
         """,
-        (request_id,),
+        (current_tenant_id(), request_id),
     ).fetchone()
 
 
@@ -2329,7 +2563,9 @@ def fetch_order_row_by_public_token(public_token: str) -> sqlite3.Row | None:
         """
         SELECT
             id,
+            tenant_id,
             codigo_retirada,
+            turno_id,
             horario_pedido,
             status,
             valor_total,
@@ -2355,9 +2591,9 @@ def fetch_order_row_by_public_token(public_token: str) -> sqlite3.Row | None:
             pickup_code,
             webhook_received_at
         FROM pedidos
-        WHERE public_token = ?
+        WHERE tenant_id = ? AND public_token = ?
         """,
-        (public_token,),
+        (current_tenant_id(), public_token),
     ).fetchone()
 
 
@@ -2401,7 +2637,7 @@ def mark_as_paid(
                 WHEN payment_method = 'pix' AND status = ? THEN 'new'
                 ELSE status
             END
-        WHERE id = ?
+        WHERE id = ? AND tenant_id = ?
         RETURNING
             id,
             codigo_retirada,
@@ -2416,7 +2652,7 @@ def mark_as_paid(
             payment_status,
             order_type
         """,
-        (paid_at, webhook_received_at, confirmed_by, AWAITING_PAYMENT_STATUS, row["id"]),
+        (paid_at, webhook_received_at, confirmed_by, AWAITING_PAYMENT_STATUS, row["id"], current_tenant_id()),
     ).fetchone()
     if not updated:
         raise LookupError("Pedido nao encontrado.")
@@ -2450,52 +2686,55 @@ def build_ticket(order: dict) -> dict:
 
 
 def get_current_shift_id() -> int:
+    tenant_id = current_tenant_id()
     cached_shift_id = getattr(g, "current_shift_id", None)
     if cached_shift_id is not None:
         return cached_shift_id
 
-    cached_shift_id = read_snapshot_cache("current-shift-id")
+    cached_shift_id = read_snapshot_cache(tenant_cache_key("current-shift-id"))
     if cached_shift_id is not None:
         g.current_shift_id = cached_shift_id
         return cached_shift_id
 
     db = get_db()
     row = db.execute(
-        "SELECT id FROM turnos WHERE status = 'open' ORDER BY id DESC LIMIT 1"
+        "SELECT id FROM turnos WHERE tenant_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1",
+        (tenant_id,),
     ).fetchone()
     if row:
         g.current_shift_id = row["id"]
-        write_snapshot_cache("current-shift-id", SNAPSHOT_CACHE_TTLS["current_shift"], row["id"])
+        write_snapshot_cache(tenant_cache_key("current-shift-id"), SNAPSHOT_CACHE_TTLS["current_shift"], row["id"])
         return row["id"]
 
     row = db.execute(
         """
-        INSERT INTO turnos (aberto_em, status)
-        VALUES (?, 'open')
+        INSERT INTO turnos (tenant_id, aberto_em, status)
+        VALUES (?, ?, 'open')
         RETURNING id
         """,
-        (utc_now_iso(),),
+        (tenant_id, utc_now_iso()),
     ).fetchone()
     db.commit()
     g.current_shift_id = row["id"]
-    write_snapshot_cache("current-shift-id", SNAPSHOT_CACHE_TTLS["current_shift"], row["id"])
+    write_snapshot_cache(tenant_cache_key("current-shift-id"), SNAPSHOT_CACHE_TTLS["current_shift"], row["id"])
     return row["id"]
 
 
 def open_new_shift(*, commit: bool = True) -> int:
     db = get_db()
+    tenant_id = current_tenant_id()
     row = db.execute(
         """
-        INSERT INTO turnos (aberto_em, status)
-        VALUES (?, 'open')
+        INSERT INTO turnos (tenant_id, aberto_em, status)
+        VALUES (?, ?, 'open')
         RETURNING id
         """,
-        (utc_now_iso(),),
+        (tenant_id, utc_now_iso()),
     ).fetchone()
-    db.execute("UPDATE shift_notes SET status = 'open'")
+    db.execute("UPDATE shift_notes SET status = 'open' WHERE tenant_id = ?", (tenant_id,))
     if commit:
         db.commit()
-        write_snapshot_cache("current-shift-id", SNAPSHOT_CACHE_TTLS["current_shift"], row["id"])
+        write_snapshot_cache(tenant_cache_key("current-shift-id"), SNAPSHOT_CACHE_TTLS["current_shift"], row["id"])
     return row["id"]
 
 
@@ -2511,7 +2750,8 @@ def calculate_inventory_status(stock_level: float, par_level: float) -> str:
 
 def get_inventory_by_name() -> dict[str, sqlite3.Row]:
     rows = get_db().execute(
-        "SELECT name, stock_level, unit FROM inventory_items"
+        "SELECT name, stock_level, unit FROM inventory_items WHERE tenant_id = ?",
+        (current_tenant_id(),),
     ).fetchall()
     return {row["name"]: row for row in rows}
 
@@ -2532,9 +2772,10 @@ def fetch_beverage_rows(include_inactive: bool = True) -> list[sqlite3.Row]:
             max_active_orders
         FROM bebidas
     """
-    params: list = []
+    params: list = [current_tenant_id()]
+    query += " WHERE tenant_id = ?"
     if not include_inactive:
-        query += " WHERE is_active = 1"
+        query += " AND is_active = 1"
     query += " ORDER BY is_combo ASC, nome ASC"
     return get_db().execute(query, params).fetchall()
 
@@ -2558,11 +2799,14 @@ def fetch_combo_components_map(combo_ids: list[int] | None = None) -> dict[int, 
             b.is_combo AS component_is_combo
         FROM combo_items ci
         JOIN bebidas b ON b.id = ci.component_beverage_id
+            AND b.tenant_id = ci.tenant_id
     """
-    params: list = []
+    params: list = [current_tenant_id()]
+    conditions = ["ci.tenant_id = ?"]
     if combo_ids:
-        query += " WHERE ci.combo_beverage_id IN ({})".format(",".join("?" for _ in combo_ids))
+        conditions.append("ci.combo_beverage_id IN ({})".format(",".join("?" for _ in combo_ids)))
         params.extend(combo_ids)
+    query += " WHERE " + " AND ".join(conditions)
     query += " ORDER BY ci.combo_beverage_id ASC, b.nome ASC"
     rows = get_db().execute(query, params).fetchall()
     components: dict[int, list[dict]] = {}
@@ -2592,12 +2836,18 @@ def parse_preorder_time_value(raw_value: str | None) -> str | None:
 
 
 def fetch_preorder_settings() -> dict:
+    # TODO(multi-tenant): migrate preorder_settings away from the legacy singleton id=1
+    # before enabling tenant-specific backoffice settings for non-default tenants.
     row = get_db().execute(
         """
         SELECT preorder_start_time, preorder_end_time, customer_identification_mode, updated_at
         FROM preorder_settings
-        WHERE id = 1
+        WHERE tenant_id = ?
+        ORDER BY id ASC
+        LIMIT 1
         """
+        ,
+        (current_tenant_id(),),
     ).fetchone()
     start_time = row["preorder_start_time"] if row else None
     end_time = row["preorder_end_time"] if row else None
@@ -2659,10 +2909,12 @@ def fetch_active_preorder_counts() -> dict[int, int]:
             COALESCE(SUM(ip.quantidade), 0) AS total
         FROM itens_pedido ip
         JOIN pedidos p ON p.id = ip.pedido_id
-        WHERE p.status IN ({placeholders})
+            AND p.tenant_id = ip.tenant_id
+        WHERE ip.tenant_id = ?
+          AND p.status IN ({placeholders})
         GROUP BY ip.bebida_id
         """,
-        PREORDER_ACTIVE_STATUSES,
+        (current_tenant_id(), *PREORDER_ACTIVE_STATUSES),
     ).fetchall()
     return {row["bebida_id"]: int(row["total"] or 0) for row in rows}
 
@@ -2873,10 +3125,10 @@ def apply_stock_deductions(
         return
 
     inventory_rows = db.execute(
-        "SELECT id, name, stock_level, par_level FROM inventory_items WHERE name IN ({})".format(
+        "SELECT id, name, stock_level, par_level FROM inventory_items WHERE tenant_id = ? AND name IN ({})".format(
             ",".join("?" for _ in recipes_to_apply)
         ),
-        list(recipes_to_apply.keys()),
+        [current_tenant_id(), *recipes_to_apply.keys()],
     ).fetchall()
 
     for row in inventory_rows:
@@ -2887,9 +3139,9 @@ def apply_stock_deductions(
             """
             UPDATE inventory_items
             SET stock_level = ?, status = ?, updated_at = ?
-            WHERE id = ?
+            WHERE id = ? AND tenant_id = ?
             """,
-            (next_stock, next_status, utc_now_iso(), row["id"]),
+            (next_stock, next_status, utc_now_iso(), row["id"], current_tenant_id()),
         )
 
 
@@ -2906,10 +3158,10 @@ def check_stock_availability(
         return []
 
     rows = db.execute(
-        "SELECT name, stock_level, unit FROM inventory_items WHERE name IN ({})".format(
+        "SELECT name, stock_level, unit FROM inventory_items WHERE tenant_id = ? AND name IN ({})".format(
             ",".join("?" for _ in required)
         ),
-        list(required.keys()),
+        [current_tenant_id(), *required.keys()],
     ).fetchall()
     by_name = {row["name"]: row for row in rows}
 
@@ -2952,10 +3204,10 @@ def reserve_stock_deductions(
         return []
 
     rows = db.execute(
-        "SELECT id, name, stock_level, par_level, unit FROM inventory_items WHERE name IN ({})".format(
+        "SELECT id, name, stock_level, par_level, unit FROM inventory_items WHERE tenant_id = ? AND name IN ({})".format(
             ",".join("?" for _ in required)
         ),
-        list(required.keys()),
+        [current_tenant_id(), *required.keys()],
     ).fetchall()
     by_name = {row["name"]: row for row in rows}
 
@@ -2994,14 +3246,14 @@ def reserve_stock_deductions(
             """
             UPDATE inventory_items
             SET stock_level = ?, status = ?, updated_at = ?
-            WHERE id = ? AND stock_level >= ?
+            WHERE id = ? AND tenant_id = ? AND stock_level >= ?
             """,
-            (next_stock, next_status, updated_at, row["id"], needed),
+            (next_stock, next_status, updated_at, row["id"], current_tenant_id(), needed),
         )
         if result.rowcount != 1:
             current_row = db.execute(
-                "SELECT stock_level, unit FROM inventory_items WHERE id = ?",
-                (row["id"],),
+                "SELECT stock_level, unit FROM inventory_items WHERE id = ? AND tenant_id = ?",
+                (row["id"], current_tenant_id()),
             ).fetchone()
             return [
                 {
@@ -3031,7 +3283,7 @@ def build_catalog_runtime_context() -> dict[str, Any]:
 
 
 def fetch_catalog_runtime_context() -> dict[str, Any]:
-    cache_key = "catalog-context"
+    cache_key = tenant_cache_key("catalog-context")
     cached_value = read_snapshot_cache(cache_key)
     if cached_value is not None:
         return cached_value
@@ -3094,7 +3346,7 @@ def build_menu_snapshot() -> list[dict]:
 
 
 def fetch_menu() -> list[dict]:
-    cache_key = "menu"
+    cache_key = tenant_cache_key("menu")
     cached_value = read_snapshot_cache(cache_key)
     if cached_value is not None:
         return cached_value
@@ -3122,9 +3374,10 @@ def refresh_combo_costs_for_component(component_beverage_id: int) -> None:
         """
         SELECT DISTINCT combo_beverage_id
         FROM combo_items
-        WHERE component_beverage_id = ?
+        WHERE tenant_id = ?
+          AND component_beverage_id = ?
         """,
-        (component_beverage_id,),
+        (current_tenant_id(), component_beverage_id),
     ).fetchall()
     if not combo_ids:
         return
@@ -3135,8 +3388,8 @@ def refresh_combo_costs_for_component(component_beverage_id: int) -> None:
         combo_id = row["combo_beverage_id"]
         estimated_cost = calculate_combo_cost_estimate(combo_components_map.get(combo_id, []), catalog)
         db.execute(
-            "UPDATE bebidas SET custo_estimado = ? WHERE id = ?",
-            (estimated_cost, combo_id),
+            "UPDATE bebidas SET custo_estimado = ? WHERE id = ? AND tenant_id = ?",
+            (estimated_cost, combo_id, current_tenant_id()),
         )
 
 
@@ -3236,14 +3489,15 @@ def save_preorder_settings_from_form() -> str:
 
     db.execute(
         """
-        INSERT INTO preorder_settings (id, preorder_start_time, preorder_end_time, updated_at)
-        VALUES (1, ?, ?, ?)
+        INSERT INTO preorder_settings (id, tenant_id, preorder_start_time, preorder_end_time, updated_at)
+        VALUES (1, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
+            tenant_id = COALESCE(preorder_settings.tenant_id, excluded.tenant_id),
             preorder_start_time = excluded.preorder_start_time,
             preorder_end_time = excluded.preorder_end_time,
             updated_at = excluded.updated_at
         """,
-        (start_time, end_time, utc_now_iso()),
+        (current_tenant_id(), start_time, end_time, utc_now_iso()),
     )
     return "Configuracao de pre-order salva com sucesso."
 
@@ -3259,13 +3513,14 @@ def save_customer_experience_settings_from_form() -> str:
 
     db.execute(
         """
-        INSERT INTO preorder_settings (id, customer_identification_mode, updated_at)
-        VALUES (1, ?, ?)
+        INSERT INTO preorder_settings (id, tenant_id, customer_identification_mode, updated_at)
+        VALUES (1, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
+            tenant_id = COALESCE(preorder_settings.tenant_id, excluded.tenant_id),
             customer_identification_mode = excluded.customer_identification_mode,
             updated_at = excluded.updated_at
         """,
-        (customer_identification_mode, utc_now_iso()),
+        (current_tenant_id(), customer_identification_mode, utc_now_iso()),
     )
     return "Experiencia do pedido atualizada com sucesso."
 
@@ -3323,10 +3578,12 @@ def fetch_order_items_map(order_ids: list[int]) -> dict[int, list[DbRow]]:
             b.is_combo
         FROM itens_pedido ip
         JOIN bebidas b ON b.id = ip.bebida_id
-        WHERE ip.pedido_id IN (""" + placeholders + """)
+            AND b.tenant_id = ip.tenant_id
+        WHERE ip.tenant_id = ?
+          AND ip.pedido_id IN (""" + placeholders + """)
         ORDER BY ip.pedido_id ASC, ip.id ASC
         """,
-        order_ids,
+        [current_tenant_id(), *order_ids],
     ).fetchall()
     items_by_order_id: dict[int, list[DbRow]] = {}
     for item_row in rows:
@@ -3343,7 +3600,7 @@ def fetch_public_order_payload(public_token: str) -> dict[str, Any] | None:
 
 
 def fetch_public_order_payload_with_meta(public_token: str) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-    cache_key = f"public-order-status:{public_token}"
+    cache_key = tenant_cache_key(f"public-order-status:{public_token}")
     cached_value = read_snapshot_cache(cache_key)
     if cached_value is not None:
         return cached_value, {
@@ -3387,12 +3644,14 @@ def fetch_public_order_items_map(order_ids: list[int]) -> dict[int, list[DbRow]]
             COALESCE(NULLIF(ip.item_name_snapshot, ''), b.nome) AS item_name
         FROM itens_pedido ip
         LEFT JOIN bebidas b ON b.id = ip.bebida_id
-        WHERE ip.pedido_id IN ("""
+            AND b.tenant_id = ip.tenant_id
+        WHERE ip.tenant_id = ?
+          AND ip.pedido_id IN ("""
         + placeholders
         + """)
         ORDER BY ip.pedido_id ASC, ip.id ASC
         """,
-        order_ids,
+        [current_tenant_id(), *order_ids],
     ).fetchall()
     items_by_order_id: dict[int, list[DbRow]] = {}
     for item_row in rows:
@@ -3415,12 +3674,14 @@ def fetch_dashboard_order_items_map(order_ids: list[int]) -> dict[int, list[DbRo
             COALESCE(NULLIF(ip.item_name_snapshot, ''), b.nome) AS item_name
         FROM itens_pedido ip
         LEFT JOIN bebidas b ON b.id = ip.bebida_id
-        WHERE ip.pedido_id IN ("""
+            AND b.tenant_id = ip.tenant_id
+        WHERE ip.tenant_id = ?
+          AND ip.pedido_id IN ("""
         + placeholders
         + """)
         ORDER BY ip.pedido_id ASC, ip.id ASC
         """,
-        order_ids,
+        [current_tenant_id(), *order_ids],
     ).fetchall()
     items_by_order_id: dict[int, list[DbRow]] = {}
     for item_row in rows:
@@ -3625,9 +3886,8 @@ def fetch_orders(status: str | None = None, limit: int | None = None, shift_id: 
             pix_copy_paste
         FROM pedidos
     """
-    params: list = []
-    conditions = ["turno_id = ?"]
-    params.append(current_shift_id)
+    params: list = [current_tenant_id(), current_shift_id]
+    conditions = ["tenant_id = ?", "turno_id = ?"]
     if status:
         if status == "pending":
             conditions.append("status IN (?, ?)")
@@ -3652,8 +3912,17 @@ def fetch_orders(status: str | None = None, limit: int | None = None, shift_id: 
 
 
 def build_dashboard_orders_payload(shift_id: int | None = None, completed_limit: int = 20) -> tuple[dict, dict[str, Any]]:
+    tenant = resolve_current_tenant()
+    tenant_id = int(tenant["id"])
     current_shift_id = shift_id or get_current_shift_id()
     db_started_at = time.perf_counter()
+    app.logger.info(
+        "dashboard_orders fetch tenant_slug=%s tenant_id=%s shift_id=%s completed_limit=%s",
+        tenant["slug"],
+        tenant_id,
+        current_shift_id,
+        completed_limit,
+    )
     rows = get_db().execute(
         """
         WITH dashboard_orders AS (
@@ -3681,7 +3950,8 @@ def build_dashboard_orders_payload(shift_id: int | None = None, completed_limit:
                     ELSE 1
                 END AS status_rank
             FROM pedidos
-            WHERE turno_id = ?
+            WHERE tenant_id = ?
+              AND turno_id = ?
               AND status IN (?, ?, ?, 'completed')
         )
         SELECT
@@ -3712,6 +3982,7 @@ def build_dashboard_orders_payload(shift_id: int | None = None, completed_limit:
         (
             AWAITING_PAYMENT_STATUS,
             *ACTIVE_ORDER_STATUSES,
+            tenant_id,
             current_shift_id,
             AWAITING_PAYMENT_STATUS,
             *ACTIVE_ORDER_STATUSES,
@@ -3757,7 +4028,7 @@ def fetch_dashboard_orders(shift_id: int | None = None, completed_limit: int = 2
 
 def fetch_dashboard_orders_payload(shift_id: int | None = None, completed_limit: int = 20) -> dict:
     current_shift_id = shift_id or get_current_shift_id()
-    cache_key = f"dashboard-orders:{current_shift_id}:{completed_limit}"
+    cache_key = tenant_cache_key(f"dashboard-orders:{current_shift_id}:{completed_limit}")
     return get_or_compute_snapshot(
         cache_key,
         SNAPSHOT_CACHE_TTLS["dashboard_orders"],
@@ -3767,7 +4038,7 @@ def fetch_dashboard_orders_payload(shift_id: int | None = None, completed_limit:
 
 def fetch_dashboard_orders_payload_with_meta(shift_id: int | None = None, completed_limit: int = 20) -> tuple[dict, dict[str, Any]]:
     current_shift_id = shift_id or get_current_shift_id()
-    cache_key = f"dashboard-orders:{current_shift_id}:{completed_limit}"
+    cache_key = tenant_cache_key(f"dashboard-orders:{current_shift_id}:{completed_limit}")
     cached_value = read_snapshot_cache(cache_key)
     if cached_value is not None:
         return cached_value, {
@@ -3817,6 +4088,7 @@ def build_logistics_snapshot() -> dict:
         """
         SELECT id, name, category, unit, stock_level, par_level, status, updated_at
         FROM inventory_items
+        WHERE tenant_id = ?
         ORDER BY
             CASE status
                 WHEN 'critical' THEN 0
@@ -3824,12 +4096,14 @@ def build_logistics_snapshot() -> dict:
                 ELSE 2
             END,
             name ASC
-        """
+        """,
+        (current_tenant_id(),),
     ).fetchall()
     notes = db.execute(
         """
         SELECT id, title, body, priority, status, created_at
         FROM shift_notes
+        WHERE tenant_id = ?
         ORDER BY
             CASE priority
                 WHEN 'alta' THEN 0
@@ -3838,7 +4112,8 @@ def build_logistics_snapshot() -> dict:
             END,
             created_at DESC
         LIMIT 6
-        """
+        """,
+        (current_tenant_id(),),
     ).fetchall()
     return {
         "inventory": [
@@ -3874,7 +4149,7 @@ def build_logistics_snapshot() -> dict:
 
 
 def fetch_logistics_snapshot() -> dict:
-    cache_key = "logistics"
+    cache_key = tenant_cache_key("logistics")
     cached_value = read_snapshot_cache(cache_key)
     if cached_value is not None:
         return cached_value
@@ -3925,10 +4200,11 @@ def fetch_shift_orders_rows(shift_id: int) -> list[sqlite3.Row]:
             pix_qr_code,
             pix_copy_paste
         FROM pedidos
-        WHERE turno_id = ?
+        WHERE tenant_id = ?
+          AND turno_id = ?
         ORDER BY horario_pedido DESC
         """,
-        (shift_id,),
+        (current_tenant_id(), shift_id),
     ).fetchall()
 
 
@@ -3968,12 +4244,13 @@ def fetch_peak_window_metrics(shift_id: int) -> dict | None:
             COUNT(*) AS orders,
             COALESCE(SUM(CASE WHEN COALESCE(payment_status, 'pending') = 'paid' THEN valor_total ELSE 0 END), 0) AS revenue
         FROM pedidos
-        WHERE turno_id = ?
+        WHERE tenant_id = ?
+          AND turno_id = ?
         GROUP BY bucket_start_local
         ORDER BY orders DESC, bucket_start_local ASC
         LIMIT 1
         """,
-        (shift_id,),
+        (current_tenant_id(), shift_id),
     ).fetchone()
     if not row:
         return None
@@ -4055,9 +4332,10 @@ def build_shift_metrics(shift_id: int) -> dict:
             COALESCE(SUM(CASE WHEN payment_status = 'paid' THEN valor_total ELSE 0 END), 0) AS total_recebido,
             COALESCE(SUM(CASE WHEN payment_status = 'paid' THEN 1 ELSE 0 END), 0) AS total_pedidos_pagos
         FROM pedidos
-        WHERE turno_id = ?
+        WHERE tenant_id = ?
+          AND turno_id = ?
         """,
-        (shift_id,),
+        (current_tenant_id(), shift_id),
     ).fetchone()
 
     ranking_rows = db.execute(
@@ -4078,21 +4356,24 @@ def build_shift_metrics(shift_id: int) -> dict:
             ) AS custo_estimado
         FROM itens_pedido ip
         JOIN bebidas b ON b.id = ip.bebida_id
+            AND b.tenant_id = ip.tenant_id
         JOIN pedidos p ON p.id = ip.pedido_id
-        WHERE p.turno_id = ?
+            AND p.tenant_id = ip.tenant_id
+        WHERE ip.tenant_id = ?
+          AND p.turno_id = ?
         GROUP BY b.id, COALESCE(ip.item_name_snapshot, b.nome)
         ORDER BY quantidade DESC, nome ASC
         """,
-        (shift_id,),
+        (current_tenant_id(), shift_id),
     ).fetchall()
 
     shift_row = db.execute(
         """
         SELECT id, aberto_em, fechado_em, resumo_fechamento
         FROM turnos
-        WHERE id = ?
+        WHERE id = ? AND tenant_id = ?
         """,
-        (shift_id,),
+        (shift_id, current_tenant_id()),
     ).fetchone()
     stored_summary = load_summary_payload(shift_row["resumo_fechamento"]) if shift_row else {}
 
@@ -4161,9 +4442,10 @@ def get_shift_closeout_blockers(shift_id: int) -> dict:
                 0
             ) AS unpaid_pix_orders
         FROM pedidos
-        WHERE turno_id = ?
+        WHERE tenant_id = ?
+          AND turno_id = ?
         """,
-        (*ACTIVE_ORDER_STATUSES, shift_id),
+        (*ACTIVE_ORDER_STATUSES, current_tenant_id(), shift_id),
     ).fetchone()
     return {
         "pending_orders": int(row["pending_orders"] or 0),
@@ -4177,11 +4459,13 @@ def fetch_comparable_shift_choices(current_shift_id: int, limit: int = 30) -> li
         """
         SELECT id, aberto_em, fechado_em
         FROM turnos
-        WHERE status = 'closed' AND id != ?
+        WHERE tenant_id = ?
+          AND status = 'closed'
+          AND id != ?
         ORDER BY id DESC
         LIMIT ?
         """,
-        (current_shift_id, limit),
+        (current_tenant_id(), current_shift_id, limit),
     ).fetchall()
     return [
         {
@@ -4197,11 +4481,13 @@ def find_previous_closed_shift_id(current_shift_id: int) -> int | None:
         """
         SELECT id
         FROM turnos
-        WHERE status = 'closed' AND id < ?
+        WHERE tenant_id = ?
+          AND status = 'closed'
+          AND id < ?
         ORDER BY id DESC
         LIMIT 1
         """,
-        (current_shift_id,),
+        (current_tenant_id(), current_shift_id),
     ).fetchone()
     return row["id"] if row else None
 
@@ -4213,9 +4499,9 @@ def validate_comparison_shift_id(current_shift_id: int, comparison_shift_id: int
         """
         SELECT id
         FROM turnos
-        WHERE id = ? AND status = 'closed'
+        WHERE id = ? AND tenant_id = ? AND status = 'closed'
         """,
-        (comparison_shift_id,),
+        (comparison_shift_id, current_tenant_id()),
     ).fetchone()
     return row["id"] if row else None
 
@@ -4405,9 +4691,10 @@ def build_order_summary_payload(shift_id: int) -> dict:
             COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) AS completed_count,
             COALESCE(SUM(CASE WHEN status = ? THEN 1 ELSE 0 END), 0) AS awaiting_payment_count
         FROM pedidos
-        WHERE turno_id = ?
+        WHERE tenant_id = ?
+          AND turno_id = ?
         """,
-        (*ACTIVE_ORDER_STATUSES, AWAITING_PAYMENT_STATUS, shift_id),
+        (*ACTIVE_ORDER_STATUSES, AWAITING_PAYMENT_STATUS, current_tenant_id(), shift_id),
     ).fetchone()
     top_tables = get_db().execute(
         """
@@ -4415,12 +4702,13 @@ def build_order_summary_payload(shift_id: int) -> dict:
             COALESCE(NULLIF(TRIM(table_label), ''), 'Retirada') AS table_label,
             COUNT(*) AS total
         FROM pedidos
-        WHERE turno_id = ?
+        WHERE tenant_id = ?
+          AND turno_id = ?
         GROUP BY COALESCE(NULLIF(TRIM(table_label), ''), 'Retirada')
         ORDER BY total DESC, table_label ASC
         LIMIT 4
         """,
-        (shift_id,),
+        (current_tenant_id(), shift_id),
     ).fetchall()
     return {
         "pending_count": int(counts["pending_count"] or 0),
@@ -4441,7 +4729,7 @@ def build_order_summary_payload(shift_id: int) -> dict:
 
 def build_order_summary(shift_id: int | None = None) -> dict:
     current_shift_id = shift_id or get_current_shift_id()
-    cache_key = f"order-summary:{current_shift_id}"
+    cache_key = tenant_cache_key(f"order-summary:{current_shift_id}")
     cached_value = read_snapshot_cache(cache_key)
     if cached_value is not None:
         return cached_value
@@ -4454,7 +4742,7 @@ def build_order_summary(shift_id: int | None = None) -> dict:
 
 def fetch_dashboard_summary_payload(shift_id: int | None = None) -> dict:
     current_shift_id = shift_id or get_current_shift_id()
-    cache_key = f"dashboard-summary:{current_shift_id}"
+    cache_key = tenant_cache_key(f"dashboard-summary:{current_shift_id}")
     return get_or_compute_snapshot(
         cache_key,
         SNAPSHOT_CACHE_TTLS["dashboard_summary"],
@@ -4468,7 +4756,7 @@ def fetch_dashboard_summary_payload(shift_id: int | None = None) -> dict:
 
 def fetch_dashboard_summary_payload_with_meta(shift_id: int | None = None) -> tuple[dict, dict[str, Any]]:
     current_shift_id = shift_id or get_current_shift_id()
-    cache_key = f"dashboard-summary:{current_shift_id}"
+    cache_key = tenant_cache_key(f"dashboard-summary:{current_shift_id}")
     cached_value = read_snapshot_cache(cache_key)
     if cached_value is not None:
         return cached_value, {"cache_status": "hit", "db_query_ms": 0.0, "serialization_ms": 0.0}
@@ -4504,7 +4792,7 @@ def fetch_live_summary_payload(shift_id: int | None = None) -> dict:
 
 
 def fetch_dashboard_logistics_payload_with_meta() -> tuple[dict, dict[str, Any]]:
-    cache_key = "dashboard-logistics"
+    cache_key = tenant_cache_key("dashboard-logistics")
     cached_value = read_snapshot_cache(cache_key)
     if cached_value is not None:
         return cached_value, {"cache_status": "hit", "db_query_ms": 0.0, "serialization_ms": 0.0}
@@ -4551,7 +4839,7 @@ def build_closeout_report(shift_id: int | None = None) -> dict:
 
 
 def fetch_dashboard_logistics_payload() -> dict:
-    cache_key = "dashboard-logistics"
+    cache_key = tenant_cache_key("dashboard-logistics")
     return get_or_compute_snapshot(
         cache_key,
         SNAPSHOT_CACHE_TTLS["dashboard_logistics"],
@@ -4563,7 +4851,7 @@ def fetch_dashboard_logistics_payload() -> dict:
 
 
 def fetch_dashboard_shift_history_payload(limit: int = 5) -> dict:
-    cache_key = f"dashboard-shifts:{limit}"
+    cache_key = tenant_cache_key(f"dashboard-shifts:{limit}")
     return get_or_compute_snapshot(
         cache_key,
         SNAPSHOT_CACHE_TTLS["dashboard_shifts"],
@@ -4641,9 +4929,9 @@ def archive_current_shift_and_open_next(expected_shift_id: int | None = None) ->
             """
             UPDATE turnos
             SET status = 'closed', fechado_em = ?, resumo_fechamento = ?
-            WHERE id = ? AND status = 'open'
+            WHERE id = ? AND tenant_id = ? AND status = 'open'
             """,
-            (closed_at, json.dumps(report), current_shift_id),
+            (closed_at, json.dumps(report), current_shift_id, current_tenant_id()),
         )
         if result.rowcount != 1:
             safe_rollback(db)
@@ -4651,7 +4939,7 @@ def archive_current_shift_and_open_next(expected_shift_id: int | None = None) ->
 
         new_shift_id = open_new_shift(commit=False)
         db.commit()
-        write_snapshot_cache("current-shift-id", SNAPSHOT_CACHE_TTLS["current_shift"], new_shift_id)
+        write_snapshot_cache(tenant_cache_key("current-shift-id"), SNAPSHOT_CACHE_TTLS["current_shift"], new_shift_id)
     except Exception:
         safe_rollback(db)
         raise
@@ -4670,11 +4958,12 @@ def build_shift_history_payload(limit: int) -> list[dict]:
         """
         SELECT id, aberto_em, fechado_em, resumo_fechamento
         FROM turnos
-        WHERE status = 'closed'
+        WHERE tenant_id = ?
+          AND status = 'closed'
         ORDER BY id DESC
         LIMIT ?
         """,
-        (limit,),
+        (current_tenant_id(), limit),
     ).fetchall()
     shifts = []
     for row in rows:
@@ -4695,7 +4984,7 @@ def build_shift_history_payload(limit: int) -> list[dict]:
 
 
 def fetch_shift_history(limit: int = 10) -> list[dict]:
-    cache_key = f"shift-history:{limit}"
+    cache_key = tenant_cache_key(f"shift-history:{limit}")
     cached_value = read_snapshot_cache(cache_key)
     if cached_value is not None:
         return cached_value
@@ -4716,9 +5005,9 @@ def fetch_shift_details(
         """
         SELECT id, aberto_em, fechado_em, status
         FROM turnos
-        WHERE id = ?
+        WHERE id = ? AND tenant_id = ?
         """,
-        (shift_id,),
+        (shift_id, current_tenant_id()),
     ).fetchone()
     if not row or row["status"] != "closed":
         raise LookupError("Turno nao encontrado.")
@@ -4750,9 +5039,9 @@ def build_shift_export_csv(shift_id: int) -> str:
         """
         SELECT id, aberto_em, fechado_em, resumo_fechamento
         FROM turnos
-        WHERE id = ? AND status = 'closed'
+        WHERE id = ? AND tenant_id = ? AND status = 'closed'
         """,
-        (shift_id,),
+        (shift_id, current_tenant_id()),
     ).fetchone()
     if not shift_row:
         raise LookupError("Turno nao encontrado.")
@@ -4762,10 +5051,11 @@ def build_shift_export_csv(shift_id: int) -> str:
         """
         SELECT codigo_retirada, horario_pedido, status, valor_total, customer_name, table_label
         FROM pedidos
-        WHERE turno_id = ?
+        WHERE tenant_id = ?
+          AND turno_id = ?
         ORDER BY horario_pedido ASC
         """,
-        (shift_id,),
+        (current_tenant_id(), shift_id),
     ).fetchall()
 
     buffer = io.StringIO()
@@ -5012,9 +5302,9 @@ def upsert_product_from_form(product_id: int | None = None) -> str:
             """
             SELECT id, categoria, tempo_preparo, imagem_url
             FROM bebidas
-            WHERE id = ? AND is_combo = 0
+            WHERE id = ? AND tenant_id = ? AND is_combo = 0
             """,
-            (product_id,),
+            (product_id, current_tenant_id()),
         ).fetchone()
         if not row:
             raise ValueError("Produto nao encontrado.")
@@ -5030,10 +5320,11 @@ def upsert_product_from_form(product_id: int | None = None) -> str:
                 """
                 UPDATE bebidas
                 SET nome = ?, preco_venda = ?, custo_estimado = ?, categoria = ?, descricao = ?, imagem_url = ?, is_active = ?, max_active_orders = ?
-                WHERE id = ?
+                WHERE id = ? AND tenant_id = ?
                 """,
-                (name, price, cost, category, description, image_url, is_active, max_active_orders, product_id),
+                (name, price, cost, category, description, image_url, is_active, max_active_orders, product_id, current_tenant_id()),
             )
+            app.logger.info("product_image saved product_id=%s image_url=%s", product_id, image_url)
         except Exception:
             if uploaded_image_url:
                 delete_product_image(uploaded_image_url)
@@ -5050,6 +5341,7 @@ def upsert_product_from_form(product_id: int | None = None) -> str:
         db.execute(
             """
             INSERT INTO bebidas (
+                tenant_id,
                 nome,
                 preco_venda,
                 custo_estimado,
@@ -5061,10 +5353,11 @@ def upsert_product_from_form(product_id: int | None = None) -> str:
                 is_combo,
                 max_active_orders
             )
-            VALUES (?, ?, ?, ?, ?, '3 min', ?, ?, 0, ?)
+            VALUES (?, ?, ?, ?, ?, ?, '3 min', ?, ?, 0, ?)
             """,
-            (name, price, cost, category, description, image_url, is_active, max_active_orders),
+            (current_tenant_id(), name, price, cost, category, description, image_url, is_active, max_active_orders),
         )
+        app.logger.info("product_image saved product_id=new image_url=%s", image_url)
     except Exception:
         if uploaded_image_url:
             delete_product_image(uploaded_image_url)
@@ -5097,8 +5390,8 @@ def upsert_combo_from_form(combo_id: int | None = None) -> str:
 
     if combo_id:
         row = db.execute(
-            "SELECT id, imagem_url FROM bebidas WHERE id = ? AND is_combo = 1",
-            (combo_id,),
+            "SELECT id, imagem_url FROM bebidas WHERE id = ? AND tenant_id = ? AND is_combo = 1",
+            (combo_id, current_tenant_id()),
         ).fetchone()
         if not row:
             raise ValueError("Combo nao encontrado.")
@@ -5114,16 +5407,17 @@ def upsert_combo_from_form(combo_id: int | None = None) -> str:
                 """
                 UPDATE bebidas
                 SET nome = ?, preco_venda = ?, custo_estimado = ?, descricao = ?, imagem_url = ?, is_active = ?, max_active_orders = ?
-                WHERE id = ?
+                WHERE id = ? AND tenant_id = ?
                 """,
-                (name, price, estimated_cost, description, image_url, is_active, max_active_orders, combo_id),
+                (name, price, estimated_cost, description, image_url, is_active, max_active_orders, combo_id, current_tenant_id()),
             )
+            app.logger.info("product_image saved combo_id=%s image_url=%s", combo_id, image_url)
         except Exception:
             if uploaded_image_url:
                 delete_product_image(uploaded_image_url)
             raise
 
-        db.execute("DELETE FROM combo_items WHERE combo_beverage_id = ?", (combo_id,))
+        db.execute("DELETE FROM combo_items WHERE tenant_id = ? AND combo_beverage_id = ?", (current_tenant_id(), combo_id))
         if previous_image_url:
             queue_product_image_deletion(previous_image_url)
         target_combo_id = combo_id
@@ -5135,6 +5429,7 @@ def upsert_combo_from_form(combo_id: int | None = None) -> str:
             row = db.execute(
                 """
                 INSERT INTO bebidas (
+                    tenant_id,
                     nome,
                     preco_venda,
                     custo_estimado,
@@ -5146,11 +5441,12 @@ def upsert_combo_from_form(combo_id: int | None = None) -> str:
                     is_combo,
                     max_active_orders
                 )
-                VALUES (?, ?, ?, 'Combo', ?, '4 min', ?, ?, 1, ?)
+                VALUES (?, ?, ?, ?, 'Combo', ?, '4 min', ?, ?, 1, ?)
                 RETURNING id
                 """,
-                (name, price, estimated_cost, description, image_url, is_active, max_active_orders),
+                (current_tenant_id(), name, price, estimated_cost, description, image_url, is_active, max_active_orders),
             ).fetchone()
+            app.logger.info("product_image saved combo_id=new image_url=%s", image_url)
         except Exception:
             if uploaded_image_url:
                 delete_product_image(uploaded_image_url)
@@ -5160,11 +5456,11 @@ def upsert_combo_from_form(combo_id: int | None = None) -> str:
 
     db.executemany(
         """
-        INSERT INTO combo_items (combo_beverage_id, component_beverage_id, quantity)
-        VALUES (?, ?, ?)
+        INSERT INTO combo_items (tenant_id, combo_beverage_id, component_beverage_id, quantity)
+        VALUES (?, ?, ?, ?)
         """,
         [
-            (target_combo_id, component["component_beverage_id"], component["quantity"])
+            (current_tenant_id(), target_combo_id, component["component_beverage_id"], component["quantity"])
             for component in components
         ],
     )
@@ -5172,7 +5468,11 @@ def upsert_combo_from_form(combo_id: int | None = None) -> str:
 
 
 @app.get("/")
-def index():
+@app.get("/bar/<tenant_slug>")
+def index(tenant_slug: str | None = None):
+    if tenant_slug is None:
+        return redirect(url_for("index", tenant_slug=DEFAULT_TENANT_SLUG), code=302)
+
     profiler = RequestProfiler("GET /")
     menu: list[dict] = []
     status = "ok"
@@ -5184,6 +5484,7 @@ def index():
             "index.html",
             menu=menu,
             order_flow_settings=order_flow_settings,
+            create_order_url=url_for("create_tenant_order", tenant_slug=tenant_slug) if tenant_slug else url_for("create_order"),
             current_time=local_now().strftime("%d/%m/%Y %H:%M"),
             staff_access_url=url_for("staff_access"),
             order_types=[
@@ -5205,13 +5506,18 @@ def index():
 
 
 @app.get("/pedido/<public_token>")
-def public_order_page(public_token: str):
+@app.get("/bar/<tenant_slug>/pedido/<public_token>", endpoint="tenant_public_order_page")
+def public_order_page(public_token: str, tenant_slug: str | None = None):
     order = fetch_public_order_payload(public_token)
     if not order:
         abort(404)
     return render_template(
         "order_status.html",
         order=order,
+        menu_url=url_for("index", tenant_slug=tenant_slug) if tenant_slug else url_for("index"),
+        regenerate_pix_url_template=url_for("regenerate_tenant_pix_payment", tenant_slug=tenant_slug, code="__CODE__")
+        if tenant_slug
+        else url_for("regenerate_pix_payment", code="__CODE__"),
         current_time=local_now().strftime("%d/%m/%Y %H:%M"),
     )
 
@@ -5226,6 +5532,7 @@ def build_dashboard_redirect(message: str | None = None, error: str | None = Non
 
 
 def handle_staff_login():
+    # TODO(multi-tenant): bind staff sessions to a tenant once backoffice URLs move under /bar/<tenant_slug>.
     if request.method == "GET" and is_staff_authenticated():
         return redirect(url_for("dashboard"))
 
@@ -5266,9 +5573,17 @@ def logout():
 
 
 @app.get("/painel")
+@app.get("/bar/<tenant_slug>/painel")
 @login_required
-def dashboard():
+def dashboard(tenant_slug: str | None = None):
+    tenant = bind_staff_tenant_context()
     current_user = get_current_user()
+    app.logger.info(
+        "dashboard page tenant_slug=%s tenant_id=%s route_slug=%s",
+        tenant["slug"],
+        tenant["id"],
+        tenant_slug or "",
+    )
     return render_template(
         "dashboard.html",
         summary=build_order_summary(),
@@ -5276,6 +5591,7 @@ def dashboard():
         shifts=fetch_shift_history(limit=5),
         preorder=fetch_preorder_settings(),
         current_shift_id=get_current_shift_id(),
+        tenant=tenant,
         current_user=current_user,
         auth_message=request.args.get("auth_message"),
         auth_error=request.args.get("auth_error"),
@@ -5362,13 +5678,25 @@ def upload_image():
     if uploaded_file is None:
         return jsonify({"error": "Nenhum arquivo enviado."}), 400
 
+    app.logger.info(
+        "upload_image request_started filename=%s mimetype=%s content_length=%s",
+        (uploaded_file.filename or "").strip(),
+        uploaded_file.mimetype,
+        uploaded_file.content_length,
+    )
     try:
         image_url = upload_product_image(uploaded_file)
     except ValueError as error:
+        app.logger.warning("upload_image validation_failed error=%s", error)
         return jsonify({"error": str(error)}), 400
     except OSError as error:
+        app.logger.exception("upload_image storage_failed error=%s", error)
         return jsonify({"error": str(error)}), 500
+    except Exception as error:
+        app.logger.exception("upload_image unexpected_failed error=%s", error)
+        return jsonify({"error": "Nao foi possivel enviar a imagem agora."}), 500
 
+    app.logger.info("upload_image request_succeeded public_url=%s", image_url)
     return jsonify({"url": image_url}), 201
 
 
@@ -5655,8 +5983,8 @@ def get_shift_comparison(shift_id: int):
         compare_to = None
 
     row = get_db().execute(
-        "SELECT id FROM turnos WHERE id = ? AND status = 'closed'",
-        (shift_id,),
+        "SELECT id FROM turnos WHERE id = ? AND tenant_id = ? AND status = 'closed'",
+        (shift_id, current_tenant_id()),
     ).fetchone()
     if not row:
         return jsonify({"error": "Turno nao encontrado."}), 404
@@ -5698,11 +6026,14 @@ def export_shift_pdf(shift_id: int):
 
 
 @app.post("/api/orders")
-def create_order():
+@app.post("/bar/<tenant_slug>/api/orders", endpoint="create_tenant_order")
+def create_order(tenant_slug: str | None = None):
     profiler = RequestProfiler("POST /api/orders")
     status = "ok"
     payload = request.get_json(silent=True) or {}
     profiler.mark("parse_json")
+    tenant = resolve_current_tenant()
+    tenant_id = int(tenant["id"])
     request_id = normalize_request_id(request.headers.get("Idempotency-Key") or payload.get("request_id"))
     if not request_id:
         status = "missing_request_id"
@@ -5722,7 +6053,10 @@ def create_order():
     raw_payment_method = payload.get("payment_method")
     payment_method = normalize_payment_method(raw_payment_method)
     app.logger.info(
-        "create_order incoming raw_payment_method=%s normalized_payment_method=%s order_type=%s source=%s customer=%s",
+        "create_order incoming tenant_slug=%s tenant_id=%s route_slug=%s raw_payment_method=%s normalized_payment_method=%s order_type=%s source=%s customer=%s",
+        tenant["slug"],
+        tenant_id,
+        tenant_slug or "",
         raw_payment_method,
         payment_method,
         order_type,
@@ -5911,6 +6245,7 @@ def create_order():
         pedido_row = db.execute(
             """
             INSERT INTO pedidos (
+                tenant_id,
                 codigo_retirada,
                 order_number,
                 horario_pedido,
@@ -5935,10 +6270,11 @@ def create_order():
                 pickup_code,
                 request_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING id
             """,
             (
+                tenant_id,
                 codigo,
                 order_number,
                 horario,
@@ -5982,6 +6318,7 @@ def create_order():
         db.executemany(
             """
             INSERT INTO itens_pedido (
+                tenant_id,
                 pedido_id,
                 bebida_id,
                 quantidade,
@@ -5991,10 +6328,11 @@ def create_order():
                 unit_price_snapshot,
                 unit_cost_snapshot
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
+                    tenant_id,
                     pedido_id,
                     item["bebida_id"],
                     item["quantity"],
@@ -6110,7 +6448,8 @@ def create_order():
 
 
 @app.get("/api/orders/public/<public_token>/status")
-def get_public_order_status(public_token: str):
+@app.get("/bar/<tenant_slug>/api/orders/public/<public_token>/status", endpoint="get_tenant_public_order_status")
+def get_public_order_status(public_token: str, tenant_slug: str | None = None):
     profiler = RequestProfiler("GET /api/orders/public/<public_token>/status")
     status = "ok"
     db_query_ms = 0.0
@@ -6161,7 +6500,8 @@ def get_public_order_status(public_token: str):
 
 
 @app.post("/api/orders/<code>/payments/pix")
-def create_pix_payment(code: str):
+@app.post("/bar/<tenant_slug>/api/orders/<code>/payments/pix", endpoint="create_tenant_pix_payment")
+def create_pix_payment(code: str, tenant_slug: str | None = None):
     profiler = RequestProfiler("POST /api/orders/<code>/payments/pix")
     status = "ok"
     db_query_ms = 0.0
@@ -6189,7 +6529,8 @@ def create_pix_payment(code: str):
 
 
 @app.post("/api/orders/<code>/pix/regenerate")
-def regenerate_pix_payment(code: str):
+@app.post("/bar/<tenant_slug>/api/orders/<code>/pix/regenerate", endpoint="regenerate_tenant_pix_payment")
+def regenerate_pix_payment(code: str, tenant_slug: str | None = None):
     profiler = RequestProfiler("POST /api/orders/<code>/pix/regenerate")
     status = "ok"
     db_query_ms = 0.0
@@ -6301,6 +6642,11 @@ def handle_payment_webhook(provider: str):
             status = "not_found"
             return jsonify({"error": "Pedido nao encontrado para este pagamento."}), 404
 
+        tenant = get_tenant_by_id(order_row["tenant_id"]) if "tenant_id" in order_row.keys() else None
+        if tenant and tenant["status"] == "active":
+            g.current_tenant = tenant
+            g.current_tenant_route_slug = None
+
         if provider != order_row["payment_provider"]:
             suspicious_reason = "provider_mismatch"
         elif amount is not None and abs(float(amount) - float(order_row["valor_total"] or 0)) > 0.01:
@@ -6331,9 +6677,9 @@ def handle_payment_webhook(provider: str):
             """
             UPDATE pedidos
             SET provider_status = ?, webhook_received_at = ?
-            WHERE id = ?
+            WHERE id = ? AND tenant_id = ?
             """,
-            (provider_status, received_at, order_row["id"]),
+            (provider_status, received_at, order_row["id"], order_row["tenant_id"]),
         )
         if provider_status in {"paid", "approved", "confirmed"}:
             mark_as_paid(
@@ -6473,7 +6819,7 @@ def complete_order(code: str):
             """
             UPDATE pedidos
             SET status = 'completed', completed_at = ?, delivered_at = ?, completed_by_user_id = ?
-            WHERE codigo_retirada = ? AND turno_id = ?
+            WHERE codigo_retirada = ? AND turno_id = ? AND tenant_id = ?
             RETURNING
                 id,
                 codigo_retirada,
@@ -6489,7 +6835,7 @@ def complete_order(code: str):
                 payment_status,
                 order_type
             """,
-            (utc_now_iso(), utc_now_iso(), session.get("bar_user_id"), code, current_shift_id),
+            (utc_now_iso(), utc_now_iso(), session.get("bar_user_id"), code, current_shift_id, current_tenant_id()),
         ).fetchone()
         profiler.mark("complete_order")
         if not updated:
@@ -6600,8 +6946,8 @@ def update_inventory(item_id: int):
     par_level = payload.get("par_level")
     db = get_db()
     row = db.execute(
-        "SELECT id, stock_level, par_level FROM inventory_items WHERE id = ?",
-        (item_id,),
+        "SELECT id, stock_level, par_level FROM inventory_items WHERE id = ? AND tenant_id = ?",
+        (item_id, current_tenant_id()),
     ).fetchone()
     if not row:
         return jsonify({"error": "Item nao encontrado."}), 404
@@ -6644,9 +6990,9 @@ def update_inventory(item_id: int):
         """
         UPDATE inventory_items
         SET stock_level = ?, par_level = ?, status = ?, updated_at = ?
-        WHERE id = ?
+        WHERE id = ? AND tenant_id = ?
         """,
-        (next_stock, next_par, next_status, utc_now_iso(), item_id),
+        (next_stock, next_par, next_status, utc_now_iso(), item_id, current_tenant_id()),
     )
     db.commit()
     invalidate_snapshot_cache("catalog-context", "logistics", "menu", "dashboard-logistics")
@@ -6657,10 +7003,10 @@ def update_inventory(item_id: int):
 @login_required
 def close_shift_note(note_id: int):
     db = get_db()
-    row = db.execute("SELECT id FROM shift_notes WHERE id = ?", (note_id,)).fetchone()
+    row = db.execute("SELECT id FROM shift_notes WHERE id = ? AND tenant_id = ?", (note_id, current_tenant_id())).fetchone()
     if not row:
         return jsonify({"error": "Nota nao encontrada."}), 404
-    db.execute("UPDATE shift_notes SET status = 'done' WHERE id = ?", (note_id,))
+    db.execute("UPDATE shift_notes SET status = 'done' WHERE id = ? AND tenant_id = ?", (note_id, current_tenant_id()))
     db.commit()
     invalidate_snapshot_cache("logistics", "dashboard-logistics")
     return jsonify(fetch_logistics_snapshot())

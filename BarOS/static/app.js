@@ -1,5 +1,6 @@
 const menuItems = window.BAROS_MENU || [];
 const orderFlowSettings = window.BAROS_ORDER_FLOW || {};
+const barosEndpoints = window.BAROS_ENDPOINTS || {};
 const cart = new Map();
 
 const currencyFormatter = new Intl.NumberFormat("pt-BR", {
@@ -617,7 +618,7 @@ async function submitOrder() {
 
   let response;
   try {
-    response = await fetch("/api/orders", {
+    response = await fetch(barosEndpoints.createOrder || "/api/orders", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
