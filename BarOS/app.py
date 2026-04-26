@@ -925,6 +925,8 @@ def resolve_current_tenant() -> DbRow:
     slug = None
     if request.view_args:
         slug = request.view_args.get("tenant_slug")
+    if not slug and is_staff_authenticated():
+        slug = session.get("bar_tenant_slug")
     g.current_tenant_route_slug = normalize_tenant_slug(slug) if slug else None
     tenant = get_tenant_by_slug(slug or DEFAULT_TENANT_SLUG)
     if tenant is None or tenant["status"] != "active":
@@ -944,6 +946,13 @@ def current_tenant_slug() -> str:
 def current_tenant_url_slug() -> str | None:
     resolve_current_tenant()
     return getattr(g, "current_tenant_route_slug", None)
+
+
+def bind_staff_tenant_context() -> DbRow:
+    tenant = resolve_current_tenant()
+    if is_staff_authenticated():
+        session["bar_tenant_slug"] = tenant["slug"]
+    return tenant
 
 
 def tenant_cache_key(cache_key: str) -> str:
@@ -2114,7 +2123,7 @@ def expire_pending_pix_order(order_id: int, tenant_id: int | None = None) -> DbR
           AND COALESCE(payment_status, 'pending') != 'paid'
         RETURNING id
         """,
-        (expired_at, order_id, current_tenant_id()),
+        (expired_at, order_id, tenant_id),
     ).fetchone()
     if updated:
         create_order_audit_log(order_id, "pix_expired", "system", {"expired_at": expired_at})
@@ -3903,8 +3912,17 @@ def fetch_orders(status: str | None = None, limit: int | None = None, shift_id: 
 
 
 def build_dashboard_orders_payload(shift_id: int | None = None, completed_limit: int = 20) -> tuple[dict, dict[str, Any]]:
+    tenant = resolve_current_tenant()
+    tenant_id = int(tenant["id"])
     current_shift_id = shift_id or get_current_shift_id()
     db_started_at = time.perf_counter()
+    app.logger.info(
+        "dashboard_orders fetch tenant_slug=%s tenant_id=%s shift_id=%s completed_limit=%s",
+        tenant["slug"],
+        tenant_id,
+        current_shift_id,
+        completed_limit,
+    )
     rows = get_db().execute(
         """
         WITH dashboard_orders AS (
@@ -3964,7 +3982,7 @@ def build_dashboard_orders_payload(shift_id: int | None = None, completed_limit:
         (
             AWAITING_PAYMENT_STATUS,
             *ACTIVE_ORDER_STATUSES,
-            current_tenant_id(),
+            tenant_id,
             current_shift_id,
             AWAITING_PAYMENT_STATUS,
             *ACTIVE_ORDER_STATUSES,
@@ -5452,6 +5470,9 @@ def upsert_combo_from_form(combo_id: int | None = None) -> str:
 @app.get("/")
 @app.get("/bar/<tenant_slug>")
 def index(tenant_slug: str | None = None):
+    if tenant_slug is None:
+        return redirect(url_for("index", tenant_slug=DEFAULT_TENANT_SLUG), code=302)
+
     profiler = RequestProfiler("GET /")
     menu: list[dict] = []
     status = "ok"
@@ -5552,9 +5573,17 @@ def logout():
 
 
 @app.get("/painel")
+@app.get("/bar/<tenant_slug>/painel")
 @login_required
-def dashboard():
+def dashboard(tenant_slug: str | None = None):
+    tenant = bind_staff_tenant_context()
     current_user = get_current_user()
+    app.logger.info(
+        "dashboard page tenant_slug=%s tenant_id=%s route_slug=%s",
+        tenant["slug"],
+        tenant["id"],
+        tenant_slug or "",
+    )
     return render_template(
         "dashboard.html",
         summary=build_order_summary(),
@@ -5562,6 +5591,7 @@ def dashboard():
         shifts=fetch_shift_history(limit=5),
         preorder=fetch_preorder_settings(),
         current_shift_id=get_current_shift_id(),
+        tenant=tenant,
         current_user=current_user,
         auth_message=request.args.get("auth_message"),
         auth_error=request.args.get("auth_error"),
@@ -6002,6 +6032,8 @@ def create_order(tenant_slug: str | None = None):
     status = "ok"
     payload = request.get_json(silent=True) or {}
     profiler.mark("parse_json")
+    tenant = resolve_current_tenant()
+    tenant_id = int(tenant["id"])
     request_id = normalize_request_id(request.headers.get("Idempotency-Key") or payload.get("request_id"))
     if not request_id:
         status = "missing_request_id"
@@ -6021,7 +6053,10 @@ def create_order(tenant_slug: str | None = None):
     raw_payment_method = payload.get("payment_method")
     payment_method = normalize_payment_method(raw_payment_method)
     app.logger.info(
-        "create_order incoming raw_payment_method=%s normalized_payment_method=%s order_type=%s source=%s customer=%s",
+        "create_order incoming tenant_slug=%s tenant_id=%s route_slug=%s raw_payment_method=%s normalized_payment_method=%s order_type=%s source=%s customer=%s",
+        tenant["slug"],
+        tenant_id,
+        tenant_slug or "",
         raw_payment_method,
         payment_method,
         order_type,
@@ -6239,7 +6274,7 @@ def create_order(tenant_slug: str | None = None):
             RETURNING id
             """,
             (
-                current_tenant_id(),
+                tenant_id,
                 codigo,
                 order_number,
                 horario,
@@ -6297,7 +6332,7 @@ def create_order(tenant_slug: str | None = None):
             """,
             [
                 (
-                    current_tenant_id(),
+                    tenant_id,
                     pedido_id,
                     item["bebida_id"],
                     item["quantity"],
