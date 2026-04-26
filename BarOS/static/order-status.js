@@ -1,4 +1,5 @@
 const PUBLIC_ORDER_STORAGE_KEY = "baros_public_order_v1";
+const publicOrderEndpoints = window.BAROS_PUBLIC_ORDER_ENDPOINTS || {};
 const publicOrderState = {
   order: window.BAROS_PUBLIC_ORDER || null,
   timer: null,
@@ -219,7 +220,10 @@ async function regeneratePix() {
   setPublicOrderFeedback("Gerando novo Pix...");
   publicRegenerateButton.disabled = true;
   try {
-    const response = await fetch(`/api/orders/${encodeURIComponent(order.code)}/pix/regenerate`, {
+    const regenerateUrl = publicOrderEndpoints.regeneratePixUrlTemplate
+      ? publicOrderEndpoints.regeneratePixUrlTemplate.replace("__CODE__", encodeURIComponent(order.code))
+      : `/api/orders/${encodeURIComponent(order.code)}/pix/regenerate`;
+    const response = await fetch(regenerateUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

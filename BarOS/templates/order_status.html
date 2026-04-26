@@ -72,7 +72,7 @@
           <button class="secondary-button full-width" type="button" id="public-copy-pix">Copiar Pix</button>
           <button class="secondary-button full-width" type="button" id="public-refresh-order">Ja paguei / atualizar status</button>
           <button class="secondary-button full-width {% if not order.can_regenerate_pix %}hidden{% endif %}" type="button" id="public-regenerate-pix">Gerar novo Pix</button>
-          <a class="primary-button full-width" href="{{ url_for('index') }}">Voltar ao cardapio</a>
+          <a class="primary-button full-width" href="{{ menu_url }}">Voltar ao cardapio</a>
         </div>
       </article>
     </div>
@@ -95,6 +95,9 @@
 {% block scripts %}
 <script>
   window.BAROS_PUBLIC_ORDER = {{ order|tojson }};
+  window.BAROS_PUBLIC_ORDER_ENDPOINTS = {{ {
+    "regeneratePixUrlTemplate": regenerate_pix_url_template
+  }|tojson }};
 </script>
 <script src="{{ url_for('static', filename='order-status.js') }}"></script>
 {% endblock %}
