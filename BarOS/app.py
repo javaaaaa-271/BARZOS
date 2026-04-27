@@ -84,6 +84,7 @@ ROLE_LABELS = {
     "admin": "Administrador",
     "operator": "Operacao",
 }
+PLATFORM_ADMIN_ROLES = ("admin", "master_admin")
 TENANT_STATUS_OPTIONS = ("active", "inactive", "suspended")
 TENANT_PLAN_OPTIONS = ("legacy", "starter", "growth", "pro")
 TENANT_PLAN_MONTHLY_RATES = {
@@ -380,6 +381,7 @@ _SNAPSHOT_CACHE: dict[str, tuple[float, Any]] = {}
 _SNAPSHOT_CACHE_LOCK = Lock()
 _SNAPSHOT_CACHE_INFLIGHT: dict[str, Event] = {}
 _SNAPSHOT_CACHE_WAIT_TIMEOUT = 0.35
+STARTUP_BOOTSTRAP_ADVISORY_LOCK_ID = 74207101
 
 
 def normalize_internal_access_path(raw_value: str) -> str:
@@ -867,6 +869,12 @@ def safe_rollback(db: DatabaseConnection) -> None:
         pass
 
 
+def acquire_startup_bootstrap_lock(db: DatabaseConnection) -> None:
+    app.logger.info("startup bootstrap waiting_for_advisory_lock lock_id=%s", STARTUP_BOOTSTRAP_ADVISORY_LOCK_ID)
+    db.execute("SELECT pg_advisory_xact_lock(?)", (STARTUP_BOOTSTRAP_ADVISORY_LOCK_ID,))
+    app.logger.info("startup bootstrap acquired_advisory_lock lock_id=%s", STARTUP_BOOTSTRAP_ADVISORY_LOCK_ID)
+
+
 def normalize_tenant_slug(raw_value: str | None) -> str:
     value = sanitize_optional_text(raw_value, limit=64).lower()
     if not value:
@@ -1263,6 +1271,7 @@ def import_legacy_sqlite_if_needed(db: DatabaseConnection) -> None:
 
 def build_seed_staff_accounts() -> list[dict]:
     accounts = []
+    seen_usernames: set[str] = set()
 
     if SEED_MASTER_ADMIN_USERNAME and SEED_MASTER_ADMIN_PASSWORD:
         accounts.append(
@@ -1271,32 +1280,38 @@ def build_seed_staff_accounts() -> list[dict]:
                 "password": SEED_MASTER_ADMIN_PASSWORD,
                 "role": "master_admin",
                 "display_name": "Master Admin",
+                "update_existing": True,
             }
         )
+        seen_usernames.add(SEED_MASTER_ADMIN_USERNAME.lower())
 
     admin_username = (os.getenv("BAROS_SEED_ADMIN_USERNAME") or LEGACY_SEED_ADMIN_USERNAME).strip()
     admin_password = os.getenv("BAROS_SEED_ADMIN_PASSWORD") or LEGACY_SEED_ADMIN_PASSWORD
-    if admin_username and admin_password:
+    if admin_username and admin_password and admin_username.lower() not in seen_usernames:
         accounts.append(
             {
                 "username": admin_username,
                 "password": admin_password,
                 "role": "admin",
                 "display_name": "Administrador",
+                "update_existing": True,
             }
         )
+        seen_usernames.add(admin_username.lower())
 
     operator_username = (os.getenv("BAROS_SEED_OPERATOR_USERNAME") or LEGACY_SEED_OPERATOR_USERNAME).strip()
     operator_password = os.getenv("BAROS_SEED_OPERATOR_PASSWORD") or LEGACY_SEED_OPERATOR_PASSWORD
-    if operator_username and operator_password:
+    if operator_username and operator_password and operator_username.lower() not in seen_usernames:
         accounts.append(
             {
                 "username": operator_username,
                 "password": operator_password,
                 "role": "operator",
                 "display_name": "Operacao",
+                "update_existing": True,
             }
         )
+        seen_usernames.add(operator_username.lower())
 
     if accounts:
         return accounts
@@ -1312,12 +1327,14 @@ def build_seed_staff_accounts() -> list[dict]:
             "password": "bar123",
             "role": "admin",
             "display_name": "Administrador",
+            "update_existing": False,
         },
         {
             "username": "operacao",
             "password": "bar123",
             "role": "operator",
             "display_name": "Operacao",
+            "update_existing": False,
         },
     ]
 
@@ -1330,9 +1347,9 @@ def seed_staff_user_if_missing(
     display_name: str,
     *,
     update_existing: bool = False,
-) -> None:
+) -> str:
     if not username or not password:
-        return
+        return "skipped_missing_credentials"
 
     existing = db.execute(
         "SELECT id, password_hash, role, display_name, is_active FROM staff_users WHERE username = ?",
@@ -1357,7 +1374,8 @@ def seed_staff_user_if_missing(
                     """,
                     (password_hash, role, display_name, utc_now_iso(), existing["id"]),
                 )
-        return
+                return "updated_existing"
+        return "already_exists"
 
     db.execute(
         """
@@ -1366,16 +1384,72 @@ def seed_staff_user_if_missing(
         """,
         (username, generate_password_hash(password), role, display_name, utc_now_iso(), utc_now_iso()),
     )
+    return "inserted"
+
+
+def fetch_staff_bootstrap_summary(db: DatabaseConnection) -> dict:
+    total_users = int(db.execute("SELECT COUNT(*) AS total FROM staff_users").fetchone()["total"] or 0)
+    active_users = int(
+        db.execute("SELECT COUNT(*) AS total FROM staff_users WHERE COALESCE(is_active, 0) = 1").fetchone()["total"] or 0
+    )
+    role_rows = db.execute(
+        """
+        SELECT
+            COALESCE(NULLIF(TRIM(LOWER(role)), ''), 'missing') AS role,
+            COUNT(*) AS total,
+            SUM(CASE WHEN COALESCE(is_active, 0) = 1 THEN 1 ELSE 0 END) AS active_total
+        FROM staff_users
+        GROUP BY COALESCE(NULLIF(TRIM(LOWER(role)), ''), 'missing')
+        ORDER BY role
+        """
+    ).fetchall()
+    roles_found = {
+        row["role"]: {
+            "total": int(row["total"] or 0),
+            "active": int(row["active_total"] or 0),
+        }
+        for row in role_rows
+    }
+    platform_admin_total = int(
+        db.execute(
+            """
+            SELECT COUNT(*) AS total
+            FROM staff_users
+            WHERE COALESCE(is_active, 0) = 1
+              AND TRIM(LOWER(role)) IN (?, ?)
+            """,
+            PLATFORM_ADMIN_ROLES,
+        ).fetchone()["total"]
+        or 0
+    )
+    return {
+        "total_users": total_users,
+        "active_users": active_users,
+        "roles_found": roles_found,
+        "platform_admin_total": platform_admin_total,
+    }
 
 
 def validate_staff_bootstrap(db: DatabaseConnection) -> None:
-    admin_total = db.execute(
-        "SELECT COUNT(*) AS total FROM staff_users WHERE role = 'admin' AND is_active = 1"
-    ).fetchone()["total"]
-    if IS_PRODUCTION and not admin_total:
+    summary = fetch_staff_bootstrap_summary(db)
+    app.logger.info(
+        "startup staff bootstrap validation total_users=%s active_users=%s platform_admin_total=%s roles_found=%s",
+        summary["total_users"],
+        summary["active_users"],
+        summary["platform_admin_total"],
+        summary["roles_found"],
+    )
+    if IS_PRODUCTION and not summary["platform_admin_total"]:
+        app.logger.error(
+            "startup staff bootstrap would_fail reason=no_active_platform_admin accepted_roles=%s total_users=%s active_users=%s roles_found=%s",
+            PLATFORM_ADMIN_ROLES,
+            summary["total_users"],
+            summary["active_users"],
+            summary["roles_found"],
+        )
         raise RuntimeError(
-            "Nenhum usuario admin ativo foi encontrado. Configure BAROS_SEED_ADMIN_USERNAME e "
-            "BAROS_SEED_ADMIN_PASSWORD no primeiro deploy ou cadastre um admin no banco."
+            "Nenhum usuario admin/master_admin ativo foi encontrado. Configure BAROS_SEED_ADMIN_USERNAME e "
+            "BAROS_SEED_ADMIN_PASSWORD ou BAROS_SEED_MASTER_USERNAME e BAROS_SEED_MASTER_PASSWORD no primeiro deploy."
         )
 
 
@@ -1674,6 +1748,14 @@ def seed_bootstrap_data(db: DatabaseConnection) -> None:
     beverages_total = db.execute("SELECT COUNT(*) AS total FROM bebidas WHERE tenant_id = ?", (tenant_id,)).fetchone()["total"]
     inventory_total = db.execute("SELECT COUNT(*) AS total FROM inventory_items WHERE tenant_id = ?", (tenant_id,)).fetchone()["total"]
     notes_total = db.execute("SELECT COUNT(*) AS total FROM shift_notes WHERE tenant_id = ?", (tenant_id,)).fetchone()["total"]
+    app.logger.info(
+        "startup bootstrap seed check enabled=%s tenant_id=%s beverages_total=%s inventory_total=%s notes_total=%s",
+        ENABLE_BOOTSTRAP_SEED,
+        tenant_id,
+        beverages_total,
+        inventory_total,
+        notes_total,
+    )
 
     if ENABLE_BOOTSTRAP_SEED and beverages_total == 0:
         for beverage in BEVERAGE_SEED:
@@ -1754,14 +1836,23 @@ def seed_bootstrap_data(db: DatabaseConnection) -> None:
                 {**note, "tenant_id": tenant_id, "created_at": utc_now_iso()},
             )
 
-    for account in build_seed_staff_accounts():
-        seed_staff_user_if_missing(
+    seed_accounts = build_seed_staff_accounts()
+    app.logger.info("startup staff seed configured_accounts=%s", len(seed_accounts))
+    for account in seed_accounts:
+        seed_result = seed_staff_user_if_missing(
             db,
             account["username"],
             account["password"],
             account["role"],
             account["display_name"],
-            update_existing=account["role"] == "master_admin",
+            update_existing=account.get("update_existing", False),
+        )
+        app.logger.info(
+            "startup staff seed username=%s role=%s update_existing=%s result=%s",
+            account["username"],
+            account["role"],
+            account.get("update_existing", False),
+            seed_result,
         )
 
 
@@ -1933,6 +2024,8 @@ def backfill_existing_rows(db: DatabaseConnection, open_shift_id: int, tenant_id
 def init_db() -> None:
     db = open_db_connection()
     try:
+        app.logger.info("startup bootstrap begin env=%s production=%s", BAROS_ENV, IS_PRODUCTION)
+        acquire_startup_bootstrap_lock(db)
         create_core_tables(db)
         apply_schema_updates(db)
         default_tenant = ensure_default_tenant(db)
@@ -1942,7 +2035,9 @@ def init_db() -> None:
         seed_bootstrap_data(db)
         validate_staff_bootstrap(db)
         db.commit()
-    except Exception:
+        app.logger.info("startup bootstrap committed default_tenant_id=%s open_shift_id=%s", default_tenant["id"], open_shift_id)
+    except Exception as exc:
+        app.logger.exception("startup bootstrap failed error=%s", exc)
         safe_rollback(db)
         raise
     finally:
