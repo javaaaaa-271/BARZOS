@@ -1,0 +1,874 @@
+{% extends "base.html" %}
+
+{% block title %}BarOS Master Control{% endblock %}
+{% block body_class %}dashboard-body master-control-body{% endblock %}
+
+{% block content %}
+<style>
+  .master-control {
+    --mc-bg: #080b12;
+    --mc-panel: rgba(13, 18, 29, 0.9);
+    --mc-panel-strong: rgba(18, 24, 37, 0.96);
+    --mc-border: rgba(148, 163, 184, 0.17);
+    --mc-text: #f3f6fb;
+    --mc-muted: #9aa7b8;
+    --mc-faint: #6f7d90;
+    --mc-gold: #d9b56a;
+    --mc-cyan: #6dbeb6;
+    --mc-red: #d9818d;
+    --mc-green: #77c49b;
+    --mc-blue: #8ea9cf;
+    --mc-shadow: 0 18px 52px rgba(0, 0, 0, 0.3);
+    min-height: 100vh;
+    margin: -26px auto 0;
+    padding: 28px;
+    color: var(--mc-text);
+    font-family: "Aptos", "Segoe UI", sans-serif;
+    background:
+      radial-gradient(circle at 10% 0%, rgba(109, 190, 182, 0.08), transparent 32%),
+      linear-gradient(145deg, #070910 0%, #0d1320 54%, #070a11 100%);
+    border: 1px solid rgba(148, 163, 184, 0.1);
+    border-radius: 28px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .master-control::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background-image:
+      linear-gradient(rgba(255, 255, 255, 0.018) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.014) 1px, transparent 1px);
+    background-size: 56px 56px;
+    mask-image: linear-gradient(to bottom, black, transparent 58%);
+  }
+
+  .mc-layer {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    gap: 20px;
+  }
+
+  .mc-hero {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 22px;
+    align-items: stretch;
+    padding: 24px;
+    border: 1px solid rgba(148, 163, 184, 0.16);
+    border-radius: 24px;
+    background:
+      linear-gradient(135deg, rgba(17, 24, 38, 0.96), rgba(8, 11, 18, 0.92));
+    box-shadow: var(--mc-shadow);
+  }
+
+  .mc-eyebrow,
+  .mc-kpi-label,
+  .mc-section-kicker,
+  .mc-field span,
+  .mc-table-label {
+    color: #a8b3c2;
+    font-size: 0.68rem;
+    font-weight: 750;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+  }
+
+  .mc-title {
+    margin: 10px 0 12px;
+    font-size: clamp(2.15rem, 5vw, 4.55rem);
+    line-height: 0.96;
+    letter-spacing: -0.065em;
+    font-weight: 820;
+  }
+
+  .mc-subtitle {
+    max-width: 700px;
+    margin: 0;
+    color: #bdc7d4;
+    font-size: 0.98rem;
+    line-height: 1.65;
+  }
+
+  .mc-hero-meta,
+  .mc-quick-actions,
+  .mc-row-actions,
+  .mc-tenant-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .mc-hero-meta {
+    margin-top: 20px;
+  }
+
+  .mc-chip,
+  .mc-status,
+  .mc-plan {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    border-radius: 999px;
+    border: 1px solid var(--mc-border);
+    background: rgba(12, 17, 28, 0.78);
+    color: #d6deea;
+    padding: 6px 10px;
+    font-size: 0.76rem;
+    font-weight: 760;
+  }
+
+  .mc-chip::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--mc-cyan);
+  }
+
+  .mc-quick-panel {
+    min-width: 276px;
+    display: grid;
+    gap: 14px;
+    padding: 16px;
+    border-radius: 20px;
+    border: 1px solid rgba(148, 163, 184, 0.14);
+    background: rgba(4, 8, 15, 0.58);
+  }
+
+  .mc-quick-label {
+    color: var(--mc-muted);
+    font-size: 0.78rem;
+    margin: 0;
+  }
+
+  .mc-clock {
+    margin: 0;
+    font-size: 1.12rem;
+    font-weight: 780;
+    letter-spacing: -0.02em;
+  }
+
+  .mc-button {
+    display: inline-flex;
+    justify-content: center;
+    align-items: center;
+    gap: 8px;
+    min-height: 38px;
+    padding: 0 14px;
+    border-radius: 12px;
+    border: 1px solid rgba(148, 163, 184, 0.22);
+    background: rgba(13, 18, 29, 0.82);
+    color: var(--mc-text);
+    text-decoration: none;
+    font-size: 0.84rem;
+    font-weight: 760;
+    cursor: pointer;
+    transition: transform 180ms ease, border-color 180ms ease, background 180ms ease, box-shadow 180ms ease;
+  }
+
+  .mc-button:hover,
+  .mc-button:focus-visible {
+    transform: translateY(-1px);
+    border-color: rgba(217, 181, 106, 0.45);
+    background: rgba(26, 33, 48, 0.92);
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18);
+  }
+
+  .mc-button-primary {
+    border-color: rgba(217, 181, 106, 0.52);
+    background: #d9b56a;
+    color: #111317;
+  }
+
+  .mc-button-danger {
+    color: #eab7bd;
+    border-color: rgba(217, 129, 141, 0.26);
+  }
+
+  .mc-tenant-card .mc-form {
+    padding-top: 14px;
+    border-top: 1px solid rgba(148, 163, 184, 0.1);
+  }
+
+  .mc-tenant-card .mc-button {
+    min-height: 36px;
+  }
+
+  .mc-grid {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  .mc-kpi,
+  .mc-panel,
+  .mc-tenant-card {
+    border: 1px solid var(--mc-border);
+    background: var(--mc-panel);
+    border-radius: 18px;
+    box-shadow: 0 12px 34px rgba(0, 0, 0, 0.2);
+    backdrop-filter: blur(14px);
+  }
+
+  .mc-kpi {
+    padding: 15px;
+    min-height: 112px;
+    display: grid;
+    align-content: space-between;
+    overflow: hidden;
+    position: relative;
+  }
+
+  .mc-kpi::after {
+    content: "";
+    position: absolute;
+    inset: 0 auto auto 0;
+    width: 100%;
+    height: 2px;
+    background: linear-gradient(90deg, rgba(217, 181, 106, 0.62), transparent);
+  }
+
+  .mc-kpi-value {
+    margin: 9px 0 0;
+    font-size: clamp(1.45rem, 2.4vw, 2.05rem);
+    font-weight: 820;
+    letter-spacing: -0.045em;
+    overflow-wrap: anywhere;
+  }
+
+  .mc-kpi-note {
+    margin: 0;
+    color: var(--mc-faint);
+    font-size: 0.76rem;
+  }
+
+  .mc-panel {
+    padding: 20px;
+  }
+
+  .mc-section-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    align-items: flex-start;
+    margin-bottom: 16px;
+  }
+
+  .mc-section-head h2 {
+    margin: 3px 0 0;
+    font-size: 1.18rem;
+    letter-spacing: -0.035em;
+    font-weight: 780;
+  }
+
+  .mc-section-head p {
+    margin: 5px 0 0;
+    color: var(--mc-muted);
+    font-size: 0.88rem;
+  }
+
+  .mc-analytics {
+    display: grid;
+    grid-template-columns: 1.2fr 1.2fr 0.9fr;
+    gap: 14px;
+  }
+
+  .mc-chart {
+    display: flex;
+    align-items: end;
+    gap: 8px;
+    min-height: 138px;
+    padding-top: 10px;
+    border-top: 1px solid rgba(148, 163, 184, 0.1);
+  }
+
+  .mc-bar-wrap {
+    flex: 1;
+    display: grid;
+    gap: 7px;
+    align-items: end;
+    min-width: 24px;
+  }
+
+  .mc-bar {
+    min-height: 8px;
+    border-radius: 7px 7px 3px 3px;
+    background: linear-gradient(180deg, rgba(109, 190, 182, 0.86), rgba(109, 190, 182, 0.22));
+    transition: transform 180ms ease, filter 180ms ease;
+  }
+
+  .mc-bar-wrap:hover .mc-bar {
+    transform: scaleY(1.04);
+    filter: brightness(1.12);
+  }
+
+  .mc-bar-label,
+  .mc-bar-value {
+    color: var(--mc-muted);
+    text-align: center;
+    font-size: 0.68rem;
+    font-weight: 720;
+  }
+
+  .mc-plan-stack {
+    display: grid;
+    gap: 11px;
+  }
+
+  .mc-plan-row {
+    display: grid;
+    gap: 7px;
+  }
+
+  .mc-plan-line {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    color: #d7deea;
+    font-size: 0.84rem;
+    font-weight: 730;
+  }
+
+  .mc-progress {
+    height: 7px;
+    border-radius: 999px;
+    background: rgba(148, 163, 184, 0.13);
+    overflow: hidden;
+  }
+
+  .mc-progress span {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, rgba(217, 181, 106, 0.9), rgba(109, 190, 182, 0.78));
+  }
+
+  .mc-workspace {
+    display: grid;
+    grid-template-columns: minmax(310px, 0.82fr) minmax(0, 1.45fr);
+    gap: 16px;
+    align-items: start;
+  }
+
+  .mc-create {
+    position: sticky;
+    top: 18px;
+  }
+
+  .mc-form {
+    display: grid;
+    gap: 12px;
+  }
+
+  .mc-form-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .mc-field {
+    display: grid;
+    gap: 7px;
+  }
+
+  .mc-field input,
+  .mc-field select {
+    width: 100%;
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    border-radius: 12px;
+    background: rgba(7, 11, 19, 0.72);
+    color: var(--mc-text);
+    min-height: 40px;
+    padding: 10px 12px;
+    font-size: 0.88rem;
+    outline: none;
+    transition: border-color 180ms ease, box-shadow 180ms ease, background 180ms ease;
+  }
+
+  .mc-field select option {
+    background: #0d121d;
+    color: var(--mc-text);
+  }
+
+  .mc-field input:focus,
+  .mc-field select:focus {
+    border-color: rgba(217, 181, 106, 0.56);
+    box-shadow: 0 0 0 3px rgba(217, 181, 106, 0.1);
+    background: rgba(12, 17, 28, 0.88);
+  }
+
+  .mc-help {
+    margin: 0;
+    color: var(--mc-muted);
+    font-size: 0.8rem;
+  }
+
+  .mc-alert {
+    border-radius: 14px;
+    padding: 12px 14px;
+    border: 1px solid rgba(148, 163, 184, 0.22);
+    background: rgba(15, 23, 42, 0.86);
+    color: #dbeafe;
+  }
+
+  .mc-alert-success {
+    border-color: rgba(52, 211, 153, 0.36);
+    color: #bbf7d0;
+  }
+
+  .mc-alert-error {
+    border-color: rgba(251, 113, 133, 0.4);
+    color: #fecdd3;
+  }
+
+  .mc-tenant-list {
+    display: grid;
+    gap: 10px;
+  }
+
+  .mc-tenant-card {
+    display: grid;
+    gap: 14px;
+    padding: 16px;
+    transition: transform 180ms ease, border-color 180ms ease, background 180ms ease;
+  }
+
+  .mc-tenant-card:hover {
+    transform: translateY(-2px);
+    border-color: rgba(217, 181, 106, 0.28);
+    background: var(--mc-panel-strong);
+  }
+
+  .mc-tenant-top {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 12px;
+    align-items: start;
+  }
+
+  .mc-tenant-title {
+    margin: 0;
+    font-size: 1rem;
+    letter-spacing: -0.03em;
+    font-weight: 760;
+  }
+
+  .mc-tenant-slug {
+    margin: 4px 0 0;
+    color: var(--mc-muted);
+    font-family: "SFMono-Regular", Consolas, monospace;
+    font-size: 0.78rem;
+  }
+
+  .mc-status-active {
+    color: #b9e4c9;
+    border-color: rgba(119, 196, 155, 0.28);
+  }
+
+  .mc-status-suspended {
+    color: #ecc1c6;
+    border-color: rgba(217, 129, 141, 0.3);
+  }
+
+  .mc-status-inactive {
+    color: #e7d4a4;
+    border-color: rgba(217, 181, 106, 0.28);
+  }
+
+  .mc-plan {
+    color: #c6d4e8;
+    border-color: rgba(142, 169, 207, 0.26);
+  }
+
+  .mc-tenant-meta {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .mc-tenant-meta div {
+    border: 1px solid rgba(148, 163, 184, 0.11);
+    border-radius: 12px;
+    padding: 9px 10px;
+    background: rgba(6, 10, 18, 0.42);
+  }
+
+  .mc-tenant-meta strong {
+    display: block;
+    margin-top: 3px;
+    color: #e2e8f0;
+    font-size: 0.88rem;
+    font-weight: 720;
+  }
+
+  .mc-empty {
+    padding: 30px;
+    border-radius: 18px;
+    border: 1px dashed rgba(148, 163, 184, 0.22);
+    color: var(--mc-muted);
+    text-align: center;
+    background: rgba(2, 6, 23, 0.36);
+  }
+
+  @media (max-width: 1180px) {
+    .mc-grid {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .mc-analytics,
+    .mc-workspace {
+      grid-template-columns: 1fr;
+    }
+
+    .mc-create {
+      position: static;
+    }
+  }
+
+  @media (max-width: 760px) {
+    .master-control {
+      margin: -18px -12px 0;
+      padding: 16px;
+      border-radius: 22px;
+    }
+
+    .mc-hero {
+      padding: 18px;
+      border-radius: 20px;
+    }
+
+    .mc-title {
+      font-size: clamp(2rem, 12vw, 3.2rem);
+    }
+
+    .mc-hero,
+    .mc-tenant-top,
+    .mc-form-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .mc-grid,
+    .mc-tenant-meta {
+      grid-template-columns: 1fr;
+    }
+
+    .mc-quick-panel {
+      min-width: 0;
+    }
+
+    .mc-panel,
+    .mc-kpi,
+    .mc-tenant-card {
+      border-radius: 16px;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .mc-button,
+    .mc-bar,
+    .mc-tenant-card {
+      transition: none;
+    }
+  }
+</style>
+
+<main class="master-control" data-generated-at="{{ metrics.generated_at }}">
+  <div class="mc-layer">
+    <section class="mc-hero">
+      <div>
+        <p class="mc-eyebrow">Founder command center</p>
+        <h1 class="mc-title">BarOS Master Control</h1>
+        <p class="mc-subtitle">Painel interno para operar a plataforma SaaS, acompanhar tracao dos tenants e agir rapido sem abrir o SQL Editor.</p>
+        <div class="mc-hero-meta">
+          <span class="mc-chip">Logado como {{ current_user.username }}</span>
+          <span class="mc-chip">Ambiente {{ metrics.environment }}</span>
+          <span class="mc-chip">{{ metrics.active_tenants }} tenants ativos</span>
+        </div>
+      </div>
+      <aside class="mc-quick-panel" aria-label="Acoes rapidas">
+        <div>
+          <p class="mc-quick-label">Agora</p>
+          <p class="mc-clock" data-master-clock>{{ metrics.generated_at }}</p>
+        </div>
+        <div class="mc-quick-actions">
+          <a class="mc-button mc-button-primary" href="#create-tenant">Criar tenant</a>
+          <a class="mc-button" href="{{ url_for('index', tenant_slug='default') }}">Menu default</a>
+          <form method="post" action="{{ url_for('logout') }}">
+            <button class="mc-button mc-button-danger" type="submit">Sair</button>
+          </form>
+        </div>
+      </aside>
+    </section>
+
+    {% if message %}
+    <div class="mc-alert mc-alert-success">{{ message }}</div>
+    {% endif %}
+    {% if error %}
+    <div class="mc-alert mc-alert-error">{{ error }}</div>
+    {% endif %}
+
+    <section class="mc-grid" aria-label="Indicadores principais">
+      <article class="mc-kpi">
+        <div>
+          <span class="mc-kpi-label">Total Tenants</span>
+          <p class="mc-kpi-value">{{ metrics.total_tenants }}</p>
+        </div>
+        <p class="mc-kpi-note">Base cadastrada</p>
+      </article>
+      <article class="mc-kpi">
+        <div>
+          <span class="mc-kpi-label">Active Tenants</span>
+          <p class="mc-kpi-value">{{ metrics.active_tenants }}</p>
+        </div>
+        <p class="mc-kpi-note">Disponiveis para operar</p>
+      </article>
+      <article class="mc-kpi">
+        <div>
+          <span class="mc-kpi-label">Suspended</span>
+          <p class="mc-kpi-value">{{ metrics.suspended_tenants }}</p>
+        </div>
+        <p class="mc-kpi-note">Bloqueados no MVP</p>
+      </article>
+      <article class="mc-kpi">
+        <div>
+          <span class="mc-kpi-label">Orders Today</span>
+          <p class="mc-kpi-value">{{ metrics.orders_today }}</p>
+        </div>
+        <p class="mc-kpi-note">Todos os tenants</p>
+      </article>
+      <article class="mc-kpi">
+        <div>
+          <span class="mc-kpi-label">Orders This Month</span>
+          <p class="mc-kpi-value">{{ metrics.orders_month }}</p>
+        </div>
+        <p class="mc-kpi-note">Mes corrente</p>
+      </article>
+      <article class="mc-kpi">
+        <div>
+          <span class="mc-kpi-label">Estimated MRR</span>
+          <p class="mc-kpi-value">{{ metrics.estimated_mrr }}</p>
+        </div>
+        <p class="mc-kpi-note">Base ativa por plano</p>
+      </article>
+    </section>
+
+    <section class="mc-analytics" aria-label="Graficos da plataforma">
+      <article class="mc-panel">
+        <div class="mc-section-head">
+          <div>
+            <span class="mc-section-kicker">Growth</span>
+            <h2>Tenants growth</h2>
+            <p>Novos tenants por mes.</p>
+          </div>
+        </div>
+        <div class="mc-chart">
+          {% for point in metrics.tenant_growth %}
+          <div class="mc-bar-wrap" title="{{ point.value }} tenants">
+            <span class="mc-bar-value">{{ point.value }}</span>
+            <div class="mc-bar" style="height: {{ point.height }}%;"></div>
+            <span class="mc-bar-label">{{ point.label }}</span>
+          </div>
+          {% endfor %}
+        </div>
+      </article>
+
+      <article class="mc-panel">
+        <div class="mc-section-head">
+          <div>
+            <span class="mc-section-kicker">Demand</span>
+            <h2>Orders trend</h2>
+            <p>Volume diario nos ultimos 7 dias.</p>
+          </div>
+        </div>
+        <div class="mc-chart">
+          {% for point in metrics.orders_trend %}
+          <div class="mc-bar-wrap" title="{{ point.value }} pedidos">
+            <span class="mc-bar-value">{{ point.value }}</span>
+            <div class="mc-bar" style="height: {{ point.height }}%;"></div>
+            <span class="mc-bar-label">{{ point.label }}</span>
+          </div>
+          {% endfor %}
+        </div>
+      </article>
+
+      <article class="mc-panel">
+        <div class="mc-section-head">
+          <div>
+            <span class="mc-section-kicker">Revenue mix</span>
+            <h2>Plan distribution</h2>
+            <p>Composicao atual da base.</p>
+          </div>
+        </div>
+        <div class="mc-plan-stack">
+          {% for plan in metrics.plan_distribution %}
+          <div class="mc-plan-row">
+            <div class="mc-plan-line">
+              <span>{{ plan.label }}</span>
+              <span>{{ plan.value }} / {{ plan.rate }}</span>
+            </div>
+            <div class="mc-progress"><span style="width: {{ plan.percent }}%;"></span></div>
+          </div>
+          {% endfor %}
+        </div>
+      </article>
+    </section>
+
+    <section class="mc-workspace">
+      <article class="mc-panel mc-create" id="create-tenant">
+        <div class="mc-section-head">
+          <div>
+            <span class="mc-section-kicker">Provisioning</span>
+            <h2>Criar tenant</h2>
+            <p>Cadastre um novo bar/evento com slug seguro.</p>
+          </div>
+        </div>
+        <form class="mc-form" method="post" action="{{ url_for('create_master_tenant') }}">
+          <div class="mc-form-grid">
+            <label class="mc-field">
+              <span>Nome</span>
+              <input type="text" name="name" placeholder="Ex.: Bar da Rua" required>
+            </label>
+            <label class="mc-field">
+              <span>Slug</span>
+              <input type="text" name="slug" placeholder="bar-da-rua" pattern="[a-z0-9]+(-[a-z0-9]+)*" required>
+            </label>
+          </div>
+          <div class="mc-form-grid">
+            <label class="mc-field">
+              <span>Plano</span>
+              <select name="plan">
+                {% for plan in plan_options %}
+                <option value="{{ plan }}" {% if plan == 'starter' %}selected{% endif %}>{{ plan }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label class="mc-field">
+              <span>Status</span>
+              <select name="status">
+                {% for status in status_options %}
+                <option value="{{ status }}" {% if status == 'active' %}selected{% endif %}>{{ status }}</option>
+                {% endfor %}
+              </select>
+            </label>
+          </div>
+          <p class="mc-help">Slug fica fixo neste MVP. Use apenas letras minusculas, numeros e hifens.</p>
+          <button class="mc-button mc-button-primary" type="submit">Criar tenant</button>
+        </form>
+      </article>
+
+      <article class="mc-panel">
+        <div class="mc-section-head">
+          <div>
+            <span class="mc-section-kicker">Tenant ops</span>
+            <h2>Clientes cadastrados</h2>
+            <p>Scan rapido de status, plano, links operacionais e volume.</p>
+          </div>
+        </div>
+        <div class="mc-tenant-list">
+          {% if tenants %}
+            {% for tenant in tenants %}
+            <article class="mc-tenant-card">
+              <div class="mc-tenant-top">
+                <div>
+                  <h3 class="mc-tenant-title">{{ tenant.name }}</h3>
+                  <p class="mc-tenant-slug">/{{ tenant.slug }}</p>
+                </div>
+                <div class="mc-row-actions">
+                  <span class="mc-status mc-status-{{ tenant.status }}">{{ tenant.status }}</span>
+                  <span class="mc-plan">{{ tenant.plan }}</span>
+                </div>
+              </div>
+
+              <div class="mc-tenant-meta">
+                <div>
+                  <span class="mc-table-label">Criado</span>
+                  <strong>{{ format_date(tenant.created_at) }}</strong>
+                </div>
+                <div>
+                  <span class="mc-table-label">Pedidos</span>
+                  <strong>{{ tenant.total_orders or 0 }}</strong>
+                </div>
+                <div>
+                  <span class="mc-table-label">Ultimo pedido</span>
+                  <strong>{{ format_datetime(tenant.last_order_at) if tenant.last_order_at else 'Sem pedidos' }}</strong>
+                </div>
+              </div>
+
+              <div class="mc-tenant-links">
+                <a class="mc-button" href="{{ url_for('index', tenant_slug=tenant.slug) }}">Abrir menu</a>
+                <a class="mc-button" href="{{ url_for('dashboard', tenant_slug=tenant.slug) }}">Painel staff</a>
+              </div>
+
+              <form class="mc-form" method="post" action="{{ url_for('update_master_tenant', tenant_id=tenant.id) }}">
+                <div class="mc-form-grid">
+                  <label class="mc-field">
+                    <span>Nome</span>
+                    <input type="text" name="name" value="{{ tenant.name }}" required>
+                  </label>
+                  <label class="mc-field">
+                    <span>Slug travado</span>
+                    <input type="text" value="{{ tenant.slug }}" disabled>
+                  </label>
+                </div>
+                <div class="mc-form-grid">
+                  <label class="mc-field">
+                    <span>Plano</span>
+                    <select name="plan">
+                      {% for plan in plan_options %}
+                      <option value="{{ plan }}" {% if tenant.plan == plan %}selected{% endif %}>{{ plan }}</option>
+                      {% endfor %}
+                    </select>
+                  </label>
+                  <label class="mc-field">
+                    <span>Status</span>
+                    <select name="status">
+                      {% for status in status_options %}
+                      <option value="{{ status }}" {% if tenant.status == status %}selected{% endif %}>{{ status }}</option>
+                      {% endfor %}
+                    </select>
+                  </label>
+                </div>
+                <button class="mc-button" type="submit">Atualizar tenant</button>
+              </form>
+            </article>
+            {% endfor %}
+          {% else %}
+            <div class="mc-empty">
+              <strong>Nenhum tenant cadastrado ainda.</strong>
+              <p>Crie o primeiro tenant para iniciar a operacao multi-cliente.</p>
+            </div>
+          {% endif %}
+        </div>
+      </article>
+    </section>
+  </div>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  (() => {
+    const clock = document.querySelector("[data-master-clock]");
+    if (!clock) return;
+
+    const renderClock = () => {
+      const now = new Date();
+      clock.textContent = now.toLocaleString("pt-BR", {
+        day: "2-digit",
+        month: "2-digit",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+    };
+
+    renderClock();
+    window.setInterval(renderClock, 30000);
+  })();
+</script>
+{% endblock %}

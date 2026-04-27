@@ -69,6 +69,8 @@ LEGACY_SEED_ADMIN_USERNAME = (os.getenv("BAROS_USERNAME") or "").strip()
 LEGACY_SEED_ADMIN_PASSWORD = os.getenv("BAROS_PASSWORD") or ""
 LEGACY_SEED_OPERATOR_USERNAME = (os.getenv("BAROS_OPERATOR_USERNAME") or "").strip()
 LEGACY_SEED_OPERATOR_PASSWORD = os.getenv("BAROS_OPERATOR_PASSWORD") or ""
+SEED_MASTER_ADMIN_USERNAME = (os.getenv("BAROS_SEED_MASTER_USERNAME") or "").strip()
+SEED_MASTER_ADMIN_PASSWORD = os.getenv("BAROS_SEED_MASTER_PASSWORD") or ""
 DEFAULT_ORDER_SOURCE = "menu-digital"
 DEFAULT_TENANT_NAME = "Default BarOS"
 DEFAULT_TENANT_SLUG = "default"
@@ -78,8 +80,18 @@ BAROS_PIX_PROVIDER = (os.getenv("BAROS_PIX_PROVIDER") or "baros-pix-simulado").s
 BAROS_PIX_WEBHOOK_SECRET = (os.getenv("BAROS_PIX_WEBHOOK_SECRET") or "").strip()
 PIX_PAYMENT_TTL_MINUTES = max(1, int((os.getenv("BAROS_PIX_TTL_MINUTES") or "10").strip() or "10"))
 ROLE_LABELS = {
+    "master_admin": "Master Admin",
     "admin": "Administrador",
     "operator": "Operacao",
+}
+PLATFORM_ADMIN_ROLES = ("admin", "master_admin")
+TENANT_STATUS_OPTIONS = ("active", "inactive", "suspended")
+TENANT_PLAN_OPTIONS = ("legacy", "starter", "growth", "pro")
+TENANT_PLAN_MONTHLY_RATES = {
+    "legacy": 0,
+    "starter": 199,
+    "growth": 399,
+    "pro": 799,
 }
 PAYMENT_METHOD_LABELS = {
     "counter": "Pagar no balcao",
@@ -369,6 +381,7 @@ _SNAPSHOT_CACHE: dict[str, tuple[float, Any]] = {}
 _SNAPSHOT_CACHE_LOCK = Lock()
 _SNAPSHOT_CACHE_INFLIGHT: dict[str, Event] = {}
 _SNAPSHOT_CACHE_WAIT_TIMEOUT = 0.35
+STARTUP_BOOTSTRAP_ADVISORY_LOCK_ID = 74207101
 
 
 def normalize_internal_access_path(raw_value: str) -> str:
@@ -856,12 +869,47 @@ def safe_rollback(db: DatabaseConnection) -> None:
         pass
 
 
+def acquire_startup_bootstrap_lock(db: DatabaseConnection) -> None:
+    app.logger.info("startup bootstrap waiting_for_advisory_lock lock_id=%s", STARTUP_BOOTSTRAP_ADVISORY_LOCK_ID)
+    db.execute("SELECT pg_advisory_xact_lock(?)", (STARTUP_BOOTSTRAP_ADVISORY_LOCK_ID,))
+    app.logger.info("startup bootstrap acquired_advisory_lock lock_id=%s", STARTUP_BOOTSTRAP_ADVISORY_LOCK_ID)
+
+
 def normalize_tenant_slug(raw_value: str | None) -> str:
     value = sanitize_optional_text(raw_value, limit=64).lower()
     if not value:
         return DEFAULT_TENANT_SLUG
     normalized = re.sub(r"[^a-z0-9-]+", "-", value).strip("-")
     return normalized or DEFAULT_TENANT_SLUG
+
+
+def validate_tenant_slug(raw_value: str | None) -> str:
+    value = sanitize_optional_text(raw_value, limit=64)
+    if not value:
+        raise ValueError("Slug do tenant e obrigatorio.")
+    if value != value.lower():
+        raise ValueError("Slug deve usar apenas letras minusculas.")
+    if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", value):
+        raise ValueError("Slug deve usar apenas letras minusculas, numeros e hifens.")
+    return value
+
+
+def normalize_tenant_status(raw_value: str | None, *, default: str = DEFAULT_TENANT_STATUS) -> str:
+    value = sanitize_optional_text(raw_value, limit=24).lower()
+    if not value:
+        return default
+    if value not in TENANT_STATUS_OPTIONS:
+        raise ValueError("Status do tenant invalido.")
+    return value
+
+
+def normalize_tenant_plan(raw_value: str | None, *, default: str = DEFAULT_TENANT_PLAN) -> str:
+    value = sanitize_optional_text(raw_value, limit=32).lower()
+    if not value:
+        return default
+    if value not in TENANT_PLAN_OPTIONS:
+        raise ValueError("Plano do tenant invalido.")
+    return value
 
 
 def get_tenant_by_slug(slug: str, db: DatabaseConnection | None = None) -> DbRow | None:
@@ -915,6 +963,198 @@ def ensure_default_tenant(db: DatabaseConnection) -> DbRow:
 def get_default_tenant(db: DatabaseConnection | None = None) -> DbRow:
     connection = db or get_db()
     return ensure_default_tenant(connection)
+
+
+def fetch_tenants() -> list[DbRow]:
+    return get_db().execute(
+        """
+        SELECT
+            t.id,
+            t.name,
+            t.slug,
+            t.status,
+            t.plan,
+            t.created_at,
+            COUNT(p.id) AS total_orders,
+            MAX(p.horario_pedido) AS last_order_at
+        FROM tenants t
+        LEFT JOIN pedidos p ON p.tenant_id = t.id
+        GROUP BY t.id, t.name, t.slug, t.status, t.plan, t.created_at
+        ORDER BY t.created_at DESC, t.id DESC
+        """
+    ).fetchall()
+
+
+def local_day_bounds(days_back: int = 0) -> tuple[str, str]:
+    day = local_now().date() - timedelta(days=days_back)
+    start = datetime.combine(day, datetime.min.time(), tzinfo=LOCAL_TIMEZONE)
+    end = start + timedelta(days=1)
+    return (
+        start.astimezone(timezone.utc).isoformat(timespec="seconds"),
+        end.astimezone(timezone.utc).isoformat(timespec="seconds"),
+    )
+
+
+def local_month_bounds() -> tuple[str, str]:
+    now = local_now()
+    start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if start.month == 12:
+        end = start.replace(year=start.year + 1, month=1)
+    else:
+        end = start.replace(month=start.month + 1)
+    return (
+        start.astimezone(timezone.utc).isoformat(timespec="seconds"),
+        end.astimezone(timezone.utc).isoformat(timespec="seconds"),
+    )
+
+
+def safe_local_date_label(value: str | None, fallback: str = "-") -> str:
+    if not value:
+        return fallback
+    try:
+        return datetime.fromisoformat(value).astimezone(LOCAL_TIMEZONE).strftime("%d/%m/%Y")
+    except ValueError:
+        return fallback
+
+
+def build_bar_chart_points(raw_points: list[dict], value_key: str = "value") -> list[dict]:
+    max_value = max([int(point.get(value_key, 0) or 0) for point in raw_points] or [0])
+    for point in raw_points:
+        value = int(point.get(value_key, 0) or 0)
+        point["height"] = 8 if max_value == 0 else max(8, round((value / max_value) * 100))
+    return raw_points
+
+
+def fetch_master_admin_metrics(tenants: list[DbRow]) -> dict:
+    db = get_db()
+    today_start, today_end = local_day_bounds()
+    month_start, month_end = local_month_bounds()
+    orders_today = db.execute(
+        "SELECT COUNT(*) AS total FROM pedidos WHERE horario_pedido >= ? AND horario_pedido < ?",
+        (today_start, today_end),
+    ).fetchone()["total"]
+    orders_month = db.execute(
+        "SELECT COUNT(*) AS total FROM pedidos WHERE horario_pedido >= ? AND horario_pedido < ?",
+        (month_start, month_end),
+    ).fetchone()["total"]
+
+    status_counts = {status: 0 for status in TENANT_STATUS_OPTIONS}
+    plan_counts = {plan: 0 for plan in TENANT_PLAN_OPTIONS}
+    estimated_mrr = 0
+    monthly_growth: dict[str, dict] = {}
+    for tenant in tenants:
+        status = (tenant["status"] or "").strip().lower()
+        plan = (tenant["plan"] or "").strip().lower()
+        status_counts[status] = status_counts.get(status, 0) + 1
+        plan_counts[plan] = plan_counts.get(plan, 0) + 1
+        if status == "active":
+            estimated_mrr += TENANT_PLAN_MONTHLY_RATES.get(plan, 0)
+        created_at = tenant["created_at"]
+        try:
+            created_month = datetime.fromisoformat(created_at).astimezone(LOCAL_TIMEZONE)
+            month_key = created_month.strftime("%Y-%m")
+            month_label = created_month.strftime("%m/%y")
+        except (TypeError, ValueError):
+            month_key = "0000-00"
+            month_label = "Sem data"
+        monthly_growth.setdefault(month_key, {"label": month_label, "value": 0})
+        monthly_growth[month_key]["value"] += 1
+
+    growth_points = [monthly_growth[key] for key in sorted(monthly_growth.keys())[-6:]]
+    if not growth_points:
+        growth_points = [{"label": "Agora", "value": 0}]
+
+    trend_points = []
+    trend_start, _ = local_day_bounds(6)
+    _, trend_end = local_day_bounds()
+    trend_rows = db.execute(
+        "SELECT horario_pedido FROM pedidos WHERE horario_pedido >= ? AND horario_pedido < ?",
+        (trend_start, trend_end),
+    ).fetchall()
+    trend_counts: dict[str, int] = {}
+    for row in trend_rows:
+        try:
+            label = datetime.fromisoformat(row["horario_pedido"]).astimezone(LOCAL_TIMEZONE).strftime("%d/%m")
+        except (TypeError, ValueError):
+            continue
+        trend_counts[label] = trend_counts.get(label, 0) + 1
+    for days_back in range(6, -1, -1):
+        day_label = (local_now().date() - timedelta(days=days_back)).strftime("%d/%m")
+        trend_points.append({"label": day_label, "value": trend_counts.get(day_label, 0)})
+
+    plan_total = max(1, sum(plan_counts.values()))
+    plan_distribution = [
+        {
+            "label": plan,
+            "value": count,
+            "percent": round((count / plan_total) * 100),
+            "rate": currency_brl(TENANT_PLAN_MONTHLY_RATES.get(plan, 0)),
+        }
+        for plan, count in plan_counts.items()
+    ]
+
+    return {
+        "environment": BAROS_ENV or "development",
+        "generated_at": local_now().strftime("%d/%m/%Y %H:%M"),
+        "total_tenants": len(tenants),
+        "active_tenants": status_counts.get("active", 0),
+        "suspended_tenants": status_counts.get("suspended", 0),
+        "orders_today": int(orders_today or 0),
+        "orders_month": int(orders_month or 0),
+        "estimated_mrr": currency_brl(estimated_mrr),
+        "tenant_growth": build_bar_chart_points(growth_points),
+        "orders_trend": build_bar_chart_points(trend_points),
+        "plan_distribution": plan_distribution,
+        "status_counts": status_counts,
+    }
+
+
+def create_tenant_from_form(form_data) -> str:
+    name = sanitize_text(form_data.get("name"), "", limit=120)
+    if not name:
+        raise ValueError("Nome do tenant e obrigatorio.")
+
+    slug = validate_tenant_slug(form_data.get("slug"))
+    plan = normalize_tenant_plan(form_data.get("plan"), default="starter")
+    status = normalize_tenant_status(form_data.get("status"), default=DEFAULT_TENANT_STATUS)
+
+    get_db().execute(
+        """
+        INSERT INTO tenants (name, slug, status, plan, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (name, slug, status, plan, utc_now_iso()),
+    )
+    return f"Tenant {name} criado com sucesso."
+
+
+def update_tenant_from_form(tenant_id: int, form_data) -> str:
+    name = sanitize_text(form_data.get("name"), "", limit=120)
+    if not name:
+        raise ValueError("Nome do tenant e obrigatorio.")
+
+    plan = normalize_tenant_plan(form_data.get("plan"), default=DEFAULT_TENANT_PLAN)
+    status = normalize_tenant_status(form_data.get("status"), default=DEFAULT_TENANT_STATUS)
+    result = get_db().execute(
+        """
+        UPDATE tenants
+        SET name = ?, plan = ?, status = ?
+        WHERE id = ?
+        """,
+        (name, plan, status, tenant_id),
+    )
+    if result.rowcount != 1:
+        raise LookupError("Tenant nao encontrado.")
+    return f"Tenant {name} atualizado com sucesso."
+
+
+def build_master_admin_redirect(message: str | None = None, error: str | None = None):
+    params = {}
+    if message:
+        params["message"] = message
+    if error:
+        params["error"] = error
+    return redirect(url_for("master_admin_page", **params), code=303)
 
 
 def resolve_current_tenant() -> DbRow:
@@ -1031,30 +1271,47 @@ def import_legacy_sqlite_if_needed(db: DatabaseConnection) -> None:
 
 def build_seed_staff_accounts() -> list[dict]:
     accounts = []
+    seen_usernames: set[str] = set()
+
+    if SEED_MASTER_ADMIN_USERNAME and SEED_MASTER_ADMIN_PASSWORD:
+        accounts.append(
+            {
+                "username": SEED_MASTER_ADMIN_USERNAME,
+                "password": SEED_MASTER_ADMIN_PASSWORD,
+                "role": "master_admin",
+                "display_name": "Master Admin",
+                "update_existing": True,
+            }
+        )
+        seen_usernames.add(SEED_MASTER_ADMIN_USERNAME.lower())
 
     admin_username = (os.getenv("BAROS_SEED_ADMIN_USERNAME") or LEGACY_SEED_ADMIN_USERNAME).strip()
     admin_password = os.getenv("BAROS_SEED_ADMIN_PASSWORD") or LEGACY_SEED_ADMIN_PASSWORD
-    if admin_username and admin_password:
+    if admin_username and admin_password and admin_username.lower() not in seen_usernames:
         accounts.append(
             {
                 "username": admin_username,
                 "password": admin_password,
                 "role": "admin",
                 "display_name": "Administrador",
+                "update_existing": True,
             }
         )
+        seen_usernames.add(admin_username.lower())
 
     operator_username = (os.getenv("BAROS_SEED_OPERATOR_USERNAME") or LEGACY_SEED_OPERATOR_USERNAME).strip()
     operator_password = os.getenv("BAROS_SEED_OPERATOR_PASSWORD") or LEGACY_SEED_OPERATOR_PASSWORD
-    if operator_username and operator_password:
+    if operator_username and operator_password and operator_username.lower() not in seen_usernames:
         accounts.append(
             {
                 "username": operator_username,
                 "password": operator_password,
                 "role": "operator",
                 "display_name": "Operacao",
+                "update_existing": True,
             }
         )
+        seen_usernames.add(operator_username.lower())
 
     if accounts:
         return accounts
@@ -1070,26 +1327,55 @@ def build_seed_staff_accounts() -> list[dict]:
             "password": "bar123",
             "role": "admin",
             "display_name": "Administrador",
+            "update_existing": False,
         },
         {
             "username": "operacao",
             "password": "bar123",
             "role": "operator",
             "display_name": "Operacao",
+            "update_existing": False,
         },
     ]
 
 
-def seed_staff_user_if_missing(db: DatabaseConnection, username: str, password: str, role: str, display_name: str) -> None:
+def seed_staff_user_if_missing(
+    db: DatabaseConnection,
+    username: str,
+    password: str,
+    role: str,
+    display_name: str,
+    *,
+    update_existing: bool = False,
+) -> str:
     if not username or not password:
-        return
+        return "skipped_missing_credentials"
 
     existing = db.execute(
-        "SELECT id FROM staff_users WHERE username = ?",
+        "SELECT id, password_hash, role, display_name, is_active FROM staff_users WHERE username = ?",
         (username,),
     ).fetchone()
     if existing:
-        return
+        if update_existing:
+            password_hash = existing["password_hash"]
+            if not check_password_hash(password_hash, password):
+                password_hash = generate_password_hash(password)
+            if (
+                existing["role"] != role
+                or existing["display_name"] != display_name
+                or int(existing["is_active"]) != 1
+                or password_hash != existing["password_hash"]
+            ):
+                db.execute(
+                    """
+                    UPDATE staff_users
+                    SET password_hash = ?, role = ?, display_name = ?, is_active = 1, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (password_hash, role, display_name, utc_now_iso(), existing["id"]),
+                )
+                return "updated_existing"
+        return "already_exists"
 
     db.execute(
         """
@@ -1098,16 +1384,72 @@ def seed_staff_user_if_missing(db: DatabaseConnection, username: str, password: 
         """,
         (username, generate_password_hash(password), role, display_name, utc_now_iso(), utc_now_iso()),
     )
+    return "inserted"
+
+
+def fetch_staff_bootstrap_summary(db: DatabaseConnection) -> dict:
+    total_users = int(db.execute("SELECT COUNT(*) AS total FROM staff_users").fetchone()["total"] or 0)
+    active_users = int(
+        db.execute("SELECT COUNT(*) AS total FROM staff_users WHERE COALESCE(is_active, 0) = 1").fetchone()["total"] or 0
+    )
+    role_rows = db.execute(
+        """
+        SELECT
+            COALESCE(NULLIF(TRIM(LOWER(role)), ''), 'missing') AS role,
+            COUNT(*) AS total,
+            SUM(CASE WHEN COALESCE(is_active, 0) = 1 THEN 1 ELSE 0 END) AS active_total
+        FROM staff_users
+        GROUP BY COALESCE(NULLIF(TRIM(LOWER(role)), ''), 'missing')
+        ORDER BY role
+        """
+    ).fetchall()
+    roles_found = {
+        row["role"]: {
+            "total": int(row["total"] or 0),
+            "active": int(row["active_total"] or 0),
+        }
+        for row in role_rows
+    }
+    platform_admin_total = int(
+        db.execute(
+            """
+            SELECT COUNT(*) AS total
+            FROM staff_users
+            WHERE COALESCE(is_active, 0) = 1
+              AND TRIM(LOWER(role)) IN (?, ?)
+            """,
+            PLATFORM_ADMIN_ROLES,
+        ).fetchone()["total"]
+        or 0
+    )
+    return {
+        "total_users": total_users,
+        "active_users": active_users,
+        "roles_found": roles_found,
+        "platform_admin_total": platform_admin_total,
+    }
 
 
 def validate_staff_bootstrap(db: DatabaseConnection) -> None:
-    admin_total = db.execute(
-        "SELECT COUNT(*) AS total FROM staff_users WHERE role = 'admin' AND is_active = 1"
-    ).fetchone()["total"]
-    if IS_PRODUCTION and not admin_total:
+    summary = fetch_staff_bootstrap_summary(db)
+    app.logger.info(
+        "startup staff bootstrap validation total_users=%s active_users=%s platform_admin_total=%s roles_found=%s",
+        summary["total_users"],
+        summary["active_users"],
+        summary["platform_admin_total"],
+        summary["roles_found"],
+    )
+    if IS_PRODUCTION and not summary["platform_admin_total"]:
+        app.logger.error(
+            "startup staff bootstrap would_fail reason=no_active_platform_admin accepted_roles=%s total_users=%s active_users=%s roles_found=%s",
+            PLATFORM_ADMIN_ROLES,
+            summary["total_users"],
+            summary["active_users"],
+            summary["roles_found"],
+        )
         raise RuntimeError(
-            "Nenhum usuario admin ativo foi encontrado. Configure BAROS_SEED_ADMIN_USERNAME e "
-            "BAROS_SEED_ADMIN_PASSWORD no primeiro deploy ou cadastre um admin no banco."
+            "Nenhum usuario admin/master_admin ativo foi encontrado. Configure BAROS_SEED_ADMIN_USERNAME e "
+            "BAROS_SEED_ADMIN_PASSWORD ou BAROS_SEED_MASTER_USERNAME e BAROS_SEED_MASTER_PASSWORD no primeiro deploy."
         )
 
 
@@ -1406,6 +1748,14 @@ def seed_bootstrap_data(db: DatabaseConnection) -> None:
     beverages_total = db.execute("SELECT COUNT(*) AS total FROM bebidas WHERE tenant_id = ?", (tenant_id,)).fetchone()["total"]
     inventory_total = db.execute("SELECT COUNT(*) AS total FROM inventory_items WHERE tenant_id = ?", (tenant_id,)).fetchone()["total"]
     notes_total = db.execute("SELECT COUNT(*) AS total FROM shift_notes WHERE tenant_id = ?", (tenant_id,)).fetchone()["total"]
+    app.logger.info(
+        "startup bootstrap seed check enabled=%s tenant_id=%s beverages_total=%s inventory_total=%s notes_total=%s",
+        ENABLE_BOOTSTRAP_SEED,
+        tenant_id,
+        beverages_total,
+        inventory_total,
+        notes_total,
+    )
 
     if ENABLE_BOOTSTRAP_SEED and beverages_total == 0:
         for beverage in BEVERAGE_SEED:
@@ -1486,13 +1836,23 @@ def seed_bootstrap_data(db: DatabaseConnection) -> None:
                 {**note, "tenant_id": tenant_id, "created_at": utc_now_iso()},
             )
 
-    for account in build_seed_staff_accounts():
-        seed_staff_user_if_missing(
+    seed_accounts = build_seed_staff_accounts()
+    app.logger.info("startup staff seed configured_accounts=%s", len(seed_accounts))
+    for account in seed_accounts:
+        seed_result = seed_staff_user_if_missing(
             db,
             account["username"],
             account["password"],
             account["role"],
             account["display_name"],
+            update_existing=account.get("update_existing", False),
+        )
+        app.logger.info(
+            "startup staff seed username=%s role=%s update_existing=%s result=%s",
+            account["username"],
+            account["role"],
+            account.get("update_existing", False),
+            seed_result,
         )
 
 
@@ -1664,6 +2024,8 @@ def backfill_existing_rows(db: DatabaseConnection, open_shift_id: int, tenant_id
 def init_db() -> None:
     db = open_db_connection()
     try:
+        app.logger.info("startup bootstrap begin env=%s production=%s", BAROS_ENV, IS_PRODUCTION)
+        acquire_startup_bootstrap_lock(db)
         create_core_tables(db)
         apply_schema_updates(db)
         default_tenant = ensure_default_tenant(db)
@@ -1673,7 +2035,9 @@ def init_db() -> None:
         seed_bootstrap_data(db)
         validate_staff_bootstrap(db)
         db.commit()
-    except Exception:
+        app.logger.info("startup bootstrap committed default_tenant_id=%s open_shift_id=%s", default_tenant["id"], open_shift_id)
+    except Exception as exc:
+        app.logger.exception("startup bootstrap failed error=%s", exc)
         safe_rollback(db)
         raise
     finally:
@@ -1697,6 +2061,15 @@ def authentication_required_response():
 def permission_denied_response():
     if is_api_request():
         return jsonify({"error": "Voce nao tem permissao para esta acao."}), 403
+    if request.path == "/admin/master" or request.path.startswith("/admin/master/"):
+        app.logger.warning(
+            "master_admin access denied role=%s username=%s route=%s template=%s",
+            session.get("bar_role", ""),
+            session.get("bar_username", ""),
+            request.path,
+            "none",
+        )
+        abort(403)
     return redirect(url_for("dashboard"))
 
 
@@ -1781,6 +2154,7 @@ def get_current_user() -> dict:
         "role": role,
         "role_label": ROLE_LABELS.get(role, role.title()),
         "can_manage_bar": role == "admin",
+        "can_manage_platform": role == "master_admin",
     }
 
 
@@ -5534,6 +5908,8 @@ def build_dashboard_redirect(message: str | None = None, error: str | None = Non
 def handle_staff_login():
     # TODO(multi-tenant): bind staff sessions to a tenant once backoffice URLs move under /bar/<tenant_slug>.
     if request.method == "GET" and is_staff_authenticated():
+        if session.get("bar_role") == "master_admin":
+            return redirect(url_for("master_admin_page"))
         return redirect(url_for("dashboard"))
 
     error = None
@@ -5543,6 +5919,8 @@ def handle_staff_login():
         user = authenticate_staff_user(username, password)
         if user:
             begin_staff_session(user)
+            if user["role"] == "master_admin":
+                return redirect(url_for("master_admin_page"))
             return redirect(url_for("dashboard"))
         error = "Usuario ou senha invalidos."
     return render_template(
@@ -5570,6 +5948,66 @@ app.add_url_rule(f"/{INTERNAL_ACCESS_PATH}", "staff_access", staff_access, metho
 def logout():
     session.clear()
     return redirect(url_for("index"))
+
+
+@app.get("/admin/master")
+@login_required
+@role_required("master_admin")
+def master_admin_page():
+    current_user = get_current_user()
+    template_name = "master_admin.html"
+    tenants = fetch_tenants()
+    app.logger.info(
+        "master_admin access role=%s username=%s route=%s template=%s",
+        current_user["role"],
+        current_user["username"],
+        request.path,
+        template_name,
+    )
+    return render_template(
+        template_name,
+        tenants=tenants,
+        metrics=fetch_master_admin_metrics(tenants),
+        status_options=TENANT_STATUS_OPTIONS,
+        plan_options=TENANT_PLAN_OPTIONS,
+        current_user=current_user,
+        format_datetime=display_datetime,
+        format_date=safe_local_date_label,
+        message=request.args.get("message"),
+        error=request.args.get("error"),
+    )
+
+
+@app.post("/admin/master/tenants")
+@login_required
+@role_required("master_admin")
+def create_master_tenant():
+    try:
+        message = create_tenant_from_form(request.form)
+        get_db().commit()
+        return build_master_admin_redirect(message=message)
+    except IntegrityError:
+        get_db().rollback()
+        return build_master_admin_redirect(error="Ja existe um tenant com esse slug.")
+    except ValueError as error:
+        get_db().rollback()
+        return build_master_admin_redirect(error=str(error))
+
+
+@app.post("/admin/master/tenants/<int:tenant_id>/update")
+@login_required
+@role_required("master_admin")
+def update_master_tenant(tenant_id: int):
+    try:
+        message = update_tenant_from_form(tenant_id, request.form)
+        get_db().commit()
+        return build_master_admin_redirect(message=message)
+    except LookupError:
+        get_db().rollback()
+        return build_master_admin_redirect(error="Tenant nao encontrado.")
+    except ValueError as error:
+        get_db().rollback()
+        return build_master_admin_redirect(error=str(error))
 
 
 @app.get("/painel")
