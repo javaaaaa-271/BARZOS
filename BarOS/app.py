@@ -86,6 +86,12 @@ ROLE_LABELS = {
 }
 TENANT_STATUS_OPTIONS = ("active", "inactive", "suspended")
 TENANT_PLAN_OPTIONS = ("legacy", "starter", "growth", "pro")
+TENANT_PLAN_MONTHLY_RATES = {
+    "legacy": 0,
+    "starter": 199,
+    "growth": 399,
+    "pro": 799,
+}
 PAYMENT_METHOD_LABELS = {
     "counter": "Pagar no balcao",
     "pix": "Pix",
@@ -954,11 +960,145 @@ def get_default_tenant(db: DatabaseConnection | None = None) -> DbRow:
 def fetch_tenants() -> list[DbRow]:
     return get_db().execute(
         """
-        SELECT id, name, slug, status, plan, created_at
-        FROM tenants
-        ORDER BY created_at DESC, id DESC
+        SELECT
+            t.id,
+            t.name,
+            t.slug,
+            t.status,
+            t.plan,
+            t.created_at,
+            COUNT(p.id) AS total_orders,
+            MAX(p.horario_pedido) AS last_order_at
+        FROM tenants t
+        LEFT JOIN pedidos p ON p.tenant_id = t.id
+        GROUP BY t.id, t.name, t.slug, t.status, t.plan, t.created_at
+        ORDER BY t.created_at DESC, t.id DESC
         """
     ).fetchall()
+
+
+def local_day_bounds(days_back: int = 0) -> tuple[str, str]:
+    day = local_now().date() - timedelta(days=days_back)
+    start = datetime.combine(day, datetime.min.time(), tzinfo=LOCAL_TIMEZONE)
+    end = start + timedelta(days=1)
+    return (
+        start.astimezone(timezone.utc).isoformat(timespec="seconds"),
+        end.astimezone(timezone.utc).isoformat(timespec="seconds"),
+    )
+
+
+def local_month_bounds() -> tuple[str, str]:
+    now = local_now()
+    start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if start.month == 12:
+        end = start.replace(year=start.year + 1, month=1)
+    else:
+        end = start.replace(month=start.month + 1)
+    return (
+        start.astimezone(timezone.utc).isoformat(timespec="seconds"),
+        end.astimezone(timezone.utc).isoformat(timespec="seconds"),
+    )
+
+
+def safe_local_date_label(value: str | None, fallback: str = "-") -> str:
+    if not value:
+        return fallback
+    try:
+        return datetime.fromisoformat(value).astimezone(LOCAL_TIMEZONE).strftime("%d/%m/%Y")
+    except ValueError:
+        return fallback
+
+
+def build_bar_chart_points(raw_points: list[dict], value_key: str = "value") -> list[dict]:
+    max_value = max([int(point.get(value_key, 0) or 0) for point in raw_points] or [0])
+    for point in raw_points:
+        value = int(point.get(value_key, 0) or 0)
+        point["height"] = 8 if max_value == 0 else max(8, round((value / max_value) * 100))
+    return raw_points
+
+
+def fetch_master_admin_metrics(tenants: list[DbRow]) -> dict:
+    db = get_db()
+    today_start, today_end = local_day_bounds()
+    month_start, month_end = local_month_bounds()
+    orders_today = db.execute(
+        "SELECT COUNT(*) AS total FROM pedidos WHERE horario_pedido >= ? AND horario_pedido < ?",
+        (today_start, today_end),
+    ).fetchone()["total"]
+    orders_month = db.execute(
+        "SELECT COUNT(*) AS total FROM pedidos WHERE horario_pedido >= ? AND horario_pedido < ?",
+        (month_start, month_end),
+    ).fetchone()["total"]
+
+    status_counts = {status: 0 for status in TENANT_STATUS_OPTIONS}
+    plan_counts = {plan: 0 for plan in TENANT_PLAN_OPTIONS}
+    estimated_mrr = 0
+    monthly_growth: dict[str, dict] = {}
+    for tenant in tenants:
+        status = (tenant["status"] or "").strip().lower()
+        plan = (tenant["plan"] or "").strip().lower()
+        status_counts[status] = status_counts.get(status, 0) + 1
+        plan_counts[plan] = plan_counts.get(plan, 0) + 1
+        if status == "active":
+            estimated_mrr += TENANT_PLAN_MONTHLY_RATES.get(plan, 0)
+        created_at = tenant["created_at"]
+        try:
+            created_month = datetime.fromisoformat(created_at).astimezone(LOCAL_TIMEZONE)
+            month_key = created_month.strftime("%Y-%m")
+            month_label = created_month.strftime("%m/%y")
+        except (TypeError, ValueError):
+            month_key = "0000-00"
+            month_label = "Sem data"
+        monthly_growth.setdefault(month_key, {"label": month_label, "value": 0})
+        monthly_growth[month_key]["value"] += 1
+
+    growth_points = [monthly_growth[key] for key in sorted(monthly_growth.keys())[-6:]]
+    if not growth_points:
+        growth_points = [{"label": "Agora", "value": 0}]
+
+    trend_points = []
+    trend_start, _ = local_day_bounds(6)
+    _, trend_end = local_day_bounds()
+    trend_rows = db.execute(
+        "SELECT horario_pedido FROM pedidos WHERE horario_pedido >= ? AND horario_pedido < ?",
+        (trend_start, trend_end),
+    ).fetchall()
+    trend_counts: dict[str, int] = {}
+    for row in trend_rows:
+        try:
+            label = datetime.fromisoformat(row["horario_pedido"]).astimezone(LOCAL_TIMEZONE).strftime("%d/%m")
+        except (TypeError, ValueError):
+            continue
+        trend_counts[label] = trend_counts.get(label, 0) + 1
+    for days_back in range(6, -1, -1):
+        day_label = (local_now().date() - timedelta(days=days_back)).strftime("%d/%m")
+        trend_points.append({"label": day_label, "value": trend_counts.get(day_label, 0)})
+
+    plan_total = max(1, sum(plan_counts.values()))
+    plan_distribution = [
+        {
+            "label": plan,
+            "value": count,
+            "percent": round((count / plan_total) * 100),
+            "rate": currency_brl(TENANT_PLAN_MONTHLY_RATES.get(plan, 0)),
+        }
+        for plan, count in plan_counts.items()
+    ]
+
+    return {
+        "environment": BAROS_ENV or "development",
+        "generated_at": local_now().strftime("%d/%m/%Y %H:%M"),
+        "total_tenants": len(tenants),
+        "active_tenants": status_counts.get("active", 0),
+        "suspended_tenants": status_counts.get("suspended", 0),
+        "orders_today": int(orders_today or 0),
+        "orders_month": int(orders_month or 0),
+        "estimated_mrr": currency_brl(estimated_mrr),
+        "tenant_growth": build_bar_chart_points(growth_points),
+        "orders_trend": build_bar_chart_points(trend_points),
+        "plan_distribution": plan_distribution,
+        "status_counts": status_counts,
+    }
 
 
 def create_tenant_from_form(form_data) -> str:
@@ -5721,6 +5861,7 @@ def logout():
 def master_admin_page():
     current_user = get_current_user()
     template_name = "master_admin.html"
+    tenants = fetch_tenants()
     app.logger.info(
         "master_admin access role=%s username=%s route=%s template=%s",
         current_user["role"],
@@ -5730,10 +5871,13 @@ def master_admin_page():
     )
     return render_template(
         template_name,
-        tenants=fetch_tenants(),
+        tenants=tenants,
+        metrics=fetch_master_admin_metrics(tenants),
         status_options=TENANT_STATUS_OPTIONS,
         plan_options=TENANT_PLAN_OPTIONS,
         current_user=current_user,
+        format_datetime=display_datetime,
+        format_date=safe_local_date_label,
         message=request.args.get("message"),
         error=request.args.get("error"),
     )

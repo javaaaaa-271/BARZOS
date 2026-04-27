@@ -1,134 +1,835 @@
 {% extends "base.html" %}
 
 {% block title %}BarOS Master Control{% endblock %}
-{% block body_class %}dashboard-body{% endblock %}
+{% block body_class %}dashboard-body master-control-body{% endblock %}
 
 {% block content %}
-<main class="dashboard-shell products-shell settings-shell">
-  <header class="dashboard-header">
-    <div>
-      <p class="eyebrow">Master Admin</p>
-      <h1>BarOS Master Control</h1>
-      <p class="dashboard-subtitle">Painel interno de administracao SaaS e gestao de tenants.</p>
-      <p class="dashboard-user-meta">{{ current_user.display_name }} / {{ current_user.role_label }}</p>
-    </div>
-    <div class="dashboard-actions">
-      <a class="secondary-button" href="{{ url_for('index', tenant_slug='default') }}">Menu default</a>
-      <form method="post" action="{{ url_for('logout') }}">
-        <button class="ghost-button" type="submit">Sair</button>
-      </form>
-    </div>
-  </header>
+<style>
+  .master-control {
+    --mc-bg: #06070b;
+    --mc-panel: rgba(12, 16, 28, 0.82);
+    --mc-panel-strong: rgba(18, 24, 40, 0.92);
+    --mc-border: rgba(148, 163, 184, 0.2);
+    --mc-text: #f8fafc;
+    --mc-muted: #94a3b8;
+    --mc-faint: #64748b;
+    --mc-gold: #f6c453;
+    --mc-cyan: #2dd4bf;
+    --mc-red: #fb7185;
+    --mc-green: #34d399;
+    --mc-blue: #60a5fa;
+    --mc-shadow: 0 24px 80px rgba(0, 0, 0, 0.38);
+    min-height: 100vh;
+    margin: -32px auto 0;
+    padding: 32px;
+    color: var(--mc-text);
+    background:
+      radial-gradient(circle at 14% 8%, rgba(45, 212, 191, 0.2), transparent 30%),
+      radial-gradient(circle at 80% 0%, rgba(246, 196, 83, 0.16), transparent 28%),
+      linear-gradient(135deg, #05060a 0%, #0a1020 52%, #05070d 100%);
+    border-radius: 32px;
+    position: relative;
+    overflow: hidden;
+  }
 
-  {% if message %}
-  <div class="alert alert-success">{{ message }}</div>
-  {% endif %}
-  {% if error %}
-  <div class="alert">{{ error }}</div>
-  {% endif %}
+  .master-control::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background-image:
+      linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+    background-size: 44px 44px;
+    mask-image: linear-gradient(to bottom, black, transparent 72%);
+  }
 
-  <section class="settings-grid">
-    <article class="panel-card panel-card-premium">
-      <div class="panel-head">
-        <div>
-          <p class="mini-label">Novo tenant</p>
-          <h2>Criar bar/evento</h2>
+  .mc-layer {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    gap: 24px;
+  }
+
+  .mc-hero {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 24px;
+    align-items: stretch;
+    padding: 28px;
+    border: 1px solid rgba(246, 196, 83, 0.24);
+    border-radius: 30px;
+    background:
+      linear-gradient(135deg, rgba(16, 24, 40, 0.94), rgba(8, 11, 19, 0.76)),
+      radial-gradient(circle at top right, rgba(45, 212, 191, 0.22), transparent 40%);
+    box-shadow: var(--mc-shadow);
+  }
+
+  .mc-eyebrow,
+  .mc-kpi-label,
+  .mc-section-kicker,
+  .mc-field span,
+  .mc-table-label {
+    color: var(--mc-muted);
+    font-size: 0.74rem;
+    font-weight: 800;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
+  .mc-title {
+    margin: 8px 0 12px;
+    font-size: clamp(2.5rem, 7vw, 5.8rem);
+    line-height: 0.9;
+    letter-spacing: -0.08em;
+  }
+
+  .mc-subtitle {
+    max-width: 760px;
+    margin: 0;
+    color: #cbd5e1;
+    font-size: 1.02rem;
+  }
+
+  .mc-hero-meta,
+  .mc-quick-actions,
+  .mc-row-actions,
+  .mc-tenant-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+  }
+
+  .mc-hero-meta {
+    margin-top: 22px;
+  }
+
+  .mc-chip,
+  .mc-status,
+  .mc-plan {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    border-radius: 999px;
+    border: 1px solid var(--mc-border);
+    background: rgba(15, 23, 42, 0.72);
+    color: #dbeafe;
+    padding: 8px 12px;
+    font-size: 0.82rem;
+    font-weight: 800;
+  }
+
+  .mc-chip::before {
+    content: "";
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--mc-cyan);
+    box-shadow: 0 0 18px var(--mc-cyan);
+  }
+
+  .mc-quick-panel {
+    min-width: 280px;
+    display: grid;
+    gap: 12px;
+    padding: 18px;
+    border-radius: 24px;
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    background: rgba(2, 6, 23, 0.62);
+  }
+
+  .mc-quick-label {
+    color: var(--mc-muted);
+    font-size: 0.82rem;
+    margin: 0;
+  }
+
+  .mc-clock {
+    margin: 0;
+    font-size: 1.35rem;
+    font-weight: 900;
+    letter-spacing: -0.03em;
+  }
+
+  .mc-button {
+    display: inline-flex;
+    justify-content: center;
+    align-items: center;
+    gap: 8px;
+    min-height: 42px;
+    padding: 0 16px;
+    border-radius: 999px;
+    border: 1px solid rgba(148, 163, 184, 0.28);
+    background: rgba(15, 23, 42, 0.72);
+    color: var(--mc-text);
+    text-decoration: none;
+    font-weight: 900;
+    cursor: pointer;
+    transition: transform 180ms ease, border-color 180ms ease, background 180ms ease, box-shadow 180ms ease;
+  }
+
+  .mc-button:hover,
+  .mc-button:focus-visible {
+    transform: translateY(-2px);
+    border-color: rgba(45, 212, 191, 0.62);
+    background: rgba(20, 184, 166, 0.14);
+    box-shadow: 0 16px 36px rgba(45, 212, 191, 0.12);
+  }
+
+  .mc-button-primary {
+    border-color: rgba(246, 196, 83, 0.7);
+    background: linear-gradient(135deg, #f6c453, #f59e0b);
+    color: #12110a;
+  }
+
+  .mc-button-danger {
+    color: #fecdd3;
+    border-color: rgba(251, 113, 133, 0.32);
+  }
+
+  .mc-grid {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 14px;
+  }
+
+  .mc-kpi,
+  .mc-panel,
+  .mc-tenant-card {
+    border: 1px solid var(--mc-border);
+    background: var(--mc-panel);
+    border-radius: 24px;
+    box-shadow: 0 18px 50px rgba(0, 0, 0, 0.22);
+    backdrop-filter: blur(18px);
+  }
+
+  .mc-kpi {
+    padding: 18px;
+    min-height: 138px;
+    display: grid;
+    align-content: space-between;
+    overflow: hidden;
+    position: relative;
+  }
+
+  .mc-kpi::after {
+    content: "";
+    position: absolute;
+    inset: auto 16px 14px auto;
+    width: 54px;
+    height: 54px;
+    border-radius: 18px;
+    background: linear-gradient(135deg, rgba(45, 212, 191, 0.2), rgba(246, 196, 83, 0.12));
+    filter: blur(0.2px);
+  }
+
+  .mc-kpi-value {
+    margin: 10px 0 0;
+    font-size: clamp(1.8rem, 4vw, 2.8rem);
+    font-weight: 950;
+    letter-spacing: -0.07em;
+  }
+
+  .mc-kpi-note {
+    margin: 0;
+    color: var(--mc-faint);
+    font-size: 0.82rem;
+  }
+
+  .mc-panel {
+    padding: 22px;
+  }
+
+  .mc-section-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    align-items: flex-start;
+    margin-bottom: 18px;
+  }
+
+  .mc-section-head h2 {
+    margin: 3px 0 0;
+    font-size: 1.35rem;
+    letter-spacing: -0.04em;
+  }
+
+  .mc-section-head p {
+    margin: 5px 0 0;
+    color: var(--mc-muted);
+  }
+
+  .mc-analytics {
+    display: grid;
+    grid-template-columns: 1.2fr 1.2fr 0.9fr;
+    gap: 16px;
+  }
+
+  .mc-chart {
+    display: flex;
+    align-items: end;
+    gap: 10px;
+    min-height: 160px;
+    padding-top: 12px;
+  }
+
+  .mc-bar-wrap {
+    flex: 1;
+    display: grid;
+    gap: 8px;
+    align-items: end;
+    min-width: 26px;
+  }
+
+  .mc-bar {
+    min-height: 10px;
+    border-radius: 999px 999px 8px 8px;
+    background: linear-gradient(180deg, var(--mc-cyan), rgba(45, 212, 191, 0.14));
+    box-shadow: 0 0 22px rgba(45, 212, 191, 0.16);
+    transition: transform 180ms ease, filter 180ms ease;
+  }
+
+  .mc-bar-wrap:hover .mc-bar {
+    transform: scaleY(1.04);
+    filter: brightness(1.18);
+  }
+
+  .mc-bar-label,
+  .mc-bar-value {
+    color: var(--mc-muted);
+    text-align: center;
+    font-size: 0.72rem;
+    font-weight: 800;
+  }
+
+  .mc-plan-stack {
+    display: grid;
+    gap: 12px;
+  }
+
+  .mc-plan-row {
+    display: grid;
+    gap: 7px;
+  }
+
+  .mc-plan-line {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    color: #dbeafe;
+    font-weight: 850;
+  }
+
+  .mc-progress {
+    height: 9px;
+    border-radius: 999px;
+    background: rgba(148, 163, 184, 0.16);
+    overflow: hidden;
+  }
+
+  .mc-progress span {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, var(--mc-gold), var(--mc-cyan));
+  }
+
+  .mc-workspace {
+    display: grid;
+    grid-template-columns: minmax(320px, 0.86fr) minmax(0, 1.4fr);
+    gap: 18px;
+    align-items: start;
+  }
+
+  .mc-create {
+    position: sticky;
+    top: 18px;
+  }
+
+  .mc-form {
+    display: grid;
+    gap: 14px;
+  }
+
+  .mc-form-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  .mc-field {
+    display: grid;
+    gap: 8px;
+  }
+
+  .mc-field input,
+  .mc-field select {
+    width: 100%;
+    border: 1px solid rgba(148, 163, 184, 0.22);
+    border-radius: 16px;
+    background: rgba(2, 6, 23, 0.58);
+    color: var(--mc-text);
+    padding: 13px 14px;
+    outline: none;
+    transition: border-color 180ms ease, box-shadow 180ms ease, background 180ms ease;
+  }
+
+  .mc-field input:focus,
+  .mc-field select:focus {
+    border-color: rgba(45, 212, 191, 0.76);
+    box-shadow: 0 0 0 4px rgba(45, 212, 191, 0.12);
+    background: rgba(15, 23, 42, 0.72);
+  }
+
+  .mc-help {
+    margin: 0;
+    color: var(--mc-muted);
+    font-size: 0.84rem;
+  }
+
+  .mc-alert {
+    border-radius: 18px;
+    padding: 14px 16px;
+    border: 1px solid rgba(148, 163, 184, 0.22);
+    background: rgba(15, 23, 42, 0.86);
+    color: #dbeafe;
+  }
+
+  .mc-alert-success {
+    border-color: rgba(52, 211, 153, 0.36);
+    color: #bbf7d0;
+  }
+
+  .mc-alert-error {
+    border-color: rgba(251, 113, 133, 0.4);
+    color: #fecdd3;
+  }
+
+  .mc-tenant-list {
+    display: grid;
+    gap: 12px;
+  }
+
+  .mc-tenant-card {
+    display: grid;
+    gap: 16px;
+    padding: 18px;
+    transition: transform 180ms ease, border-color 180ms ease, background 180ms ease;
+  }
+
+  .mc-tenant-card:hover {
+    transform: translateY(-2px);
+    border-color: rgba(246, 196, 83, 0.34);
+    background: var(--mc-panel-strong);
+  }
+
+  .mc-tenant-top {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 14px;
+  }
+
+  .mc-tenant-title {
+    margin: 0;
+    font-size: 1.08rem;
+    letter-spacing: -0.03em;
+  }
+
+  .mc-tenant-slug {
+    margin: 4px 0 0;
+    color: var(--mc-muted);
+    font-family: "SFMono-Regular", Consolas, monospace;
+    font-size: 0.82rem;
+  }
+
+  .mc-status-active {
+    color: #bbf7d0;
+    border-color: rgba(52, 211, 153, 0.34);
+  }
+
+  .mc-status-suspended {
+    color: #fecdd3;
+    border-color: rgba(251, 113, 133, 0.38);
+  }
+
+  .mc-status-inactive {
+    color: #fde68a;
+    border-color: rgba(246, 196, 83, 0.36);
+  }
+
+  .mc-plan {
+    color: #bfdbfe;
+    border-color: rgba(96, 165, 250, 0.32);
+  }
+
+  .mc-tenant-meta {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .mc-tenant-meta div {
+    border: 1px solid rgba(148, 163, 184, 0.14);
+    border-radius: 16px;
+    padding: 10px;
+    background: rgba(2, 6, 23, 0.35);
+  }
+
+  .mc-tenant-meta strong {
+    display: block;
+    margin-top: 4px;
+    color: #e2e8f0;
+  }
+
+  .mc-empty {
+    padding: 36px;
+    border-radius: 24px;
+    border: 1px dashed rgba(148, 163, 184, 0.28);
+    color: var(--mc-muted);
+    text-align: center;
+    background: rgba(2, 6, 23, 0.36);
+  }
+
+  @media (max-width: 1180px) {
+    .mc-grid {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .mc-analytics,
+    .mc-workspace {
+      grid-template-columns: 1fr;
+    }
+
+    .mc-create {
+      position: static;
+    }
+  }
+
+  @media (max-width: 760px) {
+    .master-control {
+      margin: -18px -12px 0;
+      padding: 18px;
+      border-radius: 22px;
+    }
+
+    .mc-hero,
+    .mc-tenant-top,
+    .mc-form-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .mc-grid,
+    .mc-tenant-meta {
+      grid-template-columns: 1fr;
+    }
+
+    .mc-quick-panel {
+      min-width: 0;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .mc-button,
+    .mc-bar,
+    .mc-tenant-card {
+      transition: none;
+    }
+  }
+</style>
+
+<main class="master-control" data-generated-at="{{ metrics.generated_at }}">
+  <div class="mc-layer">
+    <section class="mc-hero">
+      <div>
+        <p class="mc-eyebrow">Founder command center</p>
+        <h1 class="mc-title">BarOS Master Control</h1>
+        <p class="mc-subtitle">Painel interno para operar a plataforma SaaS, acompanhar tracao dos tenants e agir rapido sem abrir o SQL Editor.</p>
+        <div class="mc-hero-meta">
+          <span class="mc-chip">Logado como {{ current_user.username }}</span>
+          <span class="mc-chip">Ambiente {{ metrics.environment }}</span>
+          <span class="mc-chip">{{ metrics.active_tenants }} tenants ativos</span>
         </div>
       </div>
-      <form class="product-form" method="post" action="{{ url_for('create_master_tenant') }}">
-        <div class="form-grid-two">
-          <label>
-            <span>Nome</span>
-            <input type="text" name="name" placeholder="Ex.: Bar da Rua" required>
-          </label>
-          <label>
-            <span>Slug</span>
-            <input type="text" name="slug" placeholder="bar-da-rua" pattern="[a-z0-9]+(-[a-z0-9]+)*" required>
-          </label>
-        </div>
-        <div class="form-grid-two">
-          <label>
-            <span>Plano</span>
-            <select name="plan">
-              {% for plan in plan_options %}
-              <option value="{{ plan }}" {% if plan == 'starter' %}selected{% endif %}>{{ plan }}</option>
-              {% endfor %}
-            </select>
-          </label>
-          <label>
-            <span>Status</span>
-            <select name="status">
-              {% for status in status_options %}
-              <option value="{{ status }}" {% if status == 'active' %}selected{% endif %}>{{ status }}</option>
-              {% endfor %}
-            </select>
-          </label>
-        </div>
-        <p class="muted-note">O slug fica fixo neste MVP. Use apenas letras minusculas, numeros e hifens.</p>
-        <button class="primary-button" type="submit">Criar tenant</button>
-      </form>
-    </article>
-
-    <article class="panel-card panel-card-premium">
-      <div class="panel-head">
+      <aside class="mc-quick-panel" aria-label="Acoes rapidas">
         <div>
-          <p class="mini-label">Tenants</p>
-          <h2>Clientes cadastrados</h2>
+          <p class="mc-quick-label">Agora</p>
+          <p class="mc-clock" data-master-clock>{{ metrics.generated_at }}</p>
         </div>
-      </div>
-      <div class="managed-product-list">
-        {% if tenants %}
-          {% for tenant in tenants %}
-          <article class="managed-product-card">
-            <div class="managed-product-preview">
-              <div>
-                <strong>{{ tenant.name }}</strong>
-                <p>{{ tenant.slug }} / {{ tenant.status }} / {{ tenant.plan }}</p>
-                <div class="hero-meta compact-meta">
-                  <span>Criado em {{ tenant.created_at }}</span>
-                  <a href="{{ url_for('index', tenant_slug=tenant.slug) }}">Menu</a>
-                  <a href="{{ url_for('dashboard', tenant_slug=tenant.slug) }}">Painel</a>
+        <div class="mc-quick-actions">
+          <a class="mc-button mc-button-primary" href="#create-tenant">Criar tenant</a>
+          <a class="mc-button" href="{{ url_for('index', tenant_slug='default') }}">Menu default</a>
+          <form method="post" action="{{ url_for('logout') }}">
+            <button class="mc-button mc-button-danger" type="submit">Sair</button>
+          </form>
+        </div>
+      </aside>
+    </section>
+
+    {% if message %}
+    <div class="mc-alert mc-alert-success">{{ message }}</div>
+    {% endif %}
+    {% if error %}
+    <div class="mc-alert mc-alert-error">{{ error }}</div>
+    {% endif %}
+
+    <section class="mc-grid" aria-label="Indicadores principais">
+      <article class="mc-kpi">
+        <div>
+          <span class="mc-kpi-label">Total Tenants</span>
+          <p class="mc-kpi-value">{{ metrics.total_tenants }}</p>
+        </div>
+        <p class="mc-kpi-note">Base cadastrada</p>
+      </article>
+      <article class="mc-kpi">
+        <div>
+          <span class="mc-kpi-label">Active Tenants</span>
+          <p class="mc-kpi-value">{{ metrics.active_tenants }}</p>
+        </div>
+        <p class="mc-kpi-note">Disponiveis para operar</p>
+      </article>
+      <article class="mc-kpi">
+        <div>
+          <span class="mc-kpi-label">Suspended</span>
+          <p class="mc-kpi-value">{{ metrics.suspended_tenants }}</p>
+        </div>
+        <p class="mc-kpi-note">Bloqueados no MVP</p>
+      </article>
+      <article class="mc-kpi">
+        <div>
+          <span class="mc-kpi-label">Orders Today</span>
+          <p class="mc-kpi-value">{{ metrics.orders_today }}</p>
+        </div>
+        <p class="mc-kpi-note">Todos os tenants</p>
+      </article>
+      <article class="mc-kpi">
+        <div>
+          <span class="mc-kpi-label">Orders This Month</span>
+          <p class="mc-kpi-value">{{ metrics.orders_month }}</p>
+        </div>
+        <p class="mc-kpi-note">Mes corrente</p>
+      </article>
+      <article class="mc-kpi">
+        <div>
+          <span class="mc-kpi-label">Estimated MRR</span>
+          <p class="mc-kpi-value">{{ metrics.estimated_mrr }}</p>
+        </div>
+        <p class="mc-kpi-note">Base ativa por plano</p>
+      </article>
+    </section>
+
+    <section class="mc-analytics" aria-label="Graficos da plataforma">
+      <article class="mc-panel">
+        <div class="mc-section-head">
+          <div>
+            <span class="mc-section-kicker">Growth</span>
+            <h2>Tenants growth</h2>
+            <p>Novos tenants por mes.</p>
+          </div>
+        </div>
+        <div class="mc-chart">
+          {% for point in metrics.tenant_growth %}
+          <div class="mc-bar-wrap" title="{{ point.value }} tenants">
+            <span class="mc-bar-value">{{ point.value }}</span>
+            <div class="mc-bar" style="height: {{ point.height }}%;"></div>
+            <span class="mc-bar-label">{{ point.label }}</span>
+          </div>
+          {% endfor %}
+        </div>
+      </article>
+
+      <article class="mc-panel">
+        <div class="mc-section-head">
+          <div>
+            <span class="mc-section-kicker">Demand</span>
+            <h2>Orders trend</h2>
+            <p>Volume diario nos ultimos 7 dias.</p>
+          </div>
+        </div>
+        <div class="mc-chart">
+          {% for point in metrics.orders_trend %}
+          <div class="mc-bar-wrap" title="{{ point.value }} pedidos">
+            <span class="mc-bar-value">{{ point.value }}</span>
+            <div class="mc-bar" style="height: {{ point.height }}%;"></div>
+            <span class="mc-bar-label">{{ point.label }}</span>
+          </div>
+          {% endfor %}
+        </div>
+      </article>
+
+      <article class="mc-panel">
+        <div class="mc-section-head">
+          <div>
+            <span class="mc-section-kicker">Revenue mix</span>
+            <h2>Plan distribution</h2>
+            <p>Composicao atual da base.</p>
+          </div>
+        </div>
+        <div class="mc-plan-stack">
+          {% for plan in metrics.plan_distribution %}
+          <div class="mc-plan-row">
+            <div class="mc-plan-line">
+              <span>{{ plan.label }}</span>
+              <span>{{ plan.value }} / {{ plan.rate }}</span>
+            </div>
+            <div class="mc-progress"><span style="width: {{ plan.percent }}%;"></span></div>
+          </div>
+          {% endfor %}
+        </div>
+      </article>
+    </section>
+
+    <section class="mc-workspace">
+      <article class="mc-panel mc-create" id="create-tenant">
+        <div class="mc-section-head">
+          <div>
+            <span class="mc-section-kicker">Provisioning</span>
+            <h2>Criar tenant</h2>
+            <p>Cadastre um novo bar/evento com slug seguro.</p>
+          </div>
+        </div>
+        <form class="mc-form" method="post" action="{{ url_for('create_master_tenant') }}">
+          <div class="mc-form-grid">
+            <label class="mc-field">
+              <span>Nome</span>
+              <input type="text" name="name" placeholder="Ex.: Bar da Rua" required>
+            </label>
+            <label class="mc-field">
+              <span>Slug</span>
+              <input type="text" name="slug" placeholder="bar-da-rua" pattern="[a-z0-9]+(-[a-z0-9]+)*" required>
+            </label>
+          </div>
+          <div class="mc-form-grid">
+            <label class="mc-field">
+              <span>Plano</span>
+              <select name="plan">
+                {% for plan in plan_options %}
+                <option value="{{ plan }}" {% if plan == 'starter' %}selected{% endif %}>{{ plan }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label class="mc-field">
+              <span>Status</span>
+              <select name="status">
+                {% for status in status_options %}
+                <option value="{{ status }}" {% if status == 'active' %}selected{% endif %}>{{ status }}</option>
+                {% endfor %}
+              </select>
+            </label>
+          </div>
+          <p class="mc-help">Slug fica fixo neste MVP. Use apenas letras minusculas, numeros e hifens.</p>
+          <button class="mc-button mc-button-primary" type="submit">Criar tenant</button>
+        </form>
+      </article>
+
+      <article class="mc-panel">
+        <div class="mc-section-head">
+          <div>
+            <span class="mc-section-kicker">Tenant ops</span>
+            <h2>Clientes cadastrados</h2>
+            <p>Scan rapido de status, plano, links operacionais e volume.</p>
+          </div>
+        </div>
+        <div class="mc-tenant-list">
+          {% if tenants %}
+            {% for tenant in tenants %}
+            <article class="mc-tenant-card">
+              <div class="mc-tenant-top">
+                <div>
+                  <h3 class="mc-tenant-title">{{ tenant.name }}</h3>
+                  <p class="mc-tenant-slug">/{{ tenant.slug }}</p>
+                </div>
+                <div class="mc-row-actions">
+                  <span class="mc-status mc-status-{{ tenant.status }}">{{ tenant.status }}</span>
+                  <span class="mc-plan">{{ tenant.plan }}</span>
                 </div>
               </div>
+
+              <div class="mc-tenant-meta">
+                <div>
+                  <span class="mc-table-label">Criado</span>
+                  <strong>{{ format_date(tenant.created_at) }}</strong>
+                </div>
+                <div>
+                  <span class="mc-table-label">Pedidos</span>
+                  <strong>{{ tenant.total_orders or 0 }}</strong>
+                </div>
+                <div>
+                  <span class="mc-table-label">Ultimo pedido</span>
+                  <strong>{{ format_datetime(tenant.last_order_at) if tenant.last_order_at else 'Sem pedidos' }}</strong>
+                </div>
+              </div>
+
+              <div class="mc-tenant-links">
+                <a class="mc-button" href="{{ url_for('index', tenant_slug=tenant.slug) }}">Abrir menu</a>
+                <a class="mc-button" href="{{ url_for('dashboard', tenant_slug=tenant.slug) }}">Painel staff</a>
+              </div>
+
+              <form class="mc-form" method="post" action="{{ url_for('update_master_tenant', tenant_id=tenant.id) }}">
+                <div class="mc-form-grid">
+                  <label class="mc-field">
+                    <span>Nome</span>
+                    <input type="text" name="name" value="{{ tenant.name }}" required>
+                  </label>
+                  <label class="mc-field">
+                    <span>Slug travado</span>
+                    <input type="text" value="{{ tenant.slug }}" disabled>
+                  </label>
+                </div>
+                <div class="mc-form-grid">
+                  <label class="mc-field">
+                    <span>Plano</span>
+                    <select name="plan">
+                      {% for plan in plan_options %}
+                      <option value="{{ plan }}" {% if tenant.plan == plan %}selected{% endif %}>{{ plan }}</option>
+                      {% endfor %}
+                    </select>
+                  </label>
+                  <label class="mc-field">
+                    <span>Status</span>
+                    <select name="status">
+                      {% for status in status_options %}
+                      <option value="{{ status }}" {% if tenant.status == status %}selected{% endif %}>{{ status }}</option>
+                      {% endfor %}
+                    </select>
+                  </label>
+                </div>
+                <button class="mc-button" type="submit">Atualizar tenant</button>
+              </form>
+            </article>
+            {% endfor %}
+          {% else %}
+            <div class="mc-empty">
+              <strong>Nenhum tenant cadastrado ainda.</strong>
+              <p>Crie o primeiro tenant para iniciar a operacao multi-cliente.</p>
             </div>
-            <form class="product-form compact-form" method="post" action="{{ url_for('update_master_tenant', tenant_id=tenant.id) }}">
-              <div class="form-grid-two">
-                <label>
-                  <span>Nome</span>
-                  <input type="text" name="name" value="{{ tenant.name }}" required>
-                </label>
-                <label>
-                  <span>Slug</span>
-                  <input type="text" value="{{ tenant.slug }}" disabled>
-                </label>
-              </div>
-              <div class="form-grid-two">
-                <label>
-                  <span>Plano</span>
-                  <select name="plan">
-                    {% for plan in plan_options %}
-                    <option value="{{ plan }}" {% if tenant.plan == plan %}selected{% endif %}>{{ plan }}</option>
-                    {% endfor %}
-                  </select>
-                </label>
-                <label>
-                  <span>Status</span>
-                  <select name="status">
-                    {% for status in status_options %}
-                    <option value="{{ status }}" {% if tenant.status == status %}selected{% endif %}>{{ status }}</option>
-                    {% endfor %}
-                  </select>
-                </label>
-              </div>
-              <button class="secondary-button" type="submit">Atualizar tenant</button>
-            </form>
-          </article>
-          {% endfor %}
-        {% else %}
-          <p class="empty-inline">Nenhum tenant cadastrado ainda.</p>
-        {% endif %}
-      </div>
-    </article>
-  </section>
+          {% endif %}
+        </div>
+      </article>
+    </section>
+  </div>
 </main>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  (() => {
+    const clock = document.querySelector("[data-master-clock]");
+    if (!clock) return;
+
+    const renderClock = () => {
+      const now = new Date();
+      clock.textContent = now.toLocaleString("pt-BR", {
+        day: "2-digit",
+        month: "2-digit",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+    };
+
+    renderClock();
+    window.setInterval(renderClock, 30000);
+  })();
+</script>
 {% endblock %}
