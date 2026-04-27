@@ -1,0 +1,133 @@
+{% extends "base.html" %}
+
+{% block title %}BarOS | Master Admin{% endblock %}
+{% block body_class %}dashboard-body{% endblock %}
+
+{% block content %}
+<main class="dashboard-shell products-shell settings-shell">
+  <header class="dashboard-header">
+    <div>
+      <p class="eyebrow">Master Admin</p>
+      <h1>Tenants da plataforma</h1>
+      <p class="dashboard-user-meta">{{ current_user.display_name }} / {{ current_user.role_label }}</p>
+    </div>
+    <div class="dashboard-actions">
+      <a class="secondary-button" href="{{ url_for('index', tenant_slug='default') }}">Menu default</a>
+      <form method="post" action="{{ url_for('logout') }}">
+        <button class="ghost-button" type="submit">Sair</button>
+      </form>
+    </div>
+  </header>
+
+  {% if message %}
+  <div class="alert alert-success">{{ message }}</div>
+  {% endif %}
+  {% if error %}
+  <div class="alert">{{ error }}</div>
+  {% endif %}
+
+  <section class="settings-grid">
+    <article class="panel-card panel-card-premium">
+      <div class="panel-head">
+        <div>
+          <p class="mini-label">Novo tenant</p>
+          <h2>Criar bar/evento</h2>
+        </div>
+      </div>
+      <form class="product-form" method="post" action="{{ url_for('create_master_tenant') }}">
+        <div class="form-grid-two">
+          <label>
+            <span>Nome</span>
+            <input type="text" name="name" placeholder="Ex.: Bar da Rua" required>
+          </label>
+          <label>
+            <span>Slug</span>
+            <input type="text" name="slug" placeholder="bar-da-rua" pattern="[a-z0-9]+(-[a-z0-9]+)*" required>
+          </label>
+        </div>
+        <div class="form-grid-two">
+          <label>
+            <span>Plano</span>
+            <select name="plan">
+              {% for plan in plan_options %}
+              <option value="{{ plan }}" {% if plan == 'starter' %}selected{% endif %}>{{ plan }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>
+            <span>Status</span>
+            <select name="status">
+              {% for status in status_options %}
+              <option value="{{ status }}" {% if status == 'active' %}selected{% endif %}>{{ status }}</option>
+              {% endfor %}
+            </select>
+          </label>
+        </div>
+        <p class="muted-note">O slug fica fixo neste MVP. Use apenas letras minusculas, numeros e hifens.</p>
+        <button class="primary-button" type="submit">Criar tenant</button>
+      </form>
+    </article>
+
+    <article class="panel-card panel-card-premium">
+      <div class="panel-head">
+        <div>
+          <p class="mini-label">Tenants</p>
+          <h2>Clientes cadastrados</h2>
+        </div>
+      </div>
+      <div class="managed-product-list">
+        {% if tenants %}
+          {% for tenant in tenants %}
+          <article class="managed-product-card">
+            <div class="managed-product-preview">
+              <div>
+                <strong>{{ tenant.name }}</strong>
+                <p>{{ tenant.slug }} / {{ tenant.status }} / {{ tenant.plan }}</p>
+                <div class="hero-meta compact-meta">
+                  <span>Criado em {{ tenant.created_at }}</span>
+                  <a href="{{ url_for('index', tenant_slug=tenant.slug) }}">Menu</a>
+                  <a href="{{ url_for('dashboard', tenant_slug=tenant.slug) }}">Painel</a>
+                </div>
+              </div>
+            </div>
+            <form class="product-form compact-form" method="post" action="{{ url_for('update_master_tenant', tenant_id=tenant.id) }}">
+              <div class="form-grid-two">
+                <label>
+                  <span>Nome</span>
+                  <input type="text" name="name" value="{{ tenant.name }}" required>
+                </label>
+                <label>
+                  <span>Slug</span>
+                  <input type="text" value="{{ tenant.slug }}" disabled>
+                </label>
+              </div>
+              <div class="form-grid-two">
+                <label>
+                  <span>Plano</span>
+                  <select name="plan">
+                    {% for plan in plan_options %}
+                    <option value="{{ plan }}" {% if tenant.plan == plan %}selected{% endif %}>{{ plan }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+                <label>
+                  <span>Status</span>
+                  <select name="status">
+                    {% for status in status_options %}
+                    <option value="{{ status }}" {% if tenant.status == status %}selected{% endif %}>{{ status }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+              </div>
+              <button class="secondary-button" type="submit">Atualizar tenant</button>
+            </form>
+          </article>
+          {% endfor %}
+        {% else %}
+          <p class="empty-inline">Nenhum tenant cadastrado ainda.</p>
+        {% endif %}
+      </div>
+    </article>
+  </section>
+</main>
+{% endblock %}

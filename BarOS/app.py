@@ -69,6 +69,8 @@ LEGACY_SEED_ADMIN_USERNAME = (os.getenv("BAROS_USERNAME") or "").strip()
 LEGACY_SEED_ADMIN_PASSWORD = os.getenv("BAROS_PASSWORD") or ""
 LEGACY_SEED_OPERATOR_USERNAME = (os.getenv("BAROS_OPERATOR_USERNAME") or "").strip()
 LEGACY_SEED_OPERATOR_PASSWORD = os.getenv("BAROS_OPERATOR_PASSWORD") or ""
+SEED_MASTER_ADMIN_USERNAME = (os.getenv("BAROS_SEED_MASTER_USERNAME") or "").strip()
+SEED_MASTER_ADMIN_PASSWORD = os.getenv("BAROS_SEED_MASTER_PASSWORD") or ""
 DEFAULT_ORDER_SOURCE = "menu-digital"
 DEFAULT_TENANT_NAME = "Default BarOS"
 DEFAULT_TENANT_SLUG = "default"
@@ -78,9 +80,12 @@ BAROS_PIX_PROVIDER = (os.getenv("BAROS_PIX_PROVIDER") or "baros-pix-simulado").s
 BAROS_PIX_WEBHOOK_SECRET = (os.getenv("BAROS_PIX_WEBHOOK_SECRET") or "").strip()
 PIX_PAYMENT_TTL_MINUTES = max(1, int((os.getenv("BAROS_PIX_TTL_MINUTES") or "10").strip() or "10"))
 ROLE_LABELS = {
+    "master_admin": "Master Admin",
     "admin": "Administrador",
     "operator": "Operacao",
 }
+TENANT_STATUS_OPTIONS = ("active", "inactive", "suspended")
+TENANT_PLAN_OPTIONS = ("legacy", "starter", "growth", "pro")
 PAYMENT_METHOD_LABELS = {
     "counter": "Pagar no balcao",
     "pix": "Pix",
@@ -864,6 +869,35 @@ def normalize_tenant_slug(raw_value: str | None) -> str:
     return normalized or DEFAULT_TENANT_SLUG
 
 
+def validate_tenant_slug(raw_value: str | None) -> str:
+    value = sanitize_optional_text(raw_value, limit=64)
+    if not value:
+        raise ValueError("Slug do tenant e obrigatorio.")
+    if value != value.lower():
+        raise ValueError("Slug deve usar apenas letras minusculas.")
+    if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", value):
+        raise ValueError("Slug deve usar apenas letras minusculas, numeros e hifens.")
+    return value
+
+
+def normalize_tenant_status(raw_value: str | None, *, default: str = DEFAULT_TENANT_STATUS) -> str:
+    value = sanitize_optional_text(raw_value, limit=24).lower()
+    if not value:
+        return default
+    if value not in TENANT_STATUS_OPTIONS:
+        raise ValueError("Status do tenant invalido.")
+    return value
+
+
+def normalize_tenant_plan(raw_value: str | None, *, default: str = DEFAULT_TENANT_PLAN) -> str:
+    value = sanitize_optional_text(raw_value, limit=32).lower()
+    if not value:
+        return default
+    if value not in TENANT_PLAN_OPTIONS:
+        raise ValueError("Plano do tenant invalido.")
+    return value
+
+
 def get_tenant_by_slug(slug: str, db: DatabaseConnection | None = None) -> DbRow | None:
     connection = db or get_db()
     return connection.execute(
@@ -915,6 +949,64 @@ def ensure_default_tenant(db: DatabaseConnection) -> DbRow:
 def get_default_tenant(db: DatabaseConnection | None = None) -> DbRow:
     connection = db or get_db()
     return ensure_default_tenant(connection)
+
+
+def fetch_tenants() -> list[DbRow]:
+    return get_db().execute(
+        """
+        SELECT id, name, slug, status, plan, created_at
+        FROM tenants
+        ORDER BY created_at DESC, id DESC
+        """
+    ).fetchall()
+
+
+def create_tenant_from_form(form_data) -> str:
+    name = sanitize_text(form_data.get("name"), "", limit=120)
+    if not name:
+        raise ValueError("Nome do tenant e obrigatorio.")
+
+    slug = validate_tenant_slug(form_data.get("slug"))
+    plan = normalize_tenant_plan(form_data.get("plan"), default="starter")
+    status = normalize_tenant_status(form_data.get("status"), default=DEFAULT_TENANT_STATUS)
+
+    get_db().execute(
+        """
+        INSERT INTO tenants (name, slug, status, plan, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (name, slug, status, plan, utc_now_iso()),
+    )
+    return f"Tenant {name} criado com sucesso."
+
+
+def update_tenant_from_form(tenant_id: int, form_data) -> str:
+    name = sanitize_text(form_data.get("name"), "", limit=120)
+    if not name:
+        raise ValueError("Nome do tenant e obrigatorio.")
+
+    plan = normalize_tenant_plan(form_data.get("plan"), default=DEFAULT_TENANT_PLAN)
+    status = normalize_tenant_status(form_data.get("status"), default=DEFAULT_TENANT_STATUS)
+    result = get_db().execute(
+        """
+        UPDATE tenants
+        SET name = ?, plan = ?, status = ?
+        WHERE id = ?
+        """,
+        (name, plan, status, tenant_id),
+    )
+    if result.rowcount != 1:
+        raise LookupError("Tenant nao encontrado.")
+    return f"Tenant {name} atualizado com sucesso."
+
+
+def build_master_admin_redirect(message: str | None = None, error: str | None = None):
+    params = {}
+    if message:
+        params["message"] = message
+    if error:
+        params["error"] = error
+    return redirect(url_for("master_admin_page", **params), code=303)
 
 
 def resolve_current_tenant() -> DbRow:
@@ -1031,6 +1123,16 @@ def import_legacy_sqlite_if_needed(db: DatabaseConnection) -> None:
 
 def build_seed_staff_accounts() -> list[dict]:
     accounts = []
+
+    if SEED_MASTER_ADMIN_USERNAME and SEED_MASTER_ADMIN_PASSWORD:
+        accounts.append(
+            {
+                "username": SEED_MASTER_ADMIN_USERNAME,
+                "password": SEED_MASTER_ADMIN_PASSWORD,
+                "role": "master_admin",
+                "display_name": "Master Admin",
+            }
+        )
 
     admin_username = (os.getenv("BAROS_SEED_ADMIN_USERNAME") or LEGACY_SEED_ADMIN_USERNAME).strip()
     admin_password = os.getenv("BAROS_SEED_ADMIN_PASSWORD") or LEGACY_SEED_ADMIN_PASSWORD
@@ -1781,6 +1883,7 @@ def get_current_user() -> dict:
         "role": role,
         "role_label": ROLE_LABELS.get(role, role.title()),
         "can_manage_bar": role == "admin",
+        "can_manage_platform": role == "master_admin",
     }
 
 
@@ -5534,6 +5637,8 @@ def build_dashboard_redirect(message: str | None = None, error: str | None = Non
 def handle_staff_login():
     # TODO(multi-tenant): bind staff sessions to a tenant once backoffice URLs move under /bar/<tenant_slug>.
     if request.method == "GET" and is_staff_authenticated():
+        if session.get("bar_role") == "master_admin":
+            return redirect(url_for("master_admin_page"))
         return redirect(url_for("dashboard"))
 
     error = None
@@ -5543,6 +5648,8 @@ def handle_staff_login():
         user = authenticate_staff_user(username, password)
         if user:
             begin_staff_session(user)
+            if user["role"] == "master_admin":
+                return redirect(url_for("master_admin_page"))
             return redirect(url_for("dashboard"))
         error = "Usuario ou senha invalidos."
     return render_template(
@@ -5570,6 +5677,53 @@ app.add_url_rule(f"/{INTERNAL_ACCESS_PATH}", "staff_access", staff_access, metho
 def logout():
     session.clear()
     return redirect(url_for("index"))
+
+
+@app.get("/admin/master")
+@login_required
+@role_required("master_admin")
+def master_admin_page():
+    return render_template(
+        "master_admin.html",
+        tenants=fetch_tenants(),
+        status_options=TENANT_STATUS_OPTIONS,
+        plan_options=TENANT_PLAN_OPTIONS,
+        current_user=get_current_user(),
+        message=request.args.get("message"),
+        error=request.args.get("error"),
+    )
+
+
+@app.post("/admin/master/tenants")
+@login_required
+@role_required("master_admin")
+def create_master_tenant():
+    try:
+        message = create_tenant_from_form(request.form)
+        get_db().commit()
+        return build_master_admin_redirect(message=message)
+    except IntegrityError:
+        get_db().rollback()
+        return build_master_admin_redirect(error="Ja existe um tenant com esse slug.")
+    except ValueError as error:
+        get_db().rollback()
+        return build_master_admin_redirect(error=str(error))
+
+
+@app.post("/admin/master/tenants/<int:tenant_id>/update")
+@login_required
+@role_required("master_admin")
+def update_master_tenant(tenant_id: int):
+    try:
+        message = update_tenant_from_form(tenant_id, request.form)
+        get_db().commit()
+        return build_master_admin_redirect(message=message)
+    except LookupError:
+        get_db().rollback()
+        return build_master_admin_redirect(error="Tenant nao encontrado.")
+    except ValueError as error:
+        get_db().rollback()
+        return build_master_admin_redirect(error=str(error))
 
 
 @app.get("/painel")
