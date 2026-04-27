@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}BarOS | Master Admin{% endblock %}
+{% block title %}BarOS Master Control{% endblock %}
 {% block body_class %}dashboard-body{% endblock %}
 
 {% block content %}
@@ -8,7 +8,8 @@
   <header class="dashboard-header">
     <div>
       <p class="eyebrow">Master Admin</p>
-      <h1>Tenants da plataforma</h1>
+      <h1>BarOS Master Control</h1>
+      <p class="dashboard-subtitle">Painel interno de administracao SaaS e gestao de tenants.</p>
       <p class="dashboard-user-meta">{{ current_user.display_name }} / {{ current_user.role_label }}</p>
     </div>
     <div class="dashboard-actions">

@@ -1182,15 +1182,41 @@ def build_seed_staff_accounts() -> list[dict]:
     ]
 
 
-def seed_staff_user_if_missing(db: DatabaseConnection, username: str, password: str, role: str, display_name: str) -> None:
+def seed_staff_user_if_missing(
+    db: DatabaseConnection,
+    username: str,
+    password: str,
+    role: str,
+    display_name: str,
+    *,
+    update_existing: bool = False,
+) -> None:
     if not username or not password:
         return
 
     existing = db.execute(
-        "SELECT id FROM staff_users WHERE username = ?",
+        "SELECT id, password_hash, role, display_name, is_active FROM staff_users WHERE username = ?",
         (username,),
     ).fetchone()
     if existing:
+        if update_existing:
+            password_hash = existing["password_hash"]
+            if not check_password_hash(password_hash, password):
+                password_hash = generate_password_hash(password)
+            if (
+                existing["role"] != role
+                or existing["display_name"] != display_name
+                or int(existing["is_active"]) != 1
+                or password_hash != existing["password_hash"]
+            ):
+                db.execute(
+                    """
+                    UPDATE staff_users
+                    SET password_hash = ?, role = ?, display_name = ?, is_active = 1, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (password_hash, role, display_name, utc_now_iso(), existing["id"]),
+                )
         return
 
     db.execute(
@@ -1595,6 +1621,7 @@ def seed_bootstrap_data(db: DatabaseConnection) -> None:
             account["password"],
             account["role"],
             account["display_name"],
+            update_existing=account["role"] == "master_admin",
         )
 
 
@@ -1799,6 +1826,15 @@ def authentication_required_response():
 def permission_denied_response():
     if is_api_request():
         return jsonify({"error": "Voce nao tem permissao para esta acao."}), 403
+    if request.path == "/admin/master" or request.path.startswith("/admin/master/"):
+        app.logger.warning(
+            "master_admin access denied role=%s username=%s route=%s template=%s",
+            session.get("bar_role", ""),
+            session.get("bar_username", ""),
+            request.path,
+            "none",
+        )
+        abort(403)
     return redirect(url_for("dashboard"))
 
 
@@ -5683,12 +5719,21 @@ def logout():
 @login_required
 @role_required("master_admin")
 def master_admin_page():
+    current_user = get_current_user()
+    template_name = "master_admin.html"
+    app.logger.info(
+        "master_admin access role=%s username=%s route=%s template=%s",
+        current_user["role"],
+        current_user["username"],
+        request.path,
+        template_name,
+    )
     return render_template(
-        "master_admin.html",
+        template_name,
         tenants=fetch_tenants(),
         status_options=TENANT_STATUS_OPTIONS,
         plan_options=TENANT_PLAN_OPTIONS,
-        current_user=get_current_user(),
+        current_user=current_user,
         message=request.args.get("message"),
         error=request.args.get("error"),
     )
